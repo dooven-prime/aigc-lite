@@ -141,11 +141,6 @@ class MCPServerConfigRequest(BaseModel):
         return sorted(set(value))
 
 
-class TenantCreateRequest(BaseModel):
-    id: str | None = Field(default=None, min_length=1, max_length=100)
-    name: str = Field(min_length=1, max_length=100)
-
-
 class UserCreateRequest(RegisterRequest):
     role: str = Field(default="member", pattern="^(member|admin)$")
 
@@ -610,28 +605,24 @@ async def audit(limit: int = 100, user: dict = Depends(current_user)) -> list[di
 
 
 @app.get("/api/admin/tenants")
-async def tenants(_user: dict = Depends(current_admin_user)) -> list[dict]:
-    return get_repository().list_tenants()
-
-
-@app.post("/api/admin/tenants")
-async def create_tenant(request: TenantCreateRequest, _user: dict = Depends(current_admin_user)) -> dict:
-    return get_repository().create_tenant(request.name, request.id)
+async def tenants(user: dict = Depends(current_admin_user)) -> list[dict]:
+    tenant = get_repository().get_tenant(user["tenant_id"])
+    return [tenant] if tenant is not None else []
 
 
 @app.get("/api/admin/tenants/{tenant_id}/users")
-async def tenant_users(tenant_id: str, _user: dict = Depends(current_admin_user)) -> list[dict]:
-    if not get_repository().get_tenant(tenant_id):
+async def tenant_users(tenant_id: str, user: dict = Depends(current_admin_user)) -> list[dict]:
+    if tenant_id != user["tenant_id"] or not get_repository().get_tenant(tenant_id):
         raise HTTPException(status_code=404, detail="Tenant not found")
     return get_repository().list_users(tenant_id)
 
 
 @app.post("/api/admin/tenants/{tenant_id}/users")
 async def create_tenant_user(
-    tenant_id: str, request: UserCreateRequest, _user: dict = Depends(current_admin_user)
+    tenant_id: str, request: UserCreateRequest, user: dict = Depends(current_admin_user)
 ) -> dict:
     repository = get_repository()
-    if not repository.get_tenant(tenant_id):
+    if tenant_id != user["tenant_id"] or not repository.get_tenant(tenant_id):
         raise HTTPException(status_code=404, detail="Tenant not found")
     if repository.get_user_by_email(request.email):
         raise HTTPException(status_code=409, detail="Email is already registered")

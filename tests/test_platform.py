@@ -88,4 +88,21 @@ def test_registration_and_admin_model_api(tmp_path, monkeypatch) -> None:
         assert client.delete(
             f"/api/mcp-servers/{mcp_server.json()['id']}", headers=headers
         ).json() == {"deleted": True}
-        assert client.get("/api/admin/tenants", headers=headers).status_code == 200
+        tenants = client.get("/api/admin/tenants", headers=headers)
+        assert tenants.status_code == 200
+        assert [item["id"] for item in tenants.json()] == [
+            registration.json()["tenant_id"]
+        ]
+        assert client.get(
+            "/api/admin/tenants/another-workspace/users", headers=headers
+        ).status_code == 404
+        assert client.post(
+            "/api/admin/tenants/another-workspace/users",
+            headers=headers,
+            json={
+                "email": "member@example.com",
+                "password": "long-enough-password",
+                "name": "Member",
+                "role": "member",
+            },
+        ).status_code == 404

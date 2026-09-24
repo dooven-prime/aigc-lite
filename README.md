@@ -266,7 +266,9 @@ pytest
 ruff check app tests
 ```
 
-核心设计参考了 Goku-AIOS 的环境变量和自托管部署方式、租户治理思路，以及 DeepSeek Harness 和本地 `mcp` 项目的插件化、显式扩展点、MCP session manager 和 Streamable HTTP transport。当前知识检索使用 SQLite 中保存的分块哈希向量，Repository 可切换 PostgreSQL，后续可把 embedding provider 替换为真实模型而不改变 API 使用方式。
+当前知识检索使用 SQLite 中保存的分块哈希向量，Repository 可切换 PostgreSQL；后续可把
+embedding provider 替换为真实模型而不改变 API 使用方式。核心坚持显式扩展点、可替换 capability
+和官方 MCP transport，不把组织专属连接器带入公开运行时。
 
 ## 许可证
 

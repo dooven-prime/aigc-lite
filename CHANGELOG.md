@@ -15,6 +15,8 @@ roadmap items remain in `docs/DESIGN.md`.
 - Added pluggable local Tool Execution Backends: cooperative async execution,
   soft-cancelled threads, and disposable spawned processes with hard timeout
   termination and execution/cancellation metadata.
+- Restricted workspace administrators to their own tenant and removed the
+  unsupported cross-workspace tenant creation surface.
 
 ## 0.2.0 - 2026-09-24
 

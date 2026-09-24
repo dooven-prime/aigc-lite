@@ -24,7 +24,7 @@ Artifact、Citation 和 Decision/Memory。
 
 以下能力不进入公开核心：
 
-- 企业专属 MySQL、GitLab、微信、OSS、风控和内部平台连接器；
+- 组织专属数据库、消息平台、对象存储和内部系统连接器；
 - 默认开放 Shell、文件系统、浏览器、代码执行等高风险工具；
 - 把 Redis、Neo4j、Qdrant、Dask 设为基础依赖；
 - 在没有真实兼容性测试前宣称支持某个具体模型厂商；
@@ -51,8 +51,8 @@ Server、审计、用量和 Web UI。现有测试、Ruff 和前端构建均可�
    上限、单工具 timeout 与持久化配置；后续需增加更细的调用预算和取消协议；
 4. 入站 MCP 已按调用方 workspace/scope 投影 Catalog，并记录独立 Run/Step；兼容用
    `AIGC_LITE_MCP_API_KEY` 仍固定映射 `default` workspace，不作为多租户认证方案；
-5. `admin` 实际是 workspace admin，但现有全局租户管理接口允许任意 workspace
-   admin 查看和创建其他租户；
+5. `admin` 已限定为 workspace admin，只能查看和管理所属 workspace；跨 workspace
+   治理等待独立的 platform-admin 身份与 scope，不复用 workspace 角色；
 6. 已拆分登录签名密钥与凭据 master key，并使用版本化认证密文；后续仍需增加
    master key 轮换和批量重加密流程；
 7. Schema 通过应用启动时执行 DDL，没有版本化迁移，也没有 SQLite/PostgreSQL
@@ -63,7 +63,7 @@ Server、审计、用量和 Web UI。现有测试、Ruff 和前端构建均可�
     会快速放大耦合。
 
 因此下一阶段的重点是执行记忆、工具治理和可搜索产物，而不是扩张 Gateway 功能或
-迁移旧项目的更多模块。
+搬运其他业务系统的更多模块。
 
 ## 3. 目标架构
 
@@ -94,7 +94,7 @@ User / API / MCP
 | Port | Provider、Credential、Repository、Tool、EventSink 接口 | 厂商特有实现 |
 | Adapter | OpenAI-compatible 上游、SQLite/PostgreSQL、Env Secret、MCP transport | 跨 adapter 的业务决策 |
 
-借鉴 `deepseek-harness` 的 capability seam，但避免过早拆成多个发行包。每个可替换能力
+采用 capability seam，但避免过早拆成多个发行包。每个可替换能力
 先在代码层区分三个角色：
 
 - Service Definition：核心拥有的最小端口和词汇；
@@ -341,10 +341,10 @@ POST /api/v1/agent-runs/{run_id}/cancel
 
 发布前必须满足：
 
-1. 将旧 `aigc` 明确定义为私有来源边界：不得复制其 `config.yaml`、凭据或公司专属地址，
-   迁移代码前执行 secret scan；
+1. 任何外部或私有来源都视为不可信输入：不得复制本地配置、凭据或组织专属地址，
+   引入代码前执行 secret scan；
 2. `aigc-lite` 和示例中只出现不可用占位符，CI 增加 secret scan；
-3. 修复 platform/workspace admin 越权边界；
+3. 持续以负向测试保护 platform/workspace admin 权限边界；
 4. 生产模式禁止默认 `auth_secret`、默认开放注册和无认证 MCP；
 5. provider/MCP URL 做 scheme、host、DNS/IP 与重定向校验，默认阻止云 metadata、
    loopback 和私网 SSRF；本地开发通过显式 allowlist 放行 Ollama/vLLM；
@@ -358,7 +358,7 @@ POST /api/v1/agent-runs/{run_id}/cancel
 
 ### P0：发布基线
 
-- 固化旧 `aigc` 的私有边界，保证配置、凭据和公司连接器不进入公开仓库；
+- 固化公开仓库边界，保证本地配置、凭据和组织专属连接器不进入版本控制；
 - 冻结 `aigc-lite` 当前可运行基线，建立首个 Git commit/tag；
 - 统一 Python、API、前端版本号；
 - 增加 secret scan、dependency audit 和最小安全说明。
@@ -408,7 +408,7 @@ POST /api/v1/agent-runs/{run_id}/cancel
 
 - 将 knowledge/embedding/vector store 改成独立 capability seam；
 - 定义 Python entry point 插件发现和 manifest；
-- 选择性迁移旧项目连接器到独立扩展仓库；
+- 有真实需求时才将组织专属连接器实现为独立扩展；
 - 只有出现真实需求后再增加 workflow、后台 job 或分布式队列。
 
 ## 9. 下一轮实现顺序

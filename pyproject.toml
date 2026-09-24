@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aigc-lite"
 version = "0.3.0-dev.0"
-description = "A small, self-hosted AI gateway and agent runtime."
+description = "A self-hosted AI workspace and Agent/MCP runtime with searchable execution memory."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -27,6 +27,11 @@ postgres = ["psycopg[binary]>=3.2"]
 
 [project.scripts]
 aigc-lite = "app.main:run"
+
+[project.urls]
+Homepage = "https://github.com/dooven-prime/aigc-lite"
+Repository = "https://github.com/dooven-prime/aigc-lite"
+Issues = "https://github.com/dooven-prime/aigc-lite/issues"
 
 [tool.setuptools.packages.find]
 include = ["app*"]

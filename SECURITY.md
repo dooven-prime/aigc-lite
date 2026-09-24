@@ -2,9 +2,10 @@
 
 ## Reporting
 
-Please report suspected vulnerabilities privately to the repository maintainer
-before opening a public issue. Include the affected version, reproduction steps,
-and whether credentials or cross-workspace data may be exposed.
+Please use GitHub private vulnerability reporting in the repository Security tab.
+Do not include exploit details, credentials, or tenant data in a public issue.
+Include the affected version, reproduction steps, and whether credentials or
+cross-workspace data may be exposed.
 
 ## Deployment baseline
 
