@@ -1,0 +1,1 @@
+"""aigc-lite application package."""

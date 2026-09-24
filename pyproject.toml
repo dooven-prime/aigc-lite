@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aigc-lite"
+version = "0.2.0"
+description = "A small, self-hosted AI gateway and agent runtime."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "alembic>=1.14",
+  "fastapi>=0.115",
+  "httpx>=0.27",
+  "mcp>=2.0,<3",
+  "cryptography>=43",
+  "python-multipart>=0.0.9",
+  "python-dotenv>=1.0",
+  "sqlalchemy>=2.0",
+  "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.8"]
+postgres = ["psycopg[binary]>=3.2"]
+
+[project.scripts]
+aigc-lite = "app.main:run"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = [
+  "static/*",
+  "alembic.ini",
+  "alembic/*.py",
+  "alembic/*.mako",
+  "alembic/versions/*.py",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008", "E501"]

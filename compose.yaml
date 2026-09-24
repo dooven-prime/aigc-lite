@@ -1,0 +1,9 @@
+services:
+  aigc-lite:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    environment:
+      AIGC_LITE_HOST: 0.0.0.0
+    restart: unless-stopped
