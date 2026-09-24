@@ -5,9 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from alembic.config import Config
-
 from alembic import command
+from alembic.config import Config
 
 _ROOT = Path(__file__).resolve().parent
 
