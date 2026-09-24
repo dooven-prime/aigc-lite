@@ -12,6 +12,9 @@ roadmap items remain in `docs/DESIGN.md`.
 - Added Agent model-turn and tool-call budgets, whole-run wall-clock limits,
   stable `limit_reached` outcomes, and cancellation propagation through model
   and remote MCP waits with an explicit active-run cancellation endpoint.
+- Added pluggable local Tool Execution Backends: cooperative async execution,
+  soft-cancelled threads, and disposable spawned processes with hard timeout
+  termination and execution/cancellation metadata.
 
 ## 0.2.0 - 2026-09-24
 

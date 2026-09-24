@@ -129,8 +129,8 @@ Run ID。
 
 主动取消注册表目前是进程内能力，单进程自托管可直接使用；多 worker/多节点部署需要把请求路由
 到持有该 Run 的 worker，后续后台执行切片会改为持久化调度句柄。异步模型和远程 MCP 调用可以
-被取消；已经进入工作线程的同步本地 Python 函数无法由 asyncio 强制终止，因此有副作用的工具
-仍必须自身支持幂等和协作式取消。
+被取消。本地 Python 工具可选择 `async`、`thread` 或 `process` backend；线程模式只能停止等待，
+进程模式则可在超时或取消时终止独立 worker。
 
 生产环境建议设置 `AIGC_LITE_API_KEY`，并在反向代理层配置 TLS、限流和日志脱敏。
 
@@ -205,7 +205,7 @@ POST /api/credentials
 运行时在每次建立连接时按当前 workspace 解析引用，不缓存明文。替换操作会写入新的
 `enc:v1` 密文并恢复可用状态；删除接口执行可审计的撤销，已撤销或跨 workspace 的引用统一表现为 `credential_not_configured`。
 
-配置按 workspace 隔离，每次 Agent Run 发现工具时重新读取，因此禁用、凭据轮换和配置更新不要求重启。凭据值只在建立远程连接时解析且不缓存。`timeout_seconds` 同时限制发现/调用所使用的 HTTP client 和单次工具调用；同步本地 Python 函数会移入工作线程，超时可以释放 Agent，但不能强制终止已经运行的线程，因此有不可逆副作用的本地工具仍需自身实现取消和幂等。
+配置按 workspace 隔离，每次 Agent Run 发现工具时重新读取，因此禁用、凭据轮换和配置更新不要求重启。凭据值只在建立远程连接时解析且不缓存。`timeout_seconds` 同时限制发现/调用所使用的 HTTP client 和单次工具调用。
 
 管理员可调用 `POST /api/mcp-servers/{server_id}/probe` 执行一次真实的 `tools/list` 探测。服务只持久化最新投影，不创建第二套调用日志：`healthy/unhealthy`、探测时间、延迟、工具数，以及 `auth_failed`、`timeout`、`protocol_mismatch`、`unreachable` 或 `discovery_failed` 之一；底层异常文本不会写入数据库或返回客户端。
 
@@ -219,6 +219,35 @@ def get_status() -> dict[str, str]:
     """Return the current application status."""
     return {"status": "ok"}
 ```
+
+本地 Tool Execution Backend 按函数类型选择默认模式：`async def` 使用 `async`，普通 `def`
+使用 `thread`。可以在注册时覆盖单工具超时，或显式使用可硬终止的独立进程：
+
+```python
+from app.tools import tool
+
+@tool(timeout_seconds=10)
+async def fetch_status() -> dict:
+    """Use cooperative asyncio cancellation."""
+    ...
+
+@tool(execution="thread", timeout_seconds=5)
+def parse_small_file(path: str) -> dict:
+    """Run blocking code in a thread; timeout only stops waiting."""
+    ...
+
+@tool(execution="process", timeout_seconds=30)
+def render_large_document(path: str) -> dict:
+    """Run in a disposable worker that can be terminated."""
+    ...
+```
+
+Run/Step metadata 会记录 `execution_mode` 和 `cancellation_mode`：异步是 `cooperative`，
+线程是 `soft`，进程是 `hard`。进程工具必须是可导入模块中的同步顶层函数；参数和结果应为 JSON
+兼容值，也不能依赖父进程中的可变内存状态。每次调用都会创建一个 spawn worker，因此适合需要硬
+超时边界的高风险、阻塞或 CPU 型工具，不适合大量细碎调用。`process` 只是生命周期隔离，不是安全
+沙箱：worker 仍继承服务进程的环境变量以及文件、网络和系统权限；执行不受信任代码仍需容器或
+专用 sandbox。
 
 将这个模块在 `app.main` 启动时导入后，入站 MCP `tools/list` 和 Agent 都通过同一个 Tool Catalog 发现它。`/mcp` 与 `/mcp-sse/sse` 会根据登录 Bearer token 或 tenant API key 解析 workspace 和 scope，因此只暴露当前身份允许的本地及远程 MCP tool。`AIGC_LITE_MCP_API_KEY` 仅作为兼容模式保留，它固定映射到 `default` workspace；多 workspace 部署应使用用户 token 或 tenant API key。公开核心不自动启用文件系统、Shell、网络爬取等高风险工具，扩展应由部署方显式注册。
 

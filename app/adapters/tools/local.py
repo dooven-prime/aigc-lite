@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 import json
 from typing import Any
 
+from ...adapters.tools.execution import (
+    ToolExecutionBackends,
+    default_execution_backends,
+)
 from ...config import settings
 from ...core.contracts import ToolProviderResult, ToolSource, ToolSpec
 from ...core.errors import ErrorCode
@@ -16,6 +18,11 @@ from ...tools import TOOLS, _function_schema, registration
 class LocalToolProvider:
     provider_id = "local"
     is_remote = False
+
+    def __init__(
+        self, execution_backends: ToolExecutionBackends | None = None
+    ) -> None:
+        self._execution_backends = execution_backends or default_execution_backends
 
     async def list_tools(self) -> list[ToolSpec]:
         values = []
@@ -32,7 +39,11 @@ class LocalToolProvider:
                     provider_id=self.provider_id,
                     risk=policy["risk"],
                     required_scopes=policy["required_scopes"],
-                    timeout_seconds=settings.default_tool_timeout_seconds,
+                    timeout_seconds=(
+                        policy["timeout_seconds"]
+                        or settings.default_tool_timeout_seconds
+                    ),
+                    execution_mode=policy["execution_mode"],
                 )
             )
         return values
@@ -46,17 +57,20 @@ class LocalToolProvider:
                 content=json.dumps({"error": ErrorCode.TOOL_NOT_AVAILABLE.value}),
                 failed=True,
             )
-        function, _policy = registered
+        function, policy = registered
         try:
-            if inspect.iscoroutinefunction(function):
-                result = await function(**arguments)
-            else:
-                result = await asyncio.to_thread(function, **arguments)
-            return ToolProviderResult(
-                content=json.dumps(result, ensure_ascii=False, default=str)
+            return await self._execution_backends.execute(
+                policy["execution_mode"], function, arguments
             )
         except Exception:  # noqa: BLE001 - the model receives a stable failure only
             return ToolProviderResult(
                 content=json.dumps({"error": ErrorCode.TOOL_EXECUTION_FAILED.value}),
                 failed=True,
+                metadata={
+                    "execution_mode": policy["execution_mode"].value,
+                    "cancellation_mode": policy[
+                        "execution_mode"
+                    ].cancellation_mode,
+                    "error_code": ErrorCode.TOOL_EXECUTION_FAILED.value,
+                },
             )

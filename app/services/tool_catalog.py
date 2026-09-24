@@ -127,12 +127,20 @@ class ToolSession:
 
     @staticmethod
     def _metadata(spec: ToolSpec) -> dict:
-        return {
+        metadata = {
             "source": spec.source.value,
             "provider_id": spec.provider_id,
             "native_name": spec.native_name,
             "risk": spec.risk.value,
         }
+        if spec.execution_mode is not None:
+            metadata.update(
+                {
+                    "execution_mode": spec.execution_mode.value,
+                    "cancellation_mode": spec.execution_mode.cancellation_mode,
+                }
+            )
+        return metadata
 
 
 class ToolCatalog:

@@ -244,8 +244,8 @@ Event: run.started | model.delta | tool.started | tool.completed | run.completed
 取消传播。预算耗尽统一写入 `limit_reached`，主动取消写入 `cancelled`；模型轮次耗尽不再以
 普通文本冒充成功结果。`POST /api/runs/{run_id}/cancel` 使用进程内 active-run handle，适用于
 当前单进程部署；多 worker/后台执行时必须替换为带 owner/lease 的持久化调度句柄。同步本地
-Python 工具进入工作线程后无法强杀，只能要求工具实现幂等和协作式取消。token 预算仍留待模型
-调用契约能够可靠提供 usage/finish reason 后实现。
+Python 工具默认进入工作线程，无法强杀；需要硬终止的工具可显式选择一次一进程的 process
+backend。token 预算仍留待模型调用契约能够可靠提供 usage/finish reason 后实现。
 
 模型的 `finish_reason`、Run 状态和工具结果状态是不同字段，不能互相代替。
 
@@ -255,11 +255,17 @@ Python 工具进入工作线程后无法强杀，只能要求工具实现幂等�
 
 ```text
 name, description, input_schema, source, workspace_id,
-risk_level, side_effects, required_scopes, timeout_ms, enabled
+risk_level, side_effects, required_scopes, timeout_ms, enabled,
+execution_mode, cancellation_mode
 ```
 
 调用路径固定为：发现 -> policy filter -> 参数校验 -> 执行 -> 结果截断/结构化 -> 审计。
 Agent 只能看到当前上下文允许的工具，而不是整个进程的注册表。
+
+本地执行固定经过 `ToolExecutionBackend` port：异步函数使用协作取消，普通同步函数默认使用
+thread 软取消，显式 `execution=process` 的同步顶层函数使用 spawn worker，并在超时或取消时执行
+terminate/kill。进程隔离提供可回收的生命周期，不视为权限 sandbox；不受信任代码必须进入容器
+或外部 sandbox service。执行方式和取消保证写入 Tool Step metadata。
 
 MCP 有两个方向：
 
@@ -420,7 +426,8 @@ POST /api/v1/agent-runs/{run_id}/cancel
    独立版本化 master key、统一账本/审计脱敏、Alembic migration、带稳定错误码的
    MCP 探测状态，以及 write-only `encrypted-db://credential/UUID` Credential Provider；
    Agent 模型轮次、工具次数和墙钟预算，稳定 `limit_reached` 状态，以及模型/MCP 等待链的
-   取消传播与 active-run 取消接口；
+   取消传播与 active-run 取消接口；本地 Tool Execution Backend 的 async/thread/process
+   三种隔离模式、单工具超时和执行 metadata；
 7. 增加 Artifact/Citation 载体，并接入统一搜索；
 8. 将 SQLite 词法检索升级为 FTS，可选接入 embedding provider；
 9. 最后迁移 UI，让 UI 展示 Run、步骤、来源和产物。

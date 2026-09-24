@@ -49,6 +49,22 @@ class ToolRisk(StrEnum):
     HIGH = "high"
 
 
+class ToolExecutionMode(StrEnum):
+    """Isolation used to execute one local Python tool."""
+
+    ASYNC = "async"
+    THREAD = "thread"
+    PROCESS = "process"
+
+    @property
+    def cancellation_mode(self) -> str:
+        return {
+            self.ASYNC: "cooperative",
+            self.THREAD: "soft",
+            self.PROCESS: "hard",
+        }[self]
+
+
 @dataclass(frozen=True, slots=True)
 class RequestContext:
     """Authenticated identity and trace information for one operation."""
@@ -116,6 +132,7 @@ class ToolSpec:
     required_scopes: frozenset[str] = field(default_factory=frozenset)
     enabled: bool = True
     timeout_seconds: float = 30.0
+    execution_mode: ToolExecutionMode | None = None
 
     def model_schema(self) -> dict:
         return {

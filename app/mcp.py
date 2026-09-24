@@ -84,6 +84,16 @@ class CatalogMCPServer(MCPServer if MCPServer is not None else object):
                             "source": spec.source.value,
                             "provider_id": spec.provider_id,
                             "risk": spec.risk.value,
+                            **(
+                                {
+                                    "execution_mode": spec.execution_mode.value,
+                                    "cancellation_mode": (
+                                        spec.execution_mode.cancellation_mode
+                                    ),
+                                }
+                                if spec.execution_mode is not None
+                                else {}
+                            ),
                         }
                     },
                 )
