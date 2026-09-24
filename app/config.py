@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -28,6 +29,12 @@ class Settings:
     llm_timeout: float = float(os.getenv("AIGC_LITE_LLM_TIMEOUT", "120"))
     data_dir: str = os.getenv("AIGC_LITE_DATA_DIR", "data")
     max_agent_steps: int = int(os.getenv("AIGC_LITE_MAX_AGENT_STEPS", "8"))
+    max_agent_tool_calls: int = int(
+        os.getenv("AIGC_LITE_MAX_AGENT_TOOL_CALLS", "16")
+    )
+    max_agent_run_seconds: float = float(
+        os.getenv("AIGC_LITE_MAX_AGENT_RUN_SECONDS", "300")
+    )
     max_tool_result_chars: int = int(os.getenv("AIGC_LITE_MAX_TOOL_RESULT_CHARS", "100000"))
     max_tool_record_chars: int = int(os.getenv("AIGC_LITE_MAX_TOOL_RECORD_CHARS", "50000"))
     default_tool_timeout_seconds: float = float(
@@ -55,6 +62,16 @@ class Settings:
     )
     mcp_allowed_origins: str = os.getenv("AIGC_LITE_MCP_ALLOWED_ORIGINS", "")
     mcp_servers_json: str = os.getenv("AIGC_LITE_MCP_SERVERS_JSON", "")
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.max_agent_steps <= 32:
+            raise ValueError("AIGC_LITE_MAX_AGENT_STEPS must be between 1 and 32")
+        if not 0 <= self.max_agent_tool_calls <= 256:
+            raise ValueError(
+                "AIGC_LITE_MAX_AGENT_TOOL_CALLS must be between 0 and 256"
+            )
+        if not isfinite(self.max_agent_run_seconds) or self.max_agent_run_seconds <= 0:
+            raise ValueError("AIGC_LITE_MAX_AGENT_RUN_SECONDS must be positive")
 
     @property
     def database_path(self) -> Path:

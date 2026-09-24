@@ -23,6 +23,7 @@ def test_current_http_surface_remains_available() -> None:
         "/api/chat/stream",
         "/api/runs",
         "/api/runs/{run_id}",
+        "/api/runs/{run_id}/cancel",
         "/api/search",
         "/api/knowledge/documents",
         "/api/knowledge/upload",

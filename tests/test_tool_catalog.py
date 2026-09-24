@@ -154,3 +154,55 @@ def test_catalog_projects_tool_timeout_as_stable_failure() -> None:
     assert result.failed
     assert json.loads(result.content) == {"error": "tool_timeout"}
     assert result.metadata["error_code"] == "tool_timeout"
+
+
+class CancellableProvider:
+    provider_id = "cancellable"
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def list_tools(self) -> list[ToolSpec]:
+        return [
+            ToolSpec(
+                name="cancellable__wait",
+                native_name="wait",
+                description="Wait until cancelled.",
+                input_schema={"type": "object"},
+                source=ToolSource.MCP,
+                provider_id=self.provider_id,
+                timeout_seconds=30,
+            )
+        ]
+
+    async def call_tool(
+        self, native_name: str, arguments: dict[str, Any]
+    ) -> ToolProviderResult:
+        self.started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
+def test_catalog_propagates_cancellation_to_remote_provider() -> None:
+    async def run() -> CancellableProvider:
+        provider = CancellableProvider()
+        session = await ToolCatalog([provider]).open(
+            RequestContext(request_id="r1", workspace_id="workspace-a")
+        )
+        task = asyncio.create_task(session.invoke("cancellable__wait", "{}"))
+        await provider.started.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("tool invocation cancellation was swallowed")
+        return provider
+
+    provider = asyncio.run(run())
+    assert provider.cancelled.is_set()

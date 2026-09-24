@@ -240,6 +240,13 @@ Event: run.started | model.delta | tool.started | tool.completed | run.completed
 - 最大输入/输出 token；
 - 请求取消传播。
 
+当前实现已经覆盖模型轮次、工具调用数、总墙钟、单工具超时/结果长度和 asyncio
+取消传播。预算耗尽统一写入 `limit_reached`，主动取消写入 `cancelled`；模型轮次耗尽不再以
+普通文本冒充成功结果。`POST /api/runs/{run_id}/cancel` 使用进程内 active-run handle，适用于
+当前单进程部署；多 worker/后台执行时必须替换为带 owner/lease 的持久化调度句柄。同步本地
+Python 工具进入工作线程后无法强杀，只能要求工具实现幂等和协作式取消。token 预算仍留待模型
+调用契约能够可靠提供 usage/finish reason 后实现。
+
 模型的 `finish_reason`、Run 状态和工具结果状态是不同字段，不能互相代替。
 
 ### 4.6 Tool Catalog 与 MCP
@@ -412,7 +419,8 @@ POST /api/v1/agent-runs/{run_id}/cancel
    Provider、动态配置刷新、单工具 timeout、入站 MCP 的 workspace Catalog 投影、
    独立版本化 master key、统一账本/审计脱敏、Alembic migration、带稳定错误码的
    MCP 探测状态，以及 write-only `encrypted-db://credential/UUID` Credential Provider；
-   下一步补充更细的工具调用预算和取消传播；
+   Agent 模型轮次、工具次数和墙钟预算，稳定 `limit_reached` 状态，以及模型/MCP 等待链的
+   取消传播与 active-run 取消接口；
 7. 增加 Artifact/Citation 载体，并接入统一搜索；
 8. 将 SQLite 词法检索升级为 FTS，可选接入 embedding provider；
 9. 最后迁移 UI，让 UI 展示 Run、步骤、来源和产物。

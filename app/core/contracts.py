@@ -35,6 +35,7 @@ class StepStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ToolSource(StrEnum):

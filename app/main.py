@@ -28,11 +28,14 @@ from .auth import (
 from .config import settings
 from .core.contracts import ChatCommand, RequestContext
 from .core.errors import (
+    AgentLimitError,
+    AgentWallTimeLimitError,
     ApplicationError,
     LLMError,
     ProviderNotConfiguredError,
     ResourceConflictError,
     ResourceNotFoundError,
+    RunNotActiveError,
 )
 from .database import (
     create_document,
@@ -267,8 +270,12 @@ async def validation_error_handler(
 async def application_error_handler(_request: Request, exc: ApplicationError) -> JSONResponse:
     if isinstance(exc, ResourceNotFoundError):
         status_code = 404
-    elif isinstance(exc, ResourceConflictError):
+    elif isinstance(exc, (ResourceConflictError, RunNotActiveError)):
         status_code = 409
+    elif isinstance(exc, AgentWallTimeLimitError):
+        status_code = 504
+    elif isinstance(exc, AgentLimitError):
+        status_code = 429
     elif isinstance(exc, ProviderNotConfiguredError):
         status_code = 503
     elif isinstance(exc, LLMError):
@@ -450,6 +457,16 @@ async def run_detail(
     tenant: Tenant = Depends(current_tenant),
 ) -> dict:
     return memory_service.get_run(request_context(http_request, tenant), run_id)
+
+
+@app.post("/api/runs/{run_id}/cancel", status_code=202)
+async def cancel_run(
+    run_id: str,
+    http_request: Request,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict[str, str | bool]:
+    gateway_service.cancel_run(request_context(http_request, tenant), run_id)
+    return {"run_id": run_id, "cancel_requested": True}
 
 
 @app.get("/api/search")

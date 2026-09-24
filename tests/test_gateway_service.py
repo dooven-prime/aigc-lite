@@ -12,7 +12,13 @@ from app.core.contracts import (
     ToolSource,
     ToolSpec,
 )
-from app.core.errors import ErrorCode, ResourceNotFoundError, UpstreamRequestError
+from app.core.errors import (
+    AgentToolCallLimitError,
+    AgentWallTimeLimitError,
+    ErrorCode,
+    ResourceNotFoundError,
+    UpstreamRequestError,
+)
 from app.repository import SQLiteRepository
 from app.services.gateway import GatewayService
 from app.services.tool_catalog import ToolCatalog
@@ -48,6 +54,7 @@ def test_gateway_chat_coordinates_agent_usage_and_persistence(tmp_path) -> None:
         step_callback,
         available_tools,
         tool_invoker,
+        max_tool_calls,
     ) -> str:
         calls.append(
             {
@@ -61,6 +68,7 @@ def test_gateway_chat_coordinates_agent_usage_and_persistence(tmp_path) -> None:
                 "step_callback": step_callback,
                 "available_tools": available_tools,
                 "tool_invoker": tool_invoker,
+                "max_tool_calls": max_tool_calls,
             }
         )
         usage_callback({"prompt_tokens": 4, "completion_tokens": 2})
@@ -92,6 +100,7 @@ def test_gateway_chat_coordinates_agent_usage_and_persistence(tmp_path) -> None:
     assert result.run_id
     assert calls[0]["tenant_id"] == "workspace-a"
     assert calls[0]["history"] == []
+    assert calls[0]["max_tool_calls"] > 0
     assert usage_records[0]["workspace_id"] == "workspace-a"
     messages = repository.get_session("workspace-a", result.session_id)["messages"]
     assert [(item["role"], item["content"]) for item in messages] == [
@@ -151,6 +160,91 @@ def test_gateway_records_failed_run_without_persisting_secret_error_text(tmp_pat
     detail = repository.get_run("workspace-a", run["id"])
     assert detail["steps"][0]["metadata"]["error_code"] == "upstream_request_failed"
     assert "private diagnostic" not in str(detail)
+
+
+def test_gateway_records_wall_time_budget_as_limit_reached(
+    tmp_path, monkeypatch
+) -> None:
+    repository = SQLiteRepository(tmp_path / "wall-time.db")
+    repository.init()
+
+    async def slow_agent(*_args, **_kwargs) -> str:
+        await asyncio.sleep(1)
+        return "unreachable"
+
+    monkeypatch.setattr("app.services.gateway.settings.max_agent_run_seconds", 0.01)
+    service = GatewayService(
+        repository_provider=lambda: repository,
+        agent_runner=slow_agent,
+    )
+
+    with pytest.raises(AgentWallTimeLimitError):
+        asyncio.run(service.chat(ChatCommand(prompt="wait"), _context()))
+
+    run = repository.list_runs("workspace-a")[0]
+    detail = repository.get_run("workspace-a", run["id"])
+    assert run["status"] == "limit_reached"
+    assert run["error_code"] == "agent_wall_time_limit_reached"
+    assert detail["steps"][-1]["metadata"]["budget"] == "wall_time_seconds"
+
+
+def test_gateway_records_agent_budget_error_as_limit_reached(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "tool-budget.db")
+    repository.init()
+
+    async def limited_agent(*_args, **_kwargs) -> str:
+        raise AgentToolCallLimitError(3)
+
+    service = GatewayService(
+        repository_provider=lambda: repository,
+        agent_runner=limited_agent,
+    )
+
+    with pytest.raises(AgentToolCallLimitError):
+        asyncio.run(service.chat(ChatCommand(prompt="use tools"), _context()))
+
+    run = repository.list_runs("workspace-a")[0]
+    detail = repository.get_run("workspace-a", run["id"])
+    assert run["status"] == "limit_reached"
+    assert run["error_code"] == "agent_tool_call_limit_reached"
+    assert detail["steps"][-1]["metadata"]["limit"] == 3
+
+
+def test_gateway_explicit_cancel_propagates_and_records_cancelled_run(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "cancel.db")
+    repository.init()
+    started = asyncio.Event()
+    propagated = asyncio.Event()
+
+    async def waiting_agent(*_args, **_kwargs) -> str:
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            propagated.set()
+            raise
+
+    service = GatewayService(
+        repository_provider=lambda: repository,
+        agent_runner=waiting_agent,
+    )
+
+    async def run() -> dict:
+        task = asyncio.create_task(
+            service.chat(ChatCommand(prompt="wait"), _context())
+        )
+        await started.wait()
+        run_id = repository.list_runs("workspace-a")[0]["id"]
+        service.cancel_run(_context(), run_id)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert propagated.is_set()
+        return repository.get_run("workspace-a", run_id)
+
+    detail = asyncio.run(run())
+    assert detail["status"] == "cancelled"
+    assert detail["error_code"] == "agent_cancelled"
+    assert detail["steps"][-1]["status"] == "cancelled"
 
 
 def test_gateway_persists_each_model_and_tool_step_with_redaction(

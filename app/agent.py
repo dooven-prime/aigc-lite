@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 
 from .config import settings
 from .core.contracts import AgentStepRecord, StepKind, StepStatus, ToolInvocationResult
+from .core.errors import AgentModelTurnLimitError, AgentToolCallLimitError
 from .database import search_documents
 from .providers import completion
 from .redaction import safe_json_text
@@ -59,13 +60,22 @@ async def run_agent(
     step_callback: StepObserver | None = None,
     available_tools: list[dict] | None = None,
     tool_invoker: ToolInvoker | None = None,
+    max_tool_calls: int | None = None,
 ) -> str:
     """Run a bounded OpenAI-compatible tool loop."""
-    max_steps = max_steps or settings.max_agent_steps
+    max_steps = settings.max_agent_steps if max_steps is None else max_steps
+    max_tool_calls = (
+        settings.max_agent_tool_calls if max_tool_calls is None else max_tool_calls
+    )
     if max_steps < 1 or max_steps > 32:
         raise ValueError("max_steps must be between 1 and 32")
+    if max_tool_calls < 0 or max_tool_calls > 256:
+        raise ValueError("max_tool_calls must be between 0 and 256")
     messages = build_messages(prompt, system, history, tenant_id)
     tool_schemas = schemas() if available_tools is None else available_tools
+    if max_tool_calls == 0:
+        tool_schemas = []
+    tool_call_count = 0
     for step in range(max_steps):
         model_input = _message_input(messages)
         provider_messages = [
@@ -109,7 +119,14 @@ async def run_agent(
             )
         if not tool_calls:
             return message.get("content") or ""
+        if step == max_steps - 1:
+            # Tools were intentionally not offered on the final model turn. Do
+            # not execute an unsolicited call after the model budget is spent.
+            raise AgentModelTurnLimitError(max_steps)
         for call in tool_calls:
+            if tool_call_count >= max_tool_calls:
+                raise AgentToolCallLimitError(max_tool_calls)
+            tool_call_count += 1
             function = call.get("function", {})
             name = function.get("name", "")
             arguments = function.get("arguments", "{}")
@@ -143,6 +160,7 @@ async def run_agent(
                         output_content=invocation.ledger_output,
                         metadata={
                             "tool_call_id": call.get("id", ""),
+                            "tool_call_index": tool_call_count,
                             **invocation.metadata,
                         },
                     )
@@ -153,4 +171,4 @@ async def run_agent(
                 "content": invocation.content,
                 "_ledger_content": invocation.ledger_output,
             })
-    return "The agent reached its execution limit without producing a final answer."
+    raise AgentModelTurnLimitError(max_steps)

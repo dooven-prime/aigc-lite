@@ -8,7 +8,7 @@
 - 同步聊天和 SSE 流式聊天
 - 环境变量配置，不在代码中保存密钥
 - 独立 master key、版本化密文与严格解密错误
-- 有上限的 Agent 运行入口
+- 有模型轮次、工具调用数、墙钟时间和单工具边界的 Agent 运行入口
 - workspace-aware Tool Catalog，本地函数与远程 MCP tool 统一发现、授权和调用
 - SQLite 会话持久化和租户级数据隔离
 - 同步与流式 Agent Run/Step 执行账本，记录模型、工具、成功失败和稳定错误码
@@ -87,6 +87,7 @@ python -m app.main
 - `POST /api/chat/stream`：SSE 流式对话
 - `GET /api/runs`：列出当前租户的 Agent 运行记录
 - `GET /api/runs/{run_id}`：读取运行详情和步骤
+- `POST /api/runs/{run_id}/cancel`：取消当前进程中正在执行的 Run
 - `GET /api/search?q=...`：搜索对话、知识文档和执行步骤
 - `POST /api/knowledge/documents`：写入文本知识
 - `POST /api/knowledge/upload`：上传 `.txt`、`.md`、`.csv` 或 `.json`
@@ -107,6 +108,29 @@ curl -X POST http://127.0.0.1:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"prompt":"用三句话介绍人工智能"}'
 ```
+
+## Agent 执行边界
+
+每次同步或流式 Run 都受以下环境变量约束：
+
+```dotenv
+AIGC_LITE_MAX_AGENT_STEPS=8
+AIGC_LITE_MAX_AGENT_TOOL_CALLS=16
+AIGC_LITE_MAX_AGENT_RUN_SECONDS=300
+AIGC_LITE_DEFAULT_TOOL_TIMEOUT_SECONDS=30
+```
+
+模型轮次、工具调用数或总墙钟预算耗尽时，Run 以 `limit_reached` 结束，并分别记录
+`agent_model_turn_limit_reached`、`agent_tool_call_limit_reached` 或
+`agent_wall_time_limit_reached`；不会把限制提示伪装成成功回答。客户端断连、上游任务取消或
+`POST /api/runs/{run_id}/cancel` 会取消当前 asyncio 执行链，传播到正在等待的模型请求和远程
+MCP tool，并把 Run 记录为 `cancelled/agent_cancelled`。流式请求可从 `X-Run-Id` 取得取消所需的
+Run ID。
+
+主动取消注册表目前是进程内能力，单进程自托管可直接使用；多 worker/多节点部署需要把请求路由
+到持有该 Run 的 worker，后续后台执行切片会改为持久化调度句柄。异步模型和远程 MCP 调用可以
+被取消；已经进入工作线程的同步本地 Python 函数无法由 asyncio 强制终止，因此有副作用的工具
+仍必须自身支持幂等和协作式取消。
 
 生产环境建议设置 `AIGC_LITE_API_KEY`，并在反向代理层配置 TLS、限流和日志脱敏。
 

@@ -26,6 +26,11 @@ class ErrorCode(StrEnum):
     CREDENTIAL_NOT_CONFIGURED = "credential_not_configured"
     CREDENTIAL_KEY_NOT_CONFIGURED = "credential_key_not_configured"
     CREDENTIAL_DECRYPTION_FAILED = "credential_decryption_failed"
+    AGENT_MODEL_TURN_LIMIT_REACHED = "agent_model_turn_limit_reached"
+    AGENT_TOOL_CALL_LIMIT_REACHED = "agent_tool_call_limit_reached"
+    AGENT_WALL_TIME_LIMIT_REACHED = "agent_wall_time_limit_reached"
+    AGENT_CANCELLED = "agent_cancelled"
+    RUN_NOT_ACTIVE = "run_not_active"
     INTERNAL_ERROR = "internal_error"
 
 
@@ -107,3 +112,47 @@ class CredentialDecryptionError(ApplicationError):
 
     def __init__(self, message: str = "Stored credential cannot be decrypted"):
         super().__init__(message)
+
+
+class AgentLimitError(ApplicationError):
+    """Base class for configured Agent execution budgets being exhausted."""
+
+
+class AgentModelTurnLimitError(AgentLimitError):
+    code = ErrorCode.AGENT_MODEL_TURN_LIMIT_REACHED
+
+    def __init__(self, limit: int):
+        super().__init__(
+            "Agent model turn limit reached",
+            metadata={"budget": "model_turns", "limit": limit},
+        )
+
+
+class AgentToolCallLimitError(AgentLimitError):
+    code = ErrorCode.AGENT_TOOL_CALL_LIMIT_REACHED
+
+    def __init__(self, limit: int):
+        super().__init__(
+            "Agent tool call limit reached",
+            metadata={"budget": "tool_calls", "limit": limit},
+        )
+
+
+class AgentWallTimeLimitError(AgentLimitError):
+    code = ErrorCode.AGENT_WALL_TIME_LIMIT_REACHED
+
+    def __init__(self, limit_seconds: float):
+        super().__init__(
+            "Agent wall time limit reached",
+            metadata={"budget": "wall_time_seconds", "limit": limit_seconds},
+        )
+
+
+class RunNotActiveError(ApplicationError):
+    code = ErrorCode.RUN_NOT_ACTIVE
+
+    def __init__(self, run_id: str):
+        super().__init__(
+            "Agent run is not active in this process",
+            metadata={"resource": "agent_run", "resource_id": run_id},
+        )

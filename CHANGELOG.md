@@ -9,6 +9,9 @@ roadmap items remain in `docs/DESIGN.md`.
 - Added a workspace-isolated encrypted Credential Store with write-only API,
   revocation, replacement, and `encrypted-db://credential/UUID` references for
   remote MCP headers.
+- Added Agent model-turn and tool-call budgets, whole-run wall-clock limits,
+  stable `limit_reached` outcomes, and cancellation propagation through model
+  and remote MCP waits with an explicit active-run cancellation endpoint.
 
 ## 0.2.0 - 2026-09-24
 
