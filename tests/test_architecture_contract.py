@@ -30,6 +30,9 @@ def test_current_http_surface_remains_available() -> None:
         "/api/models",
         "/api/usage",
         "/api/audit",
+        "/api/credentials",
+        "/api/credentials/{credential_id}",
+        "/api/credentials/{credential_id}/replace",
         "/api/mcp-servers/{server_id}/probe",
         "/mcp-legacy",
     } <= paths

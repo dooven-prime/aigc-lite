@@ -7,6 +7,11 @@ import re
 from collections.abc import Callable
 from time import monotonic
 
+from ..adapters.credentials import (
+    CompositeCredentialProvider,
+    EncryptedCredentialProvider,
+    EnvCredentialProvider,
+)
 from ..adapters.tools.mcp import MCPToolProvider
 from ..adapters.tools.repository import provider_from_record
 from ..core.contracts import RequestContext
@@ -80,7 +85,7 @@ class MCPProbeService:
     def __init__(
         self,
         repository_provider: RepositoryProvider = get_repository,
-        provider_factory: ProviderFactory = provider_from_record,
+        provider_factory: ProviderFactory | None = None,
     ) -> None:
         self._repository_provider = repository_provider
         self._provider_factory = provider_factory
@@ -93,7 +98,18 @@ class MCPProbeService:
 
         started = monotonic()
         try:
-            provider = self._provider_factory(server, context.workspace_id)
+            if self._provider_factory is None:
+                credential_provider = CompositeCredentialProvider(
+                    environment=EnvCredentialProvider(),
+                    encrypted_database=EncryptedCredentialProvider(
+                        context.workspace_id, self._repository_provider
+                    ),
+                )
+                provider = provider_from_record(
+                    server, context.workspace_id, credential_provider
+                )
+            else:
+                provider = self._provider_factory(server, context.workspace_id)
             async with asyncio.timeout(float(server["timeout_seconds"])):
                 tools = await provider.list_tools()
             projection = {

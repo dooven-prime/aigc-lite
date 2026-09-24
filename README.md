@@ -91,6 +91,9 @@ python -m app.main
 - `POST /api/knowledge/documents`：写入文本知识
 - `POST /api/knowledge/upload`：上传 `.txt`、`.md`、`.csv` 或 `.json`
 - `GET /api/knowledge/search?q=...`：搜索当前租户知识
+- `GET|POST /api/credentials`：管理员列出凭据状态或创建 write-only 加密凭据
+- `POST /api/credentials/{credential_id}/replace`：替换凭据值并重新启用
+- `DELETE /api/credentials/{credential_id}`：撤销凭据引用，不物理删除记录
 - `GET|POST /api/mcp-servers`：管理员列出或保存 workspace 的远程 MCP Server
 - `POST /api/mcp-servers/{server_id}/probe`：测试连接并保存最新健康状态、延迟、工具数和稳定错误码
 - `DELETE /api/mcp-servers/{server_id}`：管理员删除远程 MCP Server 配置
@@ -154,6 +157,29 @@ AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","
   "enabled": true
 }
 ```
+
+除了默认的 `env://`，管理员可以创建 workspace 隔离的加密凭据：
+
+```json
+POST /api/credentials
+{"name":"research-token","secret":"Bearer replace-with-real-token"}
+```
+
+响应只包含 `configured/source/writable`、生命周期字段和形如
+`encrypted-db://credential/UUID` 的引用，绝不返回密钥值。将引用写入 MCP 配置即可：
+
+```json
+{
+  "provider_id": "research",
+  "url": "https://mcp.example.com/mcp",
+  "header_credentials": {
+    "Authorization": "encrypted-db://credential/00000000-0000-0000-0000-000000000000"
+  }
+}
+```
+
+运行时在每次建立连接时按当前 workspace 解析引用，不缓存明文。替换操作会写入新的
+`enc:v1` 密文并恢复可用状态；删除接口执行可审计的撤销，已撤销或跨 workspace 的引用统一表现为 `credential_not_configured`。
 
 配置按 workspace 隔离，每次 Agent Run 发现工具时重新读取，因此禁用、凭据轮换和配置更新不要求重启。凭据值只在建立远程连接时解析且不缓存。`timeout_seconds` 同时限制发现/调用所使用的 HTTP client 和单次工具调用；同步本地 Python 函数会移入工作线程，超时可以释放 Agent，但不能强制终止已经运行的线程，因此有不可逆副作用的本地工具仍需自身实现取消和幂等。
 

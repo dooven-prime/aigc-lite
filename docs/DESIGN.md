@@ -410,8 +410,9 @@ POST /api/v1/agent-runs/{run_id}/cancel
    权限、结果上限、脱敏和 Tool Step；Provider 发现与调用失败使用稳定安全投影；
 6. 已完成：环境变量与 workspace 持久化 MCP server 配置、`env://` Credential
    Provider、动态配置刷新、单工具 timeout、入站 MCP 的 workspace Catalog 投影、
-   独立版本化 master key、统一账本/审计脱敏、Alembic migration，以及带稳定错误码的
-   MCP 探测状态；下一步补充 encrypted credential reference provider 和更细的工具调用预算；
+   独立版本化 master key、统一账本/审计脱敏、Alembic migration、带稳定错误码的
+   MCP 探测状态，以及 write-only `encrypted-db://credential/UUID` Credential Provider；
+   下一步补充更细的工具调用预算和取消传播；
 7. 增加 Artifact/Citation 载体，并接入统一搜索；
 8. 将 SQLite 词法检索升级为 FTS，可选接入 embedding provider；
 9. 最后迁移 UI，让 UI 展示 Run、步骤、来源和产物。

@@ -71,6 +71,20 @@ class Repository(Protocol):
 
     def delete_mcp_server(self, tenant_id: str, server_id: str) -> bool: ...
 
+    def create_credential(
+        self, tenant_id: str, name: str, secret_value: str
+    ) -> dict: ...
+
+    def list_credentials(self, tenant_id: str) -> list[dict]: ...
+
+    def get_credential(self, tenant_id: str, credential_id: str) -> dict | None: ...
+
+    def replace_credential(
+        self, tenant_id: str, credential_id: str, secret_value: str
+    ) -> dict | None: ...
+
+    def revoke_credential(self, tenant_id: str, credential_id: str) -> dict | None: ...
+
     def list_audit(self, tenant_id: str, limit: int = 100) -> list[dict]: ...
 
     def write_audit(self, tenant_id: str, action: str, path: str, metadata: dict, user_id: str | None = None) -> None: ...
@@ -526,6 +540,72 @@ class SQLiteRepository:
                 (tenant_id, server_id),
             )
         return result.rowcount > 0
+
+    def create_credential(
+        self, tenant_id: str, name: str, secret_value: str
+    ) -> dict:
+        now = utc_now()
+        value = {
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "name": name,
+            "secret_value": secret_value,
+            "created_at": now,
+            "updated_at": now,
+            "revoked_at": None,
+        }
+        with self._connect() as db:
+            result = db.execute(
+                "INSERT OR IGNORE INTO credentials(id, tenant_id, name, secret_value, "
+                "created_at, updated_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                tuple(value.values()),
+            )
+        if result.rowcount == 0:
+            raise ValueError("credential_name_conflict")
+        return value
+
+    def list_credentials(self, tenant_id: str) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, tenant_id, name, created_at, updated_at, revoked_at "
+                "FROM credentials WHERE tenant_id = ? ORDER BY name",
+                (tenant_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_credential(self, tenant_id: str, credential_id: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM credentials WHERE tenant_id = ? AND id = ?",
+                (tenant_id, credential_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def replace_credential(
+        self, tenant_id: str, credential_id: str, secret_value: str
+    ) -> dict | None:
+        now = utc_now()
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE credentials SET secret_value = ?, updated_at = ?, revoked_at = NULL "
+                "WHERE tenant_id = ? AND id = ?",
+                (secret_value, now, tenant_id, credential_id),
+            )
+        if result.rowcount == 0:
+            return None
+        return self.get_credential(tenant_id, credential_id)
+
+    def revoke_credential(self, tenant_id: str, credential_id: str) -> dict | None:
+        now = utc_now()
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE credentials SET revoked_at = COALESCE(revoked_at, ?), "
+                "updated_at = ? WHERE tenant_id = ? AND id = ?",
+                (now, now, tenant_id, credential_id),
+            )
+        if result.rowcount == 0:
+            return None
+        return self.get_credential(tenant_id, credential_id)
 
     def write_audit(self, tenant_id: str, action: str, path: str, metadata: dict, user_id: str | None = None) -> None:
         from .redaction import redact
@@ -987,6 +1067,76 @@ class PostgresRepository:
             {"tenant_id": tenant_id, "id": server_id},
         )
         return result.rowcount > 0
+
+    def create_credential(
+        self, tenant_id: str, name: str, secret_value: str
+    ) -> dict:
+        now = utc_now()
+        value = {
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "name": name,
+            "secret_value": secret_value,
+            "created_at": now,
+            "updated_at": now,
+            "revoked_at": None,
+        }
+        result = self._execute(
+            "INSERT INTO credentials(id, tenant_id, name, secret_value, created_at, "
+            "updated_at, revoked_at) VALUES (:id, :tenant_id, :name, :secret_value, "
+            ":created_at, :updated_at, :revoked_at) ON CONFLICT (tenant_id, name) "
+            "DO NOTHING",
+            value,
+        )
+        if result.rowcount == 0:
+            raise ValueError("credential_name_conflict")
+        return value
+
+    def list_credentials(self, tenant_id: str) -> list[dict]:
+        return self._many(
+            "SELECT id, tenant_id, name, created_at, updated_at, revoked_at "
+            "FROM credentials WHERE tenant_id = :tenant_id ORDER BY name",
+            {"tenant_id": tenant_id},
+        )
+
+    def get_credential(self, tenant_id: str, credential_id: str) -> dict | None:
+        return self._one(
+            "SELECT * FROM credentials WHERE tenant_id = :tenant_id AND id = :id",
+            {"tenant_id": tenant_id, "id": credential_id},
+        )
+
+    def replace_credential(
+        self, tenant_id: str, credential_id: str, secret_value: str
+    ) -> dict | None:
+        result = self._execute(
+            "UPDATE credentials SET secret_value = :secret_value, "
+            "updated_at = :updated_at, revoked_at = NULL "
+            "WHERE tenant_id = :tenant_id AND id = :id",
+            {
+                "secret_value": secret_value,
+                "updated_at": utc_now(),
+                "tenant_id": tenant_id,
+                "id": credential_id,
+            },
+        )
+        return (
+            self.get_credential(tenant_id, credential_id)
+            if result.rowcount > 0
+            else None
+        )
+
+    def revoke_credential(self, tenant_id: str, credential_id: str) -> dict | None:
+        now = utc_now()
+        result = self._execute(
+            "UPDATE credentials SET revoked_at = COALESCE(revoked_at, :now), "
+            "updated_at = :now WHERE tenant_id = :tenant_id AND id = :id",
+            {"now": now, "tenant_id": tenant_id, "id": credential_id},
+        )
+        return (
+            self.get_credential(tenant_id, credential_id)
+            if result.rowcount > 0
+            else None
+        )
 
     def write_audit(self, tenant_id: str, action: str, path: str, metadata: dict, user_id: str | None = None) -> None:
         from .redaction import redact

@@ -1,12 +1,15 @@
 import os
 
 import pytest
+from cryptography.fernet import Fernet
 
 from app.adapters.credentials.env import EnvCredentialProvider
 from app.adapters.tools.repository import RepositoryMCPProviderSource
+from app.config import settings
 from app.core.contracts import RequestContext
 from app.core.errors import CredentialNotConfiguredError
 from app.repository import SQLiteRepository
+from app.services.credentials import CredentialService
 
 
 def _server(provider_id: str = "research") -> dict:
@@ -68,3 +71,28 @@ def test_environment_credential_reference_is_resolved_per_operation(monkeypatch)
         provider.resolve("env://RESEARCH_MCP_AUTH")
     with pytest.raises(CredentialNotConfiguredError):
         provider.resolve(os.devnull)
+
+
+def test_repository_mcp_source_resolves_encrypted_reference_in_workspace(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
+    repository = SQLiteRepository(tmp_path / "encrypted-mcp-source.db")
+    repository.init()
+    context = RequestContext(request_id="r1", workspace_id="workspace-a")
+    credential = CredentialService(lambda: repository).create(
+        context, "research-token", "Bearer stored-value"
+    )
+    server = _server()
+    server["header_credentials"] = {
+        "Authorization": credential["reference"]
+    }
+    repository.save_mcp_server("workspace-a", server)
+
+    provider = RepositoryMCPProviderSource(lambda: repository).list_providers(
+        context
+    )[0]
+
+    assert provider.credential_provider.resolve(credential["reference"]) == (
+        "Bearer stored-value"
+    )

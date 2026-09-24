@@ -20,6 +20,9 @@ and whether credentials or cross-workspace data may be exposed.
   public deployment without a separate sandbox and explicit authorization.
 - Back up the database and its matching master key together. Losing or rotating
   the key without re-encryption makes `enc:v1` credentials unreadable.
+- Encrypted credential values are write-only through the API. Store references,
+  replace values when rotating, and revoke records instead of attempting to
+  recover plaintext through an administrative endpoint.
 
 Execution records and audit metadata use centralized best-effort redaction.
 This is defense in depth, not a substitute for keeping secrets out of prompts

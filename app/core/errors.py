@@ -13,6 +13,7 @@ from typing import Any
 
 class ErrorCode(StrEnum):
     RESOURCE_NOT_FOUND = "resource_not_found"
+    RESOURCE_CONFLICT = "resource_conflict"
     PROVIDER_NOT_CONFIGURED = "provider_not_configured"
     UPSTREAM_REQUEST_FAILED = "upstream_request_failed"
     UPSTREAM_INVALID_RESPONSE = "upstream_invalid_response"
@@ -56,6 +57,16 @@ class ResourceNotFoundError(ApplicationError):
         super().__init__(
             f"{resource.replace('_', ' ').title()} not found",
             metadata={"resource": resource, "resource_id": resource_id},
+        )
+
+
+class ResourceConflictError(ApplicationError):
+    code = ErrorCode.RESOURCE_CONFLICT
+
+    def __init__(self, resource: str, field: str):
+        super().__init__(
+            f"{resource.replace('_', ' ').title()} already exists",
+            metadata={"resource": resource, "field": field},
         )
 
 

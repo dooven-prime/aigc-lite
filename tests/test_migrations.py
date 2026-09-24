@@ -32,6 +32,9 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
             row[1] for row in connection.execute("PRAGMA table_info(mcp_servers)")
         }
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
+        credential_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'credentials'"
+        ).fetchone()
     assert {
         "health_status",
         "last_tested_at",
@@ -39,5 +42,6 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "last_latency_ms",
         "last_tool_count",
     } <= columns
-    assert revision == "0002_mcp_probe_state"
+    assert revision == "0003_credentials"
+    assert credential_table == ("credentials",)
     assert repository.get_mcp_server("workspace-a", "server-1")["provider_id"] == "research"

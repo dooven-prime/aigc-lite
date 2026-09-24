@@ -8,12 +8,13 @@ import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from .audit import record_request
 from .auth import (
@@ -30,6 +31,7 @@ from .core.errors import (
     ApplicationError,
     LLMError,
     ProviderNotConfiguredError,
+    ResourceConflictError,
     ResourceNotFoundError,
 )
 from .database import (
@@ -42,6 +44,7 @@ from .database import (
     search_documents,
 )
 from .mcp import build_transport_apps, call_local_tool, create_mcp_server, handle_rpc
+from .services.credentials import CredentialService
 from .services.gateway import GatewayService
 from .services.mcp_probe import MCPProbeService
 from .services.memory import MemoryService
@@ -57,6 +60,7 @@ mcp_app, mcp_sse_app = build_transport_apps(mcp_server)
 gateway_service = GatewayService(tool_catalog=tool_catalog)
 memory_service = MemoryService()
 mcp_probe_service = MCPProbeService()
+credential_service = CredentialService()
 
 
 class LoginRequest(BaseModel):
@@ -104,9 +108,26 @@ class MCPServerConfigRequest(BaseModel):
     @field_validator("header_credentials")
     @classmethod
     def validate_header_credentials(cls, value: dict[str, str]) -> dict[str, str]:
-        reference = re.compile(r"^env://[A-Za-z_][A-Za-z0-9_]*$")
-        if not all(header.strip() and reference.fullmatch(item) for header, item in value.items()):
-            raise ValueError("header credential values must use env://NAME references")
+        env_reference = re.compile(r"^env://[A-Za-z_][A-Za-z0-9_]*$")
+        encrypted_reference = re.compile(
+            r"^encrypted-db://credential/([0-9a-fA-F-]{36})$"
+        )
+        for header, item in value.items():
+            if not header.strip():
+                raise ValueError("header names must not be empty")
+            if env_reference.fullmatch(item):
+                continue
+            match = encrypted_reference.fullmatch(item)
+            if match is not None:
+                try:
+                    UUID(match.group(1))
+                    continue
+                except ValueError:
+                    pass
+            raise ValueError(
+                "header credential values must use env://NAME or "
+                "encrypted-db://credential/UUID references"
+            )
         return value
 
     @field_validator("required_scopes")
@@ -124,6 +145,17 @@ class TenantCreateRequest(BaseModel):
 
 class UserCreateRequest(RegisterRequest):
     role: str = Field(default="member", pattern="^(member|admin)$")
+
+
+class CredentialCreateRequest(BaseModel):
+    name: str = Field(
+        min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+    )
+    secret: SecretStr = Field(min_length=1, max_length=10_000)
+
+
+class CredentialReplaceRequest(BaseModel):
+    secret: SecretStr = Field(min_length=1, max_length=10_000)
 
 
 class MCPAuthMiddleware:
@@ -205,7 +237,7 @@ async def lifespan(_app: FastAPI):
         yield
 
 
-app = FastAPI(title=settings.app_name, version="0.2.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.3.0-dev.0", lifespan=lifespan)
 app.add_middleware(MCPAuthMiddleware)
 app.mount(
     "/ui",
@@ -216,10 +248,27 @@ app.mount("/mcp", mcp_app, name="mcp")
 app.mount("/mcp-sse", mcp_sse_app, name="mcp-sse")
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    safe_errors = [
+        {
+            "type": error["type"],
+            "loc": error["loc"],
+            "msg": error["msg"],
+        }
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": safe_errors})
+
+
 @app.exception_handler(ApplicationError)
 async def application_error_handler(_request: Request, exc: ApplicationError) -> JSONResponse:
     if isinstance(exc, ResourceNotFoundError):
         status_code = 404
+    elif isinstance(exc, ResourceConflictError):
+        status_code = 409
     elif isinstance(exc, ProviderNotConfiguredError):
         status_code = 503
     elif isinstance(exc, LLMError):
@@ -446,6 +495,56 @@ async def save_model(request: ModelConfigRequest, user: dict = Depends(current_a
 @app.get("/api/mcp-servers")
 async def mcp_servers(user: dict = Depends(current_admin_user)) -> list[dict]:
     return get_repository().list_mcp_servers(user["tenant_id"])
+
+
+@app.get("/api/credentials")
+async def credentials(
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> list[dict]:
+    tenant = Tenant(user["tenant_id"], user["tenant_id"])
+    return credential_service.list(request_context(http_request, tenant))
+
+
+@app.post("/api/credentials")
+async def create_credential(
+    request: CredentialCreateRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    tenant = Tenant(user["tenant_id"], user["tenant_id"])
+    return credential_service.create(
+        request_context(http_request, tenant),
+        request.name,
+        request.secret.get_secret_value(),
+    )
+
+
+@app.post("/api/credentials/{credential_id}/replace")
+async def replace_credential(
+    credential_id: str,
+    request: CredentialReplaceRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    tenant = Tenant(user["tenant_id"], user["tenant_id"])
+    return credential_service.replace(
+        request_context(http_request, tenant),
+        credential_id,
+        request.secret.get_secret_value(),
+    )
+
+
+@app.delete("/api/credentials/{credential_id}")
+async def revoke_credential(
+    credential_id: str,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    tenant = Tenant(user["tenant_id"], user["tenant_id"])
+    return credential_service.revoke(
+        request_context(http_request, tenant), credential_id
+    )
 
 
 @app.post("/api/mcp-servers")

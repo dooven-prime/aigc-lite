@@ -3,6 +3,13 @@
 Release-level changes are recorded here. Development notes and speculative
 roadmap items remain in `docs/DESIGN.md`.
 
+## Unreleased
+
+- Development version: `0.3.0-dev.0`.
+- Added a workspace-isolated encrypted Credential Store with write-only API,
+  revocation, replacement, and `encrypted-db://credential/UUID` references for
+  remote MCP headers.
+
 ## 0.2.0 - 2026-09-24
 
 - Positioned the project as a self-hosted AI workspace and Agent/MCP runtime
