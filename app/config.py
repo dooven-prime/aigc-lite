@@ -35,6 +35,19 @@ class Settings:
     max_agent_run_seconds: float = float(
         os.getenv("AIGC_LITE_MAX_AGENT_RUN_SECONDS", "300")
     )
+    scheduler_enabled: bool = _bool("AIGC_LITE_SCHEDULER_ENABLED", True)
+    scheduler_tick_seconds: float = float(
+        os.getenv("AIGC_LITE_SCHEDULER_TICK_SECONDS", "1")
+    )
+    scheduler_reconcile_seconds: float = float(
+        os.getenv("AIGC_LITE_SCHEDULER_RECONCILE_SECONDS", "5")
+    )
+    scheduler_max_concurrency: int = int(
+        os.getenv("AIGC_LITE_SCHEDULER_MAX_CONCURRENCY", "4")
+    )
+    http_poll_allowed_hosts: str = os.getenv(
+        "AIGC_LITE_HTTP_POLL_ALLOWED_HOSTS", ""
+    )
     max_tool_result_chars: int = int(os.getenv("AIGC_LITE_MAX_TOOL_RESULT_CHARS", "100000"))
     max_tool_record_chars: int = int(os.getenv("AIGC_LITE_MAX_TOOL_RECORD_CHARS", "50000"))
     default_tool_timeout_seconds: float = float(
@@ -72,6 +85,22 @@ class Settings:
             )
         if not isfinite(self.max_agent_run_seconds) or self.max_agent_run_seconds <= 0:
             raise ValueError("AIGC_LITE_MAX_AGENT_RUN_SECONDS must be positive")
+        if (
+            not isfinite(self.scheduler_tick_seconds)
+            or self.scheduler_tick_seconds <= 0
+        ):
+            raise ValueError("AIGC_LITE_SCHEDULER_TICK_SECONDS must be positive")
+        if (
+            not isfinite(self.scheduler_reconcile_seconds)
+            or self.scheduler_reconcile_seconds <= 0
+        ):
+            raise ValueError(
+                "AIGC_LITE_SCHEDULER_RECONCILE_SECONDS must be positive"
+            )
+        if not 1 <= self.scheduler_max_concurrency <= 64:
+            raise ValueError(
+                "AIGC_LITE_SCHEDULER_MAX_CONCURRENCY must be between 1 and 64"
+            )
 
     @property
     def database_path(self) -> Path:

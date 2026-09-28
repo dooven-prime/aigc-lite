@@ -48,7 +48,8 @@ def test_legacy_ciphertext_is_read_but_plaintext_is_rejected(monkeypatch) -> Non
 
 def test_redaction_covers_nested_secrets_signed_urls_and_audit(tmp_path) -> None:
     signed_url = (
-        "https://bucket.example/file?X-Amz-Algorithm=AWS4-HMAC-SHA256&"
+        "https://private-user:private-password@bucket.example/file?"
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256&"
         "X-Amz-Credential=private%2Fcredential&X-Amz-Signature=top-secret"
     )
     value = {
@@ -61,6 +62,8 @@ def test_redaction_covers_nested_secrets_signed_urls_and_audit(tmp_path) -> None
     assert "private-token" not in rendered
     assert "private%2Fcredential" not in rendered
     assert "top-secret" not in rendered
+    assert "private-user" not in rendered
+    assert "private-password" not in rendered
     assert "X-Amz-Signature=***" in cleaned["nested"][0]["download"]
 
     repository = SQLiteRepository(tmp_path / "redaction.db")

@@ -289,6 +289,47 @@ request_id -> run_id -> step_id -> upstream_request_id / tool_call_id
 审计记录安全与管理事件；运行 trace 记录执行事实；应用日志用于诊断。三者分开，
 且都不保存 prompt、文档内容、secret 或完整 tool result，除非部署者显式开启内容记录。
 
+### 4.8 持久化调度与内部任务控制
+
+计划定义持久化在 SQLite/PostgreSQL，状态为
+`scheduled -> paused|completed|cancelled`；进程内时间轮只是可丢弃的唤醒索引，启动时从数据库
+恢复并周期性对账。到期后统一交给 `TaskRunner`，只允许执行显式注册目标，不提供动态模块或函数
+导入。内置 `agent.chat` 通过 `GatewayService`，`mcp.probe` 只更新已保存 MCP Server 的健康投影，
+`tool.call` 通过 Tool Catalog 的发现、scope、脱敏与 Run/Step 路径，`http.poll` 只访问部署方明确
+allowlist 的无凭据 URL，且不记录响应正文。自定义内部动作通过 `TaskRunner.register()` 显式装配。
+
+`/api/schedules` 控制面只对当前 workspace 管理员开放，提供创建、列表、详情、暂停、恢复和取消。
+创建时校验目标及 payload，控制动作只审计标识、目标、触发类型和状态，不写入 prompt。暂停或取消
+阻止后续触发，不承诺终止已经开始的 Run；运行中取消仍使用 Run 控制入口。当前恢复语义为
+at-least-once，单进程内做并发上限；多 worker 部署前需要增加 owner/lease 与幂等执行键。
+
+### 4.9 证据控制层与 Profile
+
+执行账本只能证明“系统记录了某次执行”，不能自动证明结果正确、结论成立或外部动作获得授权。
+因此在 Run/Step/Artifact/Citation 之上增加一层跨领域证据对象：
+
+```text
+Protocol -> Claim -> ExecutionReceipt -> Review -> FreezeManifest
+                    |
+                    +-> Run / Artifact / Citation
+```
+
+- `Protocol` 冻结目的、范围、完成条件、停止条件和资源预算；
+- `Claim` 记录精确陈述、适用范围、证据引用及明确禁止的结论升级；
+- `ExecutionReceipt` 绑定输入/输出摘要、运行时、预算、Run 与 Artifact；
+- `Review` 明确人工/Agent/自动检查以及是否独立，局部验证不能冒充独立验证；
+- `FreezeManifest` 使用内容哈希绑定成员，路径和数据库主键不作为证据身份。
+
+通用核心不定义业务候选、科学变量或组织价值。它们进入独立 Profile；只有在两个以上独立领域
+重复出现、且语义一致的概念才提升到核心。Artifact 完整性、Claim 有效性、Review 独立性和外部
+执行授权必须分开建模。`insufficient`、`undetermined`、`rejected` 和执行 `failed` 不得折叠为同一
+个 false/zero 状态。
+
+首个 `decision.nanojev` Profile 只读导入冻结的 request/predictions/metrics/receipt 文件。导入器在
+写库前校验 case 对齐、问题类型、候选集合和概率归一化；低于冻结阈值的结果进入
+`manual_review`，概率或 argmax 不会直接触发工具和外部写操作。主机文件路径不进入 API，管理员
+通过上传显式提供 bundle，避免任意文件读取和本地路径泄漏。
+
 ## 5. HTTP 表面
 
 ### 数据面
@@ -428,9 +469,41 @@ POST /api/v1/agent-runs/{run_id}/cancel
    Agent 模型轮次、工具次数和墙钟预算，稳定 `limit_reached` 状态，以及模型/MCP 等待链的
    取消传播与 active-run 取消接口；本地 Tool Execution Backend 的 async/thread/process
    三种隔离模式、单工具超时和执行 metadata；
-7. 增加 Artifact/Citation 载体，并接入统一搜索；
-8. 将 SQLite 词法检索升级为 FTS，可选接入 embedding provider；
-9. 最后迁移 UI，让 UI 展示 Run、步骤、来源和产物。
+7. 已完成：增加 workspace 隔离的 Artifact/Citation 契约和持久化；Artifact 可关联
+   Run/Step、版本系列、内容哈希与媒体类型，Citation 保存来源、定位和摘录；Run 详情、
+   Artifact 查询和统一搜索共享同一数据，远程 MCP structured content、embedded resource
+   与 resource link 经 Tool Catalog 自动写入；
+8. 已完成：抽取 `SearchBackend`，SQLite 使用 migration 管理的 FTS5 索引；升级时回填
+   历史数据，触发器同步消息、文档、Step、Artifact 和 Citation；短中文查询、缺少 FTS5
+   的 SQLite 以及 PostgreSQL 当前使用有界词法 fallback。embedding provider 保持为后续
+   可选 backend，不进入核心依赖；
+9. 已完成：增加 Run Explorer 与统一搜索 UI，展示运行状态、模型、耗时、Step 时间线、
+   脱敏后的输入输出、Artifact 和 Citation；搜索覆盖 Conversation、Knowledge、Step、
+   Artifact 和 Citation，可按稳定 ID 返回会话，或跳转并高亮对应 Run/Step/Artifact。
+10. 已完成：增加最小证据控制层与 `decision.nanojev` Profile；Protocol、Claim、Receipt、Review、
+    FreezeManifest 和 Decision Case 按 workspace 持久化。Decision Lab 支持上传冻结 bundle、查看
+    Boolean/Choice/Score 概率分布、置信度、熵、人工复核状态及证据闭包；Decision Case 同时进入
+    统一搜索。当前只做只读评估，不执行 NanoJev 模型，也不授权外部业务动作。
+11. 已完成：增加 `research.frontier` Profile、Research Registry 与 Claim Explorer。上传的
+    Claim Registry 经必填字段、枚举、Claim ID、source locator 和 SHA-256 契约校验后，形成
+    Protocol、Artifact、Receipt、Review 与 Freeze；Claim Revision、Source Reference 和明确的
+    closure blocker 按 workspace 持久化并进入统一搜索。`closed` 只表示声明的引用闭包完整，
+    不表示主张真实、因果成立、独立复核完成或可以驱动外部动作。
+12. 已完成：增加 Claim Relation、Verification Attempt 与 Promotion Gate。关系边区分
+    `supports`、`refutes`、`depends_on` 和 `qualifies`，依赖边拒绝成环；每次验证尝试绑定
+    输入/输出摘要、Artifact 和 Execution Receipt。晋升只允许 `registered -> evidence_ready ->
+    review_ready -> release_ready` 逐级执行，每次通过或阻断均保存策略版本、输入摘要、逐项
+    criterion、blocker 和 evaluation digest。`evidence_ready` 不等于事实成立，`review_ready`
+    不自动构成组织独立性，`release_ready` 也不授权发布或外部动作。实现借鉴失败关闭、闭包绑定
+    和全门通过后晋升的方法论，但不复制私有参考仓库的实现或领域权利要求对象。
+13. 已完成：将 Verification Attempt 升级为可执行闭环。不可变 Verification Plan 以
+    `plan_key + version` 定址，新版本显式退役旧版本；立即执行入口与 `research.verify` 计划任务
+    target 共用 `VerificationRunner`。Runner 通过现有 Gateway/Agent/Tool Catalog 生成 Run 与工具
+    Step，再校验 `research.verification-result.v1` 严格结果合同，写入合同 Step、JSON Artifact、
+    Execution Receipt、Verification Attempt 和下一阶段 Promotion Gate。execution 独立保存
+    plan/run/attempt/artifact/evaluation 的稳定关联和输入输出摘要。无效模型输出、上游失败与取消
+    均失败关闭并保留终态；自动 Gate 要求触发它的本次 Attempt 自身通过，不能借历史通过记录
+    为失败执行顺带晋升。Agent 结果固定为非独立验证，不能自动满足独立 review criterion。
 
 每个切片都必须产生可查询的真实纵向行为，不为了目录完整度创建没有 consumer 的抽象。
 
@@ -443,6 +516,7 @@ POST /api/v1/agent-runs/{run_id}/cancel
 - Secret：引用优先，每次操作解析，独立 master key；
 - Agent：持久化 Run/Step/Event，预算受限；
 - Tool：统一 Catalog，本地与 MCP 同策同审计；
+- Artifact：结果本体与 Citation 来源分离，并可从 Run/Step 双向追溯；
 - Transport：HTTP、MCP、UI 共享 application service；
 - 存储：显式 migration，同一 repository contract 覆盖 SQLite/PostgreSQL；
 - 扩展：先代码内 seam，第二个真实实现出现后再拆包。

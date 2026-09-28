@@ -124,6 +124,8 @@ def test_remote_mcp_provider_uses_catalog_namespace_and_workspace_policy(
     assert json.loads(result.content) == {"value": "remote ok"}
     assert result.metadata["source"] == "mcp"
     assert result.metadata["provider_id"] == "research"
+    assert result.artifacts[0].kind.value == "json"
+    assert result.citations[0].source_id == "research:transport_echo"
 
 
 class ProjectedRemoteProvider:

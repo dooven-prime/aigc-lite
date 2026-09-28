@@ -12,11 +12,14 @@
 - workspace-aware Tool Catalog，本地函数与远程 MCP tool 统一发现、授权和调用
 - SQLite 会话持久化和租户级数据隔离
 - 同步与流式 Agent Run/Step 执行账本，记录模型、工具、成功失败和稳定错误码
-- 跨对话、知识文档和执行步骤的租户级统一搜索
+- 跨对话、知识文档、执行步骤、Artifact 和 Citation 的租户级统一搜索
+- 可追溯到 Run/Step 的 Artifact/Citation；远程 MCP 结构化结果和资源自动归档
 - 文本、Markdown、CSV、JSON 知识库上传与检索
 - MCP-compatible `/mcp` JSON-RPC Server，以及远程 MCP Client
 - 官方 MCP SDK 的 Streamable HTTP `/mcp` 和 SSE `/mcp-sse/sse` transport
-- `/ui` 轻量聊天和知识库工作台
+- `/ui` 聊天、知识库与执行记忆工作台，包含 Run Explorer
+- 跨领域 Protocol/Claim/Receipt/Review/Freeze 证据控制层，以及首个 Decision Lab
+- 可导入版本化 Claim Registry 的 Research Workspace，以及支持类型化关系、版本化 Verification Plan、Agent/计划任务验证、验证收据和逐级晋升门的 Claim Explorer
 - 可作为 Python 包或独立服务运行
 
 企业私有业务、数据库连接器、第三方平台凭据和运行时数据不属于公开核心，将通过独立扩展接入。
@@ -26,7 +29,8 @@
 共享同一套 Run/Step、工具、产物和检索基础。
 
 版本变化见 [`CHANGELOG.md`](CHANGELOG.md)，安全部署边界与漏洞报告方式见
-[`SECURITY.md`](SECURITY.md)。`v0.2.0` 的本地冻结范围和验证记录见
+[`SECURITY.md`](SECURITY.md)。当前 `v0.3.0` 的本地冻结范围和验证记录见
+[`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md)，初始 `v0.2.0` 基线保留在
 [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md)。
 
 ## 快速开始
@@ -62,6 +66,16 @@ AIGC_LITE_LLM_BASE_URL=https://api.openai.com/v1
 AIGC_LITE_LLM_MODEL=gpt-4o-mini
 ```
 
+MiniMax Token Plan 使用当前的 OpenAI-compatible 地址和 M 系列模型，例如：
+
+```dotenv
+AIGC_LITE_LLM_API_KEY=your-sk-cp-key
+AIGC_LITE_LLM_BASE_URL=https://api.minimaxi.com/v1
+AIGC_LITE_LLM_MODEL=MiniMax-M3
+```
+
+MiniMax 的思考内容会自动与最终 `content` 分离，避免 `<think>` 内容进入聊天答案和 Agent 工具循环。
+
 如果要通过管理接口保存模型凭据，还必须生成独立于登录签名密钥的 Fernet master key：
 
 ```bash
@@ -88,7 +102,25 @@ python -m app.main
 - `GET /api/runs`：列出当前租户的 Agent 运行记录
 - `GET /api/runs/{run_id}`：读取运行详情和步骤
 - `POST /api/runs/{run_id}/cancel`：取消当前进程中正在执行的 Run
-- `GET /api/search?q=...`：搜索对话、知识文档和执行步骤
+- `GET /api/artifacts`：列出当前 workspace 的产物，可按 `run_id` 过滤
+- `GET /api/artifacts/{artifact_id}`：读取产物及其 Citation
+- `GET /api/evidence/protocols`：列出当前 workspace 的证据协议，可按 `profile` 过滤
+- `GET /api/evidence/protocols/{protocol_id}`：读取 Claim、Receipt、Review、Freeze 和关联 Artifact
+- `GET /api/decision-lab`：查询 NanoJev 决策实验、概率分布与人工复核投影
+- `POST /api/decision-lab/import/nanojev`：管理员上传并验证冻结的 NanoJev bundle
+- `GET /api/research-registry`：查询 AI Frontier 研究案例、Claim Revision 与 Source Closure
+- `GET /api/research-registry/claims/{claim_id}`：读取单条研究主张及其来源定位和 blocker
+- `POST /api/research-registry/claims/{claim_id}/relations`：管理员登记 supports/refutes/depends_on/qualifies 类型化关系；`.../relations/{relation_id}/withdraw` 保留理由地撤回关系
+- `POST /api/research-registry/claims/{claim_id}/verification-attempts`：管理员登记摘要与 Artifact 绑定的验证尝试及 Receipt
+- `POST /api/research-registry/claims/{claim_id}/verification-plans`：管理员冻结 Verification Plan 的新版本，同一 `plan_key` 的旧版本自动退役
+- `POST /api/research-registry/verification-plans/{plan_id}/runs`：通过 Agent 立即执行有效 Plan，并闭合 Run/Step/Artifact/Receipt/Promotion Gate
+- `POST /api/research-registry/claims/{claim_id}/promotion-gates`：管理员执行下一阶段的失败关闭晋升评估
+- `POST /api/research-registry/import/frontier`：管理员上传、验证并冻结 Claim Registry
+- `GET|POST /api/schedules`：管理员创建或列出当前 workspace 的计划任务
+- `GET /api/schedules/{task_id}`：管理员读取计划任务详情
+- `POST /api/schedules/{task_id}/pause|resume|cancel`：管理员控制后续触发
+- `GET /api/search?q=...`：搜索对话、知识文档、执行步骤、产物、来源和研究主张
+- Decision Case 与 Research Claim 同样进入统一搜索，可跳转到对应工作台
 - `POST /api/knowledge/documents`：写入文本知识
 - `POST /api/knowledge/upload`：上传 `.txt`、`.md`、`.csv` 或 `.json`
 - `GET /api/knowledge/search?q=...`：搜索当前租户知识
@@ -128,9 +160,107 @@ MCP tool，并把 Run 记录为 `cancelled/agent_cancelled`。流式请求可从
 Run ID。
 
 主动取消注册表目前是进程内能力，单进程自托管可直接使用；多 worker/多节点部署需要把请求路由
-到持有该 Run 的 worker，后续后台执行切片会改为持久化调度句柄。异步模型和远程 MCP 调用可以
-被取消。本地 Python 工具可选择 `async`、`thread` 或 `process` backend；线程模式只能停止等待，
-进程模式则可在超时或取消时终止独立 worker。
+到持有该 Run 的 worker。异步模型和远程 MCP 调用可以被取消。本地 Python 工具可选择 `async`、
+`thread` 或 `process` backend；线程模式只能停止等待，进程模式则可在超时或取消时终止独立 worker。
+
+## 持久化任务调度
+
+应用启动时会从 `scheduled_tasks` 恢复活跃计划，并使用进程内多级时间轮建立可丢弃的唤醒索引；
+SQLite/PostgreSQL 中的计划定义始终是事实来源。`TaskRunner` 当前注册以下独立目标：
+
+| target | payload | 执行语义 |
+|---|---|---|
+| `agent.chat` | `prompt`，可选 `system/model/session_id` | 通过 `GatewayService` 创建正常 Agent Run |
+| `mcp.probe` | `server_id` | 探测已保存的 MCP Server 并更新最新健康投影 |
+| `tool.call` | `name`、可选 `arguments` | 通过 Tool Catalog 执行本地或远程 MCP tool，并记录 Run/Step |
+| `http.poll` | `url`、可选 `expected_status/timeout_seconds` | GET allowlist URL，只记录状态、延迟与 Run/Step |
+| `research.verify` | `plan_id` | 执行已冻结的有效 Verification Plan，并写回完整研究证据链 |
+
+计划任务统一使用 `system:scheduler` 身份且默认不获得 `tools:write` 或 `tools:high-risk` scope，payload
+也不能注入 scope。因此 `tool.call` 只能发现低风险工具；需要更高权限的内部动作应注册成独立、窄
+权限 target，而不是提升通用调度身份。
+
+```dotenv
+AIGC_LITE_SCHEDULER_ENABLED=true
+AIGC_LITE_SCHEDULER_TICK_SECONDS=1
+AIGC_LITE_SCHEDULER_RECONCILE_SECONDS=5
+AIGC_LITE_SCHEDULER_MAX_CONCURRENCY=4
+AIGC_LITE_HTTP_POLL_ALLOWED_HOSTS=status.example.com,api.example.com:8443
+```
+
+一次性计划执行后进入 `completed`；周期计划从原计划刻度推进到下一个未来时间，停机期间错过的
+周期不会在重启时集中补跑。执行中进程退出时不会确认该次触发，重启恢复后会按 at-least-once
+语义重试。workspace 管理员通过 `/api/schedules` 创建、查询、暂停、恢复和取消计划；入口只接受
+`TaskRunner` 已注册的目标，创建时即校验目标 payload，并为每次控制操作写入不含 prompt 的审计事件。
+
+```json
+POST /api/schedules
+{
+  "name": "Daily workspace summary",
+  "target": "agent.chat",
+  "payload": {"prompt": "Summarize pending work", "system": "Be concise."},
+  "cadence": "daily",
+  "run_at": "2030-01-01T09:00:00+08:00"
+}
+```
+
+每天和每周任务也可用 `"cadence": "daily"` 或 `"cadence": "weekly"` 简写，此时无需提供
+`kind` 和 `interval_seconds`。轮询任务继续使用 `"kind": "interval"` 与所需秒数；这些都是从
+`run_at` 起算的固定周期，不是带时区/DST 规则的 cron 日历表达式。
+
+Verification Plan 是不可变版本；创建同一 `plan_key` 的新版本会把旧版本标为 `retired`，已有计划任务
+不会悄悄切换到新版本。周期执行使用 target `research.verify` 与 payload `{"plan_id":"..."}`，因此升级
+方案后需要显式更新或新建计划任务。Agent 输出必须满足 `research.verification-result.v1` 严格 JSON
+合同；有效结果以及无效输出、上游失败或取消都会形成可查询的 execution。只要 Agent Run 已建立，
+Runner 还会写入结果/错误 Artifact、Receipt-bound Attempt 和失败关闭的下一阶段 Promotion Gate。
+自动 Gate 额外要求触发它的本次 Attempt 为 `passed`，不会借用历史通过记录为一次失败执行顺带
+晋升。Agent 执行永远记录为 `independent=false`，不会凭模型自述越过独立复核边界。
+
+HTTP 轮询必须在 `AIGC_LITE_HTTP_POLL_ALLOWED_HOSTS` 中逐个配置精确 host 或 `host:port`。它不接受
+自定义 header、请求体或 URL 凭据，不跟随重定向，也不读取或保存响应正文。带认证的服务应封装为
+使用 Credential Store 的 MCP/local tool，再通过 `tool.call` 调度：
+
+```json
+{
+  "name": "MCP health poll",
+  "target": "mcp.probe",
+  "payload": {"server_id": "stored-server-uuid"},
+  "kind": "interval",
+  "run_at": "2030-01-01T00:00:00Z",
+  "interval_seconds": 300
+}
+```
+
+`pause` 和 `cancel` 会阻止后续触发，但不会强制终止已经开始的 Agent Run；已经运行的实例应使用
+`POST /api/runs/{run_id}/cancel`。调度控制当前只对登录的 workspace 管理员开放，普通成员和跨
+workspace 查询均被拒绝。
+
+## 统一搜索
+
+`/api/search` 通过独立 `SearchBackend` 查询消息、文档 chunk、Run Step、Artifact 和 Citation。
+SQLite 使用 FTS5 `trigram` 索引，不再受旧版“每类最多扫描 500 条候选”的窗口限制；`0006` migration
+会回填已有记录，数据库触发器负责后续新增、更新和删除同步。用户查询会被转换成引用后的 FTS
+表达式，不直接执行客户端提供的操作符或列选择器。
+
+少于三个字符的中文/英文查询会走有界词法 fallback；运行时 SQLite 缺少 FTS5 或不支持 trigram
+时也会自动降级。PostgreSQL 当前继续使用相同结果契约的词法 backend，后续可以独立替换成原生
+全文检索或 embedding backend，而无需修改 `MemoryService` 和 HTTP API。
+
+登录后的侧栏 **Search** 是该契约的统一 UI：一次查询同时返回 Conversation、Knowledge、Run
+Step、Artifact 和 Citation，并可按来源类型过滤。执行类结果保留完整定位关系；用户可以分别打开
+所属 Run，或直接滚动并高亮对应的 Step / Artifact。Conversation 结果也可以直接返回原会话。
+跳转通过稳定 ID 再读取详情，不依赖当前 Run 列表是否已经加载到该条记录。
+
+## Run Explorer
+
+登录后可从侧栏进入 **Runs**。页面加载最近 100 个 workspace Run，可按模型、状态、错误码或
+Run ID 过滤；详情按照执行顺序展示模型、工具、Agent 和检索 Step，并呈现稳定状态、耗时、来源、
+执行 backend 和取消模式等 metadata。Step 输入输出默认使用可折叠的等宽预览，超长内容只在 UI
+截断，不改变数据库记录。
+
+同一详情页会展示 Run 产生的 Artifact 和 Citation，包括类型、媒体类型、版本、大小、来源 URI、
+摘录与 locator。只有 HTTP(S) URI 会成为可点击的外部链接，其他 MCP/resource URI 仅按文本显示。
+窄屏下 Run 列表与详情自动改为上下布局。
 
 生产环境建议设置 `AIGC_LITE_API_KEY`，并在反向代理层配置 TLS、限流和日志脱敏。
 

@@ -31,6 +31,11 @@ class ErrorCode(StrEnum):
     AGENT_WALL_TIME_LIMIT_REACHED = "agent_wall_time_limit_reached"
     AGENT_CANCELLED = "agent_cancelled"
     RUN_NOT_ACTIVE = "run_not_active"
+    INVALID_SCHEDULE = "invalid_schedule"
+    SCHEDULE_NOT_ACTIVE = "schedule_not_active"
+    INVALID_ARTIFACT = "invalid_artifact"
+    INVALID_EVIDENCE = "invalid_evidence"
+    INVALID_VERIFICATION_RESULT = "invalid_verification_result"
     INTERNAL_ERROR = "internal_error"
 
 
@@ -156,3 +161,49 @@ class RunNotActiveError(ApplicationError):
             "Agent run is not active in this process",
             metadata={"resource": "agent_run", "resource_id": run_id},
         )
+
+
+class InvalidScheduleError(ApplicationError):
+    code = ErrorCode.INVALID_SCHEDULE
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message, metadata={"field": field})
+
+
+class ScheduleNotActiveError(ApplicationError):
+    code = ErrorCode.SCHEDULE_NOT_ACTIVE
+
+    def __init__(self, task_id: str, status: str):
+        super().__init__(
+            "Scheduled task cannot perform this transition",
+            metadata={
+                "resource": "scheduled_task",
+                "resource_id": task_id,
+                "status": status,
+            },
+        )
+
+
+class InvalidArtifactError(ApplicationError):
+    code = ErrorCode.INVALID_ARTIFACT
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message, metadata={"field": field})
+
+
+class InvalidEvidenceError(ApplicationError):
+    """An evidence bundle violates a stable schema or integrity boundary."""
+
+    code = ErrorCode.INVALID_EVIDENCE
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message, metadata={"field": field})
+
+
+class InvalidVerificationResultError(ApplicationError):
+    """An Agent response failed the frozen verification result contract."""
+
+    code = ErrorCode.INVALID_VERIFICATION_RESULT
+
+    def __init__(self, message: str):
+        super().__init__(message, metadata={"contract": "research.verification-result.v1"})

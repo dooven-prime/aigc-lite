@@ -69,10 +69,21 @@ def _redact_url(value: str) -> str:
         return value
     if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
         return value
-    pairs = parse_qsl(parsed.query, keep_blank_values=True)
-    if not pairs:
-        return value
+    netloc = parsed.netloc
     changed = False
+    if parsed.username is not None or parsed.password is not None:
+        hostname = parsed.hostname or ""
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        netloc = f"{REDACTED}@{hostname}"
+        if port is not None:
+            netloc += f":{port}"
+        changed = True
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
     redacted_pairs: list[tuple[str, str]] = []
     for key, item in pairs:
         if _normalized_key(key) in _SENSITIVE_QUERY_KEYS:
@@ -85,7 +96,7 @@ def _redact_url(value: str) -> str:
     return urlunsplit(
         (
             parsed.scheme,
-            parsed.netloc,
+            netloc,
             parsed.path,
             urlencode(redacted_pairs, safe="*"),
             parsed.fragment,

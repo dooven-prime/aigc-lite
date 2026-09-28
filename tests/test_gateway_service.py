@@ -5,6 +5,12 @@ from typing import Any
 import pytest
 
 from app import agent
+from app.core.artifacts import (
+    ArtifactDraft,
+    ArtifactKind,
+    CitationDraft,
+    CitationSourceKind,
+)
 from app.core.contracts import (
     ChatCommand,
     RequestContext,
@@ -361,3 +367,83 @@ def test_gateway_persists_safe_failed_step_for_disconnected_mcp_tool(
     assert steps[1]["metadata"]["source"] == "mcp"
     assert steps[1]["metadata"]["provider_id"] == "remote"
     assert "private" not in str(steps)
+
+
+class ArtifactMCPProvider:
+    provider_id = "artifact-remote"
+
+    async def list_tools(self) -> list[ToolSpec]:
+        return [
+            ToolSpec(
+                name="artifact-remote__research",
+                native_name="research",
+                description="Return a research Artifact.",
+                input_schema={"type": "object"},
+                source=ToolSource.MCP,
+                provider_id=self.provider_id,
+            )
+        ]
+
+    async def call_tool(
+        self, native_name: str, arguments: dict[str, Any]
+    ) -> ToolProviderResult:
+        return ToolProviderResult(
+            content='{"finding":"agent artifact marker"}',
+            artifacts=(
+                ArtifactDraft(
+                    name="agent-research.json",
+                    kind=ArtifactKind.JSON,
+                    media_type="application/json",
+                    content_text='{"finding":"agent artifact marker"}',
+                ),
+            ),
+            citations=(
+                CitationDraft(
+                    source_kind=CitationSourceKind.TOOL,
+                    title="artifact-remote:research",
+                    source_id="artifact-remote:research",
+                    artifact_index=0,
+                ),
+            ),
+        )
+
+
+def test_gateway_persists_artifacts_from_agent_tool_steps(
+    tmp_path, monkeypatch
+) -> None:
+    repository = SQLiteRepository(tmp_path / "agent-artifacts.db")
+    repository.init()
+    calls = 0
+
+    async def fake_completion(messages, model=None, tools=None, provider=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-artifact",
+                        "function": {
+                            "name": "artifact-remote__research",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            }
+        return {"role": "assistant", "content": "done", "tool_calls": []}
+
+    monkeypatch.setattr(agent, "completion", fake_completion)
+    service = GatewayService(
+        repository_provider=lambda: repository,
+        agent_runner=agent.run_agent,
+        tool_catalog=ToolCatalog([ArtifactMCPProvider()]),
+    )
+
+    result = asyncio.run(service.chat(ChatCommand(prompt="research"), _context()))
+    detail = repository.get_run("workspace-a", result.run_id)
+    tool_step = next(step for step in detail["steps"] if step["kind"] == "tool")
+
+    assert detail["artifacts"][0]["step_id"] == tool_step["id"]
+    assert detail["citations"][0]["artifact_id"] == detail["artifacts"][0]["id"]

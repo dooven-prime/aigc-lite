@@ -123,6 +123,8 @@ class ToolSession:
             ],
             ledger_output=_ledger_text(result.content, failed=result.failed),
             metadata={**self._metadata(spec), **result.metadata},
+            artifacts=result.artifacts,
+            citations=result.citations,
         )
 
     @staticmethod

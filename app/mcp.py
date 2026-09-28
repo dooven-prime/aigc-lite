@@ -11,6 +11,7 @@ from uuid import uuid4
 import httpx
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
+from . import __version__
 from .config import settings
 from .core.contracts import RequestContext
 from .services.tools import ToolService
@@ -37,7 +38,7 @@ def handle_rpc(request: dict[str, Any]) -> dict[str, Any]:
         result = {
             "protocolVersion": settings.legacy_mcp_protocol_version,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": settings.app_name, "version": "0.2.0"},
+            "serverInfo": {"name": settings.app_name, "version": __version__},
         }
     elif method == "notifications/initialized":
         return {}
@@ -63,7 +64,7 @@ class CatalogMCPServer(MCPServer if MCPServer is not None else object):
         self._tool_service = tool_service
         super().__init__(
             settings.app_name,
-            version="0.3.0",
+            version=__version__,
             instructions="Use the workspace-authorized tools for workspace tasks.",
         )
 

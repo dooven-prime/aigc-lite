@@ -5,7 +5,9 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
-- Development version: `0.3.0-dev.0`.
+No unreleased changes.
+
+## 0.3.0 - 2026-09-28
 - Added a workspace-isolated encrypted Credential Store with write-only API,
   revocation, replacement, and `encrypted-db://credential/UUID` references for
   remote MCP headers.
@@ -15,6 +17,43 @@ roadmap items remain in `docs/DESIGN.md`.
 - Added pluggable local Tool Execution Backends: cooperative async execution,
   soft-cancelled threads, and disposable spawned processes with hard timeout
   termination and execution/cancellation metadata.
+- Added persistent one-time and interval schedules, startup recovery through a
+  hierarchical time-wheel backend, registered `TaskRunner` dispatch, and
+  workspace-admin create/query/pause/resume/cancel APIs with audit events.
+- Added daily/weekly schedule API shorthand and MiniMax OpenAI-compatible
+  reasoning separation so final Agent content excludes embedded think blocks.
+- Registered `mcp.probe`, policy-filtered `tool.call`, and allowlisted
+  content-free `http.poll` as independent scheduled TaskRunner targets.
+- Added workspace-scoped Artifact/Citation storage linked to Run/Step records,
+  Run detail projection, unified search, and automatic capture of structured or
+  resource-bearing remote MCP tool results.
+- Added an injectable `SearchBackend`, a migration-backed SQLite FTS5 index with
+  existing-data backfill and source-table synchronization triggers, plus a safe
+  lexical fallback for short queries and runtimes without FTS5.
+- Added the first execution-memory UI slice: a responsive Run Explorer with run
+  filtering, status and duration summaries, Step timelines, bounded payload
+  previews, and linked Artifact/Citation inspection.
+- Added a unified workspace search UI across conversations, knowledge, Run
+  Steps, Artifacts, and Citations, with direct Run/Step/Artifact navigation and
+  focused result highlighting in Run Explorer.
+- Added a cross-domain evidence control layer for versioned Protocols, scoped
+  Claims, execution Receipts, explicit Reviews, and content-addressed Freeze
+  manifests. Epistemic outcomes preserve insufficient/undetermined/rejected as
+  distinct states.
+- Added a read-only NanoJev bundle importer and Decision Lab for Boolean,
+  Choice, and Score distributions, confidence/entropy review thresholds,
+  fail-closed schema validation, frozen artifacts, and unified-search links.
+- Added a versioned Research Registry and AI Frontier importer with normalized
+  Claim Revisions and source references, explicit closure blockers, immutable
+  import receipts/freezes, a Claim Explorer UI, and unified-search navigation.
+- Added typed Claim Relations with dependency-cycle rejection, receipt-bound
+  Verification Attempts, and immutable fail-closed Promotion Gate evaluations
+  across registered, evidence-ready, review-ready, and release-ready stages.
+- Added immutable, versioned Verification Plans and a `research.verify` Agent /
+  scheduler runner that validates a strict result contract and automatically
+  links Run, Step, Artifact, Receipt, Verification Attempt, and Promotion Gate.
+  Invalid output, upstream failure, and cancellation remain queryable and fail
+  closed; Agent executions never self-declare independent review.
 - Restricted workspace administrators to their own tenant and removed the
   unsupported cross-workspace tenant creation surface.
 

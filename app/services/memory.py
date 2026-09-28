@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ..core.contracts import RequestContext
 from ..core.errors import ResourceNotFoundError
 from ..database import get_repository
+from ..ports.search import SearchBackend
 from .gateway import RepositoryProvider
+
+SearchBackendProvider = Callable[[], SearchBackend]
 
 
 class MemoryService:
     """Read tenant-scoped conversations, knowledge, and execution records."""
 
-    def __init__(self, *, repository_provider: RepositoryProvider = get_repository) -> None:
+    def __init__(
+        self,
+        *,
+        repository_provider: RepositoryProvider = get_repository,
+        search_backend_provider: SearchBackendProvider | None = None,
+    ) -> None:
         self._repository_provider = repository_provider
+        self._search_backend_provider = search_backend_provider or (
+            lambda: self._repository_provider().search_backend()
+        )
 
     def list_runs(self, context: RequestContext, limit: int = 50) -> list[dict]:
         return self._repository_provider().list_runs(context.workspace_id, limit)
@@ -26,6 +39,6 @@ class MemoryService:
     def search(
         self, context: RequestContext, query: str, limit: int = 20
     ) -> list[dict]:
-        return self._repository_provider().search_memory(
+        return self._search_backend_provider().search(
             context.workspace_id, query, limit
         )

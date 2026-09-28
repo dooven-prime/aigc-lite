@@ -30,6 +30,7 @@ from ..core.errors import (
 from ..database import get_repository
 from ..providers import stream_chat
 from ..repository import Repository
+from .artifacts import ArtifactService
 from .tool_catalog import ToolCatalog, create_default_tool_catalog
 
 AgentRunner = Callable[..., Awaitable[str]]
@@ -83,6 +84,7 @@ class GatewayService:
         stream_runner: StreamRunner = stream_chat,
         tool_catalog: ToolCatalog | None = None,
         active_runs: _ActiveRunRegistry | None = None,
+        artifact_service: ArtifactService | None = None,
     ) -> None:
         self._repository_provider = repository_provider
         self._agent_runner = agent_runner
@@ -93,6 +95,9 @@ class GatewayService:
             repository_provider
         )
         self._active_runs = active_runs or _ActiveRunRegistry()
+        self._artifact_service = artifact_service or ArtifactService(
+            repository_provider=repository_provider
+        )
 
     async def chat(self, command: ChatCommand, context: RequestContext) -> ChatResult:
         repository = self._repository_provider()
@@ -118,7 +123,7 @@ class GatewayService:
         def record_step(step: AgentStepRecord) -> None:
             nonlocal sequence
             sequence += 1
-            repository.append_run_step(
+            stored_step = repository.append_run_step(
                 context.workspace_id,
                 run["id"],
                 sequence,
@@ -129,6 +134,14 @@ class GatewayService:
                 step.output_content,
                 step.metadata,
             )
+            if step.artifacts or step.citations:
+                self._artifact_service.record_tool_result(
+                    context,
+                    run_id=run["id"],
+                    step_id=stored_step["id"],
+                    artifacts=step.artifacts,
+                    citations=step.citations,
+                )
 
         def record_usage(usage: dict) -> None:
             pricing = provider or {

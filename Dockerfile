@@ -14,5 +14,6 @@ COPY app ./app
 COPY --from=frontend /frontend/dist ./frontend/dist
 RUN pip install --no-cache-dir .
 
+ENV AIGC_LITE_HOST=0.0.0.0
 EXPOSE 8000
 CMD ["aigc-lite"]

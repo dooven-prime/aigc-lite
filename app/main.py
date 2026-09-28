@@ -6,16 +6,20 @@ import json
 import re
 import secrets
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
+from . import __version__
+from .adapters.scheduling import TimeWheelScheduler
 from .audit import record_request
 from .auth import (
     create_login_session,
@@ -31,11 +35,31 @@ from .core.errors import (
     AgentLimitError,
     AgentWallTimeLimitError,
     ApplicationError,
+    InvalidArtifactError,
+    InvalidEvidenceError,
+    InvalidScheduleError,
+    InvalidVerificationResultError,
     LLMError,
     ProviderNotConfiguredError,
     ResourceConflictError,
     ResourceNotFoundError,
     RunNotActiveError,
+    ScheduleNotActiveError,
+)
+from .core.research import (
+    ClaimPromotionStage,
+    ClaimRelationDraft,
+    ClaimRelationType,
+    VerificationAttemptDraft,
+    VerificationKind,
+    VerificationOutcome,
+    VerificationPlanDraft,
+)
+from .core.scheduling import (
+    ScheduledTask,
+    ScheduleKind,
+    ScheduleSpec,
+    ScheduleTaskCommand,
 )
 from .database import (
     create_document,
@@ -47,23 +71,64 @@ from .database import (
     search_documents,
 )
 from .mcp import build_transport_apps, call_local_tool, create_mcp_server, handle_rpc
+from .services.artifacts import ArtifactService
 from .services.credentials import CredentialService
+from .services.decision_lab import DecisionLabService
+from .services.evidence import EvidenceService
 from .services.gateway import GatewayService
+from .services.http_poll import HTTPPollService
 from .services.mcp_probe import MCPProbeService
 from .services.memory import MemoryService
+from .services.research_registry import ResearchRegistryService
+from .services.scheduler import SchedulerService
+from .services.task_runner import TaskRunner
 from .services.tool_catalog import create_default_tool_catalog
 from .services.tools import ToolService
+from .services.verification_runner import VerificationRunner
 from .tenancy import Tenant, current_tenant
 
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 tool_catalog = create_default_tool_catalog()
-tool_service = ToolService(tool_catalog=tool_catalog)
+artifact_service = ArtifactService()
+tool_service = ToolService(
+    tool_catalog=tool_catalog, artifact_service=artifact_service
+)
 mcp_server = create_mcp_server(tool_service)
 mcp_app, mcp_sse_app = build_transport_apps(mcp_server)
-gateway_service = GatewayService(tool_catalog=tool_catalog)
+gateway_service = GatewayService(
+    tool_catalog=tool_catalog, artifact_service=artifact_service
+)
 memory_service = MemoryService()
 mcp_probe_service = MCPProbeService()
+http_poll_service = HTTPPollService()
 credential_service = CredentialService()
+evidence_service = EvidenceService()
+decision_lab_service = DecisionLabService(
+    artifact_service=artifact_service, evidence_service=evidence_service
+)
+research_registry_service = ResearchRegistryService(
+    artifact_service=artifact_service, evidence_service=evidence_service
+)
+verification_runner = VerificationRunner(
+    gateway_service=gateway_service,
+    research_registry_service=research_registry_service,
+    artifact_service=artifact_service,
+)
+scheduler_service = SchedulerService()
+task_runner = TaskRunner(
+    gateway_service=gateway_service,
+    http_poll_service=http_poll_service,
+    mcp_probe_service=mcp_probe_service,
+    tool_service=tool_service,
+    verification_runner=verification_runner,
+)
+timewheel_scheduler = TimeWheelScheduler(
+    scheduler_service=scheduler_service,
+    task_runner=task_runner,
+    tick_seconds=settings.scheduler_tick_seconds,
+    reconcile_seconds=settings.scheduler_reconcile_seconds,
+    max_concurrency=settings.scheduler_max_concurrency,
+)
 
 
 class LoginRequest(BaseModel):
@@ -156,6 +221,21 @@ class CredentialReplaceRequest(BaseModel):
     secret: SecretStr = Field(min_length=1, max_length=10_000)
 
 
+class ScheduleCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    target: str = Field(
+        default="agent.chat",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_.:-]*$",
+    )
+    payload: dict[str, Any] = Field(default_factory=dict)
+    kind: ScheduleKind | None = None
+    cadence: Literal["daily", "weekly"] | None = None
+    run_at: datetime
+    interval_seconds: float | None = Field(default=None, gt=0)
+
+
 class MCPAuthMiddleware:
     """Resolve every MCP HTTP request into a workspace RequestContext."""
 
@@ -224,18 +304,24 @@ class MCPAuthMiddleware:
 async def lifespan(_app: FastAPI):
     init_db()
     ensure_bootstrap_admin()
+    if settings.scheduler_enabled:
+        await timewheel_scheduler.start()
     try:
-        async with mcp_server.session_manager.run():
+        try:
+            async with mcp_server.session_manager.run():
+                yield
+        except RuntimeError as exc:
+            if "can only be called once" not in str(exc):
+                raise
+            # The SDK manager is intentionally single-use. This branch only helps
+            # repeated in-process test clients; a production process starts once.
             yield
-    except RuntimeError as exc:
-        if "can only be called once" not in str(exc):
-            raise
-        # The SDK manager is intentionally single-use. This branch only helps
-        # repeated in-process test clients; a production process starts once.
-        yield
+    finally:
+        if settings.scheduler_enabled:
+            await timewheel_scheduler.stop()
 
 
-app = FastAPI(title=settings.app_name, version="0.3.0-dev.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
 app.add_middleware(MCPAuthMiddleware)
 app.mount(
     "/ui",
@@ -265,8 +351,20 @@ async def validation_error_handler(
 async def application_error_handler(_request: Request, exc: ApplicationError) -> JSONResponse:
     if isinstance(exc, ResourceNotFoundError):
         status_code = 404
-    elif isinstance(exc, (ResourceConflictError, RunNotActiveError)):
+    elif isinstance(
+        exc, (ResourceConflictError, RunNotActiveError, ScheduleNotActiveError)
+    ):
         status_code = 409
+    elif isinstance(
+        exc,
+        (
+            InvalidArtifactError,
+            InvalidEvidenceError,
+            InvalidScheduleError,
+            InvalidVerificationResultError,
+        ),
+    ):
+        status_code = 422
     elif isinstance(exc, AgentWallTimeLimitError):
         status_code = 504
     elif isinstance(exc, AgentLimitError):
@@ -318,12 +416,127 @@ class DocumentRequest(BaseModel):
     content: str = Field(min_length=1, max_length=2_000_000)
 
 
+class ClaimRelationRequest(BaseModel):
+    target_claim_id: str = Field(min_length=1, max_length=100)
+    relation_type: ClaimRelationType
+    rationale: str = Field(min_length=1, max_length=4_000)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
+
+
+class RelationWithdrawalRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
+class VerificationAttemptRequest(BaseModel):
+    kind: VerificationKind
+    outcome: VerificationOutcome
+    method: str = Field(min_length=1, max_length=4_000)
+    scope: str = Field(min_length=1, max_length=8_000)
+    input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    output_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    independent: bool = False
+    run_id: str | None = Field(default=None, max_length=100)
+    artifact_ids: list[str] = Field(default_factory=list, max_length=100)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromotionGateRequest(BaseModel):
+    target_stage: ClaimPromotionStage
+
+
+class VerificationPlanRequest(BaseModel):
+    plan_key: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_.-]*$",
+    )
+    name: str = Field(min_length=1, max_length=200)
+    kind: VerificationKind
+    method: str = Field(min_length=1, max_length=4_000)
+    scope: str = Field(min_length=1, max_length=8_000)
+    prompt: str = Field(min_length=1, max_length=40_000)
+    system: str = Field(
+        default=(
+            "Act as a careful research verification agent. Use only the supplied claim, "
+            "declared sources, and auditable tool results."
+        ),
+        min_length=1,
+        max_length=20_000,
+    )
+    model: str | None = Field(default=None, max_length=200)
+    auto_promote: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 def request_context(request: Request, tenant: Tenant) -> RequestContext:
     return RequestContext(
         request_id=str(uuid4()),
         workspace_id=tenant.id,
         principal_id=getattr(request.state, "user_id", None),
         scopes=getattr(request.state, "scopes", frozenset()),
+    )
+
+
+def _schedule_response(task: ScheduledTask) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "workspace_id": task.workspace_id,
+        "name": task.name,
+        "target": task.target,
+        "payload": task.payload,
+        "kind": task.kind.value,
+        "status": task.status.value,
+        "next_run_at": task.next_run_at.isoformat() if task.next_run_at else None,
+        "interval_seconds": task.interval_seconds,
+        "last_run_at": task.last_run_at.isoformat() if task.last_run_at else None,
+        "created_at": task.created_at.isoformat(),
+        "updated_at": task.updated_at.isoformat(),
+    }
+
+
+def _schedule_context(request: Request, user: dict) -> RequestContext:
+    return request_context(
+        request, Tenant(user["tenant_id"], user["tenant_id"])
+    )
+
+
+def _audit_schedule_action(action: str, task: ScheduledTask, user: dict) -> None:
+    get_repository().write_audit(
+        user["tenant_id"],
+        f"schedule.{action}",
+        f"/api/schedules/{task.id}",
+        {
+            "task_id": task.id,
+            "target": task.target,
+            "kind": task.kind.value,
+            "status": task.status.value,
+        },
+        user_id=user["id"],
+    )
+
+
+def _schedule_spec(request: ScheduleCreateRequest) -> ScheduleSpec:
+    if request.cadence is not None:
+        if request.kind not in {None, ScheduleKind.INTERVAL}:
+            raise InvalidScheduleError(
+                "kind", "Daily or weekly cadence requires an interval schedule"
+            )
+        if request.interval_seconds is not None:
+            raise InvalidScheduleError(
+                "interval_seconds",
+                "Cadence and interval_seconds cannot both be specified",
+            )
+        return ScheduleSpec(
+            kind=ScheduleKind.INTERVAL,
+            run_at=request.run_at,
+            interval_seconds={"daily": 86400.0, "weekly": 604800.0}[
+                request.cadence
+            ],
+        )
+    return ScheduleSpec(
+        kind=request.kind or ScheduleKind.ONCE,
+        run_at=request.run_at,
+        interval_seconds=request.interval_seconds,
     )
 
 
@@ -454,6 +667,400 @@ async def run_detail(
     return memory_service.get_run(request_context(http_request, tenant), run_id)
 
 
+@app.get("/api/artifacts")
+async def artifacts(
+    http_request: Request,
+    run_id: str | None = None,
+    limit: int = 50,
+    tenant: Tenant = Depends(current_tenant),
+) -> list[dict]:
+    return artifact_service.list(
+        request_context(http_request, tenant), limit=limit, run_id=run_id
+    )
+
+
+@app.get("/api/artifacts/{artifact_id}")
+async def artifact_detail(
+    artifact_id: str,
+    http_request: Request,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    return artifact_service.get(request_context(http_request, tenant), artifact_id)
+
+
+@app.get("/api/evidence/protocols")
+async def evidence_protocols(
+    http_request: Request,
+    profile: str | None = None,
+    limit: int = 50,
+    tenant: Tenant = Depends(current_tenant),
+) -> list[dict]:
+    return evidence_service.list_protocols(
+        request_context(http_request, tenant), profile=profile, limit=limit
+    )
+
+
+@app.get("/api/evidence/protocols/{protocol_id}")
+async def evidence_protocol_detail(
+    protocol_id: str,
+    http_request: Request,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    return evidence_service.get_protocol(
+        request_context(http_request, tenant), protocol_id
+    )
+
+
+@app.get("/api/research-registry")
+async def research_registry(
+    http_request: Request,
+    research_case_id: str | None = None,
+    limit: int = 2_000,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    return research_registry_service.dashboard(
+        request_context(http_request, tenant),
+        research_case_id=research_case_id,
+        limit=limit,
+    )
+
+
+@app.get("/api/research-registry/claims/{claim_id}")
+async def research_claim_detail(
+    claim_id: str,
+    http_request: Request,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    return research_registry_service.get_claim(
+        request_context(http_request, tenant), claim_id
+    )
+
+
+@app.post("/api/research-registry/claims/{claim_id}/relations", status_code=201)
+async def create_research_claim_relation(
+    claim_id: str,
+    payload: ClaimRelationRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    context = _schedule_context(http_request, user)
+    relation = research_registry_service.create_relation(
+        context,
+        claim_id,
+        ClaimRelationDraft(
+            target_claim_id=payload.target_claim_id,
+            relation_type=payload.relation_type,
+            rationale=payload.rationale,
+            evidence_refs=tuple(payload.evidence_refs),
+        ),
+    )
+    get_repository().write_audit(
+        user["tenant_id"],
+        "research.claim_relation.create",
+        f"/api/research-registry/claims/{claim_id}/relations",
+        {
+            "claim_id": claim_id,
+            "target_claim_id": relation["target_claim_id"],
+            "relation_type": relation["relation_type"],
+        },
+        user_id=user["id"],
+    )
+    return relation
+
+
+@app.post(
+    "/api/research-registry/claims/{claim_id}/relations/{relation_id}/withdraw"
+)
+async def withdraw_research_claim_relation(
+    claim_id: str,
+    relation_id: str,
+    payload: RelationWithdrawalRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    context = _schedule_context(http_request, user)
+    relation = research_registry_service.withdraw_relation(
+        context, claim_id, relation_id, reason=payload.reason
+    )
+    get_repository().write_audit(
+        user["tenant_id"],
+        "research.claim_relation.withdraw",
+        f"/api/research-registry/claims/{claim_id}/relations/{relation_id}/withdraw",
+        {
+            "claim_id": claim_id,
+            "relation_id": relation_id,
+            "relation_type": relation["relation_type"],
+        },
+        user_id=user["id"],
+    )
+    return relation
+
+
+@app.post(
+    "/api/research-registry/claims/{claim_id}/verification-attempts",
+    status_code=201,
+)
+async def record_research_verification_attempt(
+    claim_id: str,
+    payload: VerificationAttemptRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    context = _schedule_context(http_request, user)
+    attempt = research_registry_service.record_verification_attempt(
+        context,
+        claim_id,
+        VerificationAttemptDraft(
+            kind=payload.kind,
+            outcome=payload.outcome,
+            method=payload.method,
+            scope=payload.scope,
+            input_digest=payload.input_digest,
+            output_digest=payload.output_digest,
+            independent=payload.independent,
+            run_id=payload.run_id,
+            artifact_ids=tuple(payload.artifact_ids),
+            metadata=payload.metadata,
+        ),
+    )
+    get_repository().write_audit(
+        user["tenant_id"],
+        "research.verification_attempt.record",
+        f"/api/research-registry/claims/{claim_id}/verification-attempts",
+        {
+            "claim_id": claim_id,
+            "attempt_id": attempt["id"],
+            "kind": attempt["kind"],
+            "outcome": attempt["outcome"],
+            "independent": attempt["independent"],
+        },
+        user_id=user["id"],
+    )
+    return attempt
+
+
+@app.post(
+    "/api/research-registry/claims/{claim_id}/verification-plans",
+    status_code=201,
+)
+async def create_research_verification_plan(
+    claim_id: str,
+    payload: VerificationPlanRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    context = _schedule_context(http_request, user)
+    plan = verification_runner.create_plan(
+        context,
+        claim_id,
+        VerificationPlanDraft(
+            plan_key=payload.plan_key,
+            name=payload.name,
+            kind=payload.kind,
+            method=payload.method,
+            scope=payload.scope,
+            prompt=payload.prompt,
+            system=payload.system,
+            model=payload.model,
+            auto_promote=payload.auto_promote,
+            metadata=payload.metadata,
+        ),
+    )
+    get_repository().write_audit(
+        user["tenant_id"],
+        "research.verification_plan.create",
+        f"/api/research-registry/claims/{claim_id}/verification-plans",
+        {
+            "claim_id": claim_id,
+            "plan_id": plan["id"],
+            "plan_key": plan["plan_key"],
+            "version": plan["version"],
+        },
+        user_id=user["id"],
+    )
+    return plan
+
+
+@app.post("/api/research-registry/verification-plans/{plan_id}/runs")
+async def run_research_verification_plan(
+    plan_id: str,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    result = await verification_runner.execute(
+        _schedule_context(http_request, user), plan_id
+    )
+    execution = result["execution"]
+    get_repository().write_audit(
+        user["tenant_id"],
+        "research.verification_plan.execute",
+        f"/api/research-registry/verification-plans/{plan_id}/runs",
+        {
+            "plan_id": plan_id,
+            "execution_id": execution["id"],
+            "run_id": execution["run_id"],
+            "attempt_id": execution["attempt_id"],
+            "outcome": execution["outcome"],
+        },
+        user_id=user["id"],
+    )
+    return result
+
+
+@app.post("/api/research-registry/claims/{claim_id}/promotion-gates")
+async def evaluate_research_promotion_gate(
+    claim_id: str,
+    payload: PromotionGateRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    context = _schedule_context(http_request, user)
+    result = research_registry_service.evaluate_promotion(
+        context, claim_id, payload.target_stage
+    )
+    evaluation = result["evaluation"]
+    get_repository().write_audit(
+        user["tenant_id"],
+        "research.promotion_gate.evaluate",
+        f"/api/research-registry/claims/{claim_id}/promotion-gates",
+        {
+            "claim_id": claim_id,
+            "evaluation_id": evaluation["id"],
+            "from_stage": evaluation["from_stage"],
+            "target_stage": evaluation["target_stage"],
+            "decision": evaluation["decision"],
+            "blockers": evaluation["blockers"],
+        },
+        user_id=user["id"],
+    )
+    return result
+
+
+@app.get("/api/decision-lab")
+async def decision_lab(
+    http_request: Request,
+    protocol_id: str | None = None,
+    family: str | None = None,
+    resolution: str | None = None,
+    limit: int = 500,
+    evaluation: bool = False,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    return decision_lab_service.dashboard(
+        request_context(http_request, tenant),
+        protocol_id=protocol_id,
+        family=family,
+        resolution=resolution,
+        limit=limit,
+        include_gold=evaluation,
+    )
+
+
+@app.get("/api/decision-lab/cases/{case_id}")
+async def decision_case_detail(
+    case_id: str,
+    http_request: Request,
+    evaluation: bool = False,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    return decision_lab_service.get_case(
+        request_context(http_request, tenant), case_id, include_gold=evaluation
+    )
+
+
+async def _read_evidence_upload(
+    upload: UploadFile, field: str, maximum: int = 5_000_000
+) -> bytes:
+    content = await upload.read(maximum + 1)
+    if not content:
+        raise InvalidEvidenceError(field, f"{field} is empty")
+    if len(content) > maximum:
+        raise InvalidEvidenceError(field, f"{field} exceeds {maximum} bytes")
+    return content
+
+
+@app.post("/api/research-registry/import/frontier", status_code=201)
+async def import_frontier_registry(
+    http_request: Request,
+    source_name: str = Form(default="AI Frontier Claim Registry", max_length=200),
+    registry_file: UploadFile = File(...),
+    source_ledger_file: UploadFile | None = File(default=None),
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    context = _schedule_context(http_request, user)
+    result = research_registry_service.import_frontier(
+        context,
+        source_name=source_name,
+        registry_bytes=await _read_evidence_upload(
+            registry_file, "registry_file", 1_000_000
+        ),
+        source_ledger_bytes=(
+            await _read_evidence_upload(
+                source_ledger_file, "source_ledger_file", 750_000
+            )
+            if source_ledger_file is not None
+            else None
+        ),
+    )
+    research_case = result.get("case") or {}
+    get_repository().write_audit(
+        user["tenant_id"],
+        "research.frontier.import",
+        "/api/research-registry/import/frontier",
+        {
+            "research_case_id": research_case.get("id"),
+            "registry_id": research_case.get("registry_id"),
+            "registry_version": research_case.get("registry_version"),
+            "imported": result.get("imported", False),
+            "claim_count": result.get("statistics", {}).get("claims", 0),
+        },
+        user_id=user["id"],
+    )
+    return result
+
+
+@app.post("/api/decision-lab/import/nanojev", status_code=201)
+async def import_nanojev_bundle(
+    http_request: Request,
+    source_name: str = Form(default="NanoJev evaluation", max_length=200),
+    confidence_threshold: float = Form(default=0.7, ge=0, le=1),
+    request_file: UploadFile = File(...),
+    predictions_file: UploadFile = File(...),
+    metrics_file: UploadFile = File(...),
+    receipt_file: UploadFile | None = File(default=None),
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    context = _schedule_context(http_request, user)
+    result = decision_lab_service.import_nanojev(
+        context,
+        source_name=source_name,
+        confidence_threshold=confidence_threshold,
+        request_bytes=await _read_evidence_upload(request_file, "request_file"),
+        predictions_bytes=await _read_evidence_upload(
+            predictions_file, "predictions_file"
+        ),
+        metrics_bytes=await _read_evidence_upload(metrics_file, "metrics_file"),
+        receipt_bytes=(
+            await _read_evidence_upload(receipt_file, "receipt_file", 1_000_000)
+            if receipt_file is not None
+            else None
+        ),
+    )
+    protocol = result.get("protocol") or {}
+    get_repository().write_audit(
+        user["tenant_id"],
+        "decision.nanojev.import",
+        "/api/decision-lab/import/nanojev",
+        {
+            "protocol_id": protocol.get("id"),
+            "imported": result.get("imported", False),
+            "case_count": result.get("statistics", {}).get("cases", 0),
+        },
+        user_id=user["id"],
+    )
+    return result
+
+
 @app.post("/api/runs/{run_id}/cancel", status_code=202)
 async def cancel_run(
     run_id: str,
@@ -462,6 +1069,91 @@ async def cancel_run(
 ) -> dict[str, str | bool]:
     gateway_service.cancel_run(request_context(http_request, tenant), run_id)
     return {"run_id": run_id, "cancel_requested": True}
+
+
+@app.post("/api/schedules", status_code=201)
+async def create_schedule(
+    request: ScheduleCreateRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict[str, Any]:
+    task_runner.validate(request.target, request.payload)
+    task = scheduler_service.schedule(
+        _schedule_context(http_request, user),
+        ScheduleTaskCommand(
+            name=request.name,
+            target=request.target,
+            payload=request.payload,
+            schedule=_schedule_spec(request),
+        ),
+    )
+    _audit_schedule_action("create", task, user)
+    timewheel_scheduler.notify(task)
+    return _schedule_response(task)
+
+
+@app.get("/api/schedules")
+async def schedules(
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> list[dict[str, Any]]:
+    tasks = scheduler_service.list(_schedule_context(http_request, user))
+    return [_schedule_response(task) for task in tasks]
+
+
+@app.get("/api/schedules/{task_id}")
+async def schedule_detail(
+    task_id: str,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict[str, Any]:
+    task = scheduler_service.get(_schedule_context(http_request, user), task_id)
+    return _schedule_response(task)
+
+
+def _control_schedule(
+    action: str,
+    task_id: str,
+    http_request: Request,
+    user: dict,
+) -> dict[str, Any]:
+    context = _schedule_context(http_request, user)
+    transition = {
+        "pause": scheduler_service.pause,
+        "resume": scheduler_service.resume,
+        "cancel": scheduler_service.cancel,
+    }[action]
+    task = transition(context, task_id)
+    _audit_schedule_action(action, task, user)
+    timewheel_scheduler.notify(task)
+    return _schedule_response(task)
+
+
+@app.post("/api/schedules/{task_id}/pause")
+async def pause_schedule(
+    task_id: str,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict[str, Any]:
+    return _control_schedule("pause", task_id, http_request, user)
+
+
+@app.post("/api/schedules/{task_id}/resume")
+async def resume_schedule(
+    task_id: str,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict[str, Any]:
+    return _control_schedule("resume", task_id, http_request, user)
+
+
+@app.post("/api/schedules/{task_id}/cancel")
+async def cancel_schedule(
+    task_id: str,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict[str, Any]:
+    return _control_schedule("cancel", task_id, http_request, user)
 
 
 @app.get("/api/search")

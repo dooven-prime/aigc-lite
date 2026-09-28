@@ -105,6 +105,45 @@ data: [DONE]
     }
 
 
+def test_minimax_requests_split_reasoning_from_final_content(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def handler(request: Request) -> Response:
+        captured["payload"] = json.loads((await request.aread()).decode())
+        return Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "reasoning_content": "private reasoning",
+                            "content": "clean answer",
+                        }
+                    }
+                ]
+            },
+        )
+
+    transport = MockTransport(handler)
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _client_factory(transport))
+
+    result = asyncio.run(
+        providers.completion(
+            [{"role": "user", "content": "hi"}],
+            provider={
+                "base_url": "https://api.minimaxi.com/v1",
+                "api_key": "test-key",
+                "model": "MiniMax-M3",
+            },
+        )
+    )
+
+    assert captured["payload"]["reasoning_split"] is True
+    assert result["content"] == "clean answer"
+    assert result["reasoning_content"] == "private reasoning"
+
+
 def test_provider_http_error_uses_stable_application_error(monkeypatch) -> None:
     def handler(_request: Request) -> Response:
         return Response(429, json={"error": {"message": "rate limited"}})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .config import settings
+from .ports.search import SearchBackend
 from .repository import PostgresRepository, Repository, SQLiteRepository
 
 
@@ -38,6 +39,10 @@ def get_repository() -> Repository:
 
 def init_db() -> None:
     get_repository().init()
+
+
+def get_search_backend() -> SearchBackend:
+    return get_repository().search_backend()
 
 
 def create_session(tenant_id: str, title: str = "New conversation") -> dict:

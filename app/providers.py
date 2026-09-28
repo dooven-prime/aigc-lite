@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -15,6 +16,18 @@ from .core.errors import (
     UpstreamRequestError,
     UpstreamResponseError,
 )
+
+_MINIMAX_HOSTS = {"api.minimax.io", "api.minimaxi.com"}
+
+
+def _provider_payload(base_url: str) -> dict[str, Any]:
+    """Return narrowly scoped compatibility flags for known providers."""
+    hostname = urlsplit(base_url).hostname
+    if hostname in _MINIMAX_HOSTS:
+        # MiniMax otherwise embeds <think> blocks into content. Keeping its
+        # reasoning field separate preserves clean Agent answers and tool loops.
+        return {"reasoning_split": True}
+    return {}
 
 
 async def completion(
@@ -28,7 +41,11 @@ async def completion(
     base_url = provider.get("base_url") or settings.llm_base_url
     if not api_key:
         raise ProviderNotConfiguredError("AIGC_LITE_LLM_API_KEY is not configured")
-    payload: dict[str, Any] = {"model": model or provider.get("model") or settings.llm_model, "messages": messages}
+    payload: dict[str, Any] = {
+        "model": model or provider.get("model") or settings.llm_model,
+        "messages": messages,
+        **_provider_payload(base_url),
+    }
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -70,6 +87,7 @@ async def stream_chat(
         "messages": messages,
         "stream": True,
         "stream_options": {"include_usage": True},
+        **_provider_payload(base_url),
     }
     headers = {"Authorization": f"Bearer {api_key}"}
     try:

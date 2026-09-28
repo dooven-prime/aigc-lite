@@ -163,6 +163,8 @@ async def run_agent(
                             "tool_call_index": tool_call_count,
                             **invocation.metadata,
                         },
+                        artifacts=invocation.artifacts,
+                        citations=invocation.citations,
                     )
                 )
             messages.append({

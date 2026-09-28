@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -16,6 +17,7 @@ from ..core.contracts import (
 from ..core.errors import ErrorCode
 from ..database import get_repository
 from ..repository import Repository
+from .artifacts import ArtifactService
 from .tool_catalog import ToolCatalog, ToolSession, create_default_tool_catalog
 
 RepositoryProvider = Callable[[], Repository]
@@ -29,10 +31,14 @@ class ToolService:
         *,
         repository_provider: RepositoryProvider = get_repository,
         tool_catalog: ToolCatalog | None = None,
+        artifact_service: ArtifactService | None = None,
     ) -> None:
         self._repository_provider = repository_provider
         self._tool_catalog = tool_catalog or create_default_tool_catalog(
             repository_provider
+        )
+        self._artifact_service = artifact_service or ArtifactService(
+            repository_provider=repository_provider
         )
 
     async def discover(self, context: RequestContext) -> ToolSession:
@@ -60,6 +66,29 @@ class ToolService:
             result = await session.invoke(
                 name, json.dumps(arguments, ensure_ascii=False, default=str)
             )
+        except asyncio.CancelledError:
+            repository.append_run_step(
+                context.workspace_id,
+                run["id"],
+                1,
+                StepKind.TOOL.value,
+                name,
+                StepStatus.CANCELLED.value,
+                "{}",
+                "",
+                {
+                    "transport": transport,
+                    "cancelled": True,
+                    "error_code": ErrorCode.AGENT_CANCELLED.value,
+                },
+            )
+            repository.finish_run(
+                context.workspace_id,
+                run["id"],
+                RunStatus.CANCELLED.value,
+                ErrorCode.AGENT_CANCELLED.value,
+            )
+            raise
         except Exception:
             repository.append_run_step(
                 context.workspace_id,
@@ -84,7 +113,7 @@ class ToolService:
             raise
 
         metadata = {"transport": transport, **result.metadata}
-        repository.append_run_step(
+        step = repository.append_run_step(
             context.workspace_id,
             run["id"],
             1,
@@ -95,6 +124,22 @@ class ToolService:
             result.ledger_output,
             metadata,
         )
+        try:
+            self._artifact_service.record_tool_result(
+                context,
+                run_id=run["id"],
+                step_id=step["id"],
+                artifacts=result.artifacts,
+                citations=result.citations,
+            )
+        except Exception:
+            repository.finish_run(
+                context.workspace_id,
+                run["id"],
+                RunStatus.FAILED.value,
+                ErrorCode.INTERNAL_ERROR.value,
+            )
+            raise
         error_code = self._error_code(result) if result.failed else None
         repository.finish_run(
             context.workspace_id,

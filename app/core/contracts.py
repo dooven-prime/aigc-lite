@@ -11,6 +11,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from .artifacts import ArtifactDraft, CitationDraft
+
 
 class RunStatus(StrEnum):
     """Lifecycle of one observable Agent execution attempt."""
@@ -115,6 +117,8 @@ class AgentStepRecord:
     input_content: str = ""
     output_content: str = ""
     metadata: dict = field(default_factory=dict)
+    artifacts: tuple[ArtifactDraft, ...] = ()
+    citations: tuple[CitationDraft, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +156,8 @@ class ToolProviderResult:
     content: str
     failed: bool = False
     metadata: dict = field(default_factory=dict)
+    artifacts: tuple[ArtifactDraft, ...] = ()
+    citations: tuple[CitationDraft, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,3 +169,5 @@ class ToolInvocationResult:
     ledger_input: str
     ledger_output: str
     metadata: dict = field(default_factory=dict)
+    artifacts: tuple[ArtifactDraft, ...] = ()
+    citations: tuple[CitationDraft, ...] = ()
