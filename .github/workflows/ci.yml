@@ -16,9 +16,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
+      - run: pip install -e "./extensions/ros2-bridge"
       - run: pip install pip-audit
       - run: python -m pip_audit --local --skip-editable
-      - run: ruff check app tests
+      - run: ruff check app tests extensions/ros2-bridge/src
       - run: pytest
   frontend:
     runs-on: ubuntu-latest

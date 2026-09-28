@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from dataclasses import dataclass
 
 from fastapi import Header, HTTPException, Request
@@ -23,7 +24,19 @@ class Tenant:
 def _role_scopes(role: str) -> frozenset[str]:
     """Map the current coarse roles onto Tool Catalog scopes."""
     if role == "admin":
-        return frozenset({"tools:write", "tools:high-risk"})
+        configured = {
+            item.strip()
+            for item in settings.admin_tool_scopes.split(",")
+            if item.strip()
+        }
+        if not all(
+            re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", item)
+            for item in configured
+        ):
+            raise RuntimeError(
+                "AIGC_LITE_ADMIN_TOOL_SCOPES contains an invalid scope"
+            )
+        return frozenset({"tools:write", "tools:high-risk", *configured})
     return frozenset()
 
 
@@ -79,6 +92,6 @@ async def current_tenant(
         if _same_secret(token, secret):
             check_rate_limit(tenant.id)
             request.state.tenant_id = tenant.id
-            request.state.scopes = frozenset({"tools:write", "tools:high-risk"})
+            request.state.scopes = _role_scopes("admin")
             return tenant
     raise HTTPException(status_code=401, detail="Invalid API key")

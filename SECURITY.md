@@ -28,3 +28,21 @@ cross-workspace data may be exposed.
 Execution records and audit metadata use centralized best-effort redaction.
 This is defense in depth, not a substitute for keeping secrets out of prompts
 and tool results.
+
+## Physical capability extensions
+
+- Keep ROS 2/DDS and hardware dependencies in a separate provider process; do
+  not give the main web process direct driver or arbitrary ROS graph access.
+- Motion tools must be high risk and require an explicitly granted scope. The
+  repository does not grant `robot:motion` or `robot:control` by default.
+- Treat MCP/async cancellation as best effort. It cannot replace an emergency
+  stop, safety-rated controller, watchdog, collision protection, or hardware
+  interlock.
+- A timeout with no stop acknowledgement is `indeterminate`, never success or
+  confirmed cancellation. Operators must resolve the physical state before a
+  follow-up action.
+- Use simulation first. On hardware, constrain workspaces, maps, frames, speed,
+  acceleration, operating zones, and action allowlists below the Agent layer.
+- The bridge binds to loopback by default. Cross-host deployments need mutually
+  authenticated transport, network segmentation, and explicit Host/Origin
+  allowlists.

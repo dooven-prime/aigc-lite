@@ -1,6 +1,6 @@
 # aigc-lite 产品与架构设计
 
-状态：Draft，面向 `0.3` 重构周期。
+状态：Draft，`0.3.0` 已冻结，当前面向 `0.4` Physical Capability Bridge。
 
 ## 1. 产品定义
 
@@ -330,6 +330,39 @@ Protocol -> Claim -> ExecutionReceipt -> Review -> FreezeManifest
 `manual_review`，概率或 argmax 不会直接触发工具和外部写操作。主机文件路径不进入 API，管理员
 通过上传显式提供 bundle，避免任意文件读取和本地路径泄漏。
 
+### 4.10 Physical Capability Bridge
+
+物理运行时不进入核心依赖，而是作为独立 MCP Provider 进程：
+
+```text
+aigc-lite Agent / Scheduler
+        |
+        v
+Tool Catalog -- permission / budget / cancellation / Run-Step-Artifact
+        |
+        v
+aigc-lite-ros2 MCP bridge
+        |
+        +-- SimulatorBackend
+        +-- Nav2Backend -> ROS 2 Action + TF2 -> controller / robot
+```
+
+核心只增加通用 Tool 扩展元数据 seam。远程 tool 可以提高单工具风险、追加 scope、缩短 Provider
+超时并声明 capability metadata，但不能降低宿主配置的最低策略。ROS/DDS、消息类型、executor 与
+硬件驱动全部留在 `extensions/ros2-bridge`。
+
+第一条能力面只包含状态读取、检查、Nav2 导航和 Action 取消，不提供任意 Topic/Service/Action、
+参数、launch 或 shell。动作输入必须带幂等键；同键不同意图失败关闭。`robot.action-receipt.v1`
+保存环境身份、动作身份、前后观察、有限反馈、终态和停止确认。`indeterminate` 是一等终态：连接
+断开、取消超时或无法确认停止时不得折叠为 failed/cancelled，更不能继续假定机器人静止。
+
+Tool Catalog 的取消只负责把请求传播到 ROS Action。e-stop、安全控制器、watchdog、碰撞保护、
+速度/加速度限制和区域约束必须在 Agent/MCP 链路之外。motion tool 同时要求 `high` risk 和显式
+`robot:motion`/`robot:control` scope；这些额外 scope 默认不授予管理员，部署方必须显式配置。
+通用计划任务 `tool.call` 继续使用无 scope 的 scheduler identity，因此不能触发物理动作。若以后需要
+自主计划运动，应注册独立、窄权限的 TaskRunner target，并补充 robot lease、状态前置条件、恢复与
+人工接管策略，不能给通用 scheduler 注入 motion scope。
+
 ## 5. HTTP 表面
 
 ### 数据面
@@ -429,14 +462,26 @@ POST /api/v1/agent-runs/{run_id}/cancel
 验收：同一个 Agent run 可通过同步结果或事件流观察；本地/MCP 工具遵守同一权限和预算；
 禁用工具不会出现在模型或 MCP 的发现结果中。
 
-### M3：`0.5` Artifact 与特色工作流
+### M3：`0.4` Physical Capability Bridge
+
+- ROS 2 作为独立 MCP Provider，不污染核心依赖和领域对象；
+- 先完成 Nav2 Action、TF2 observation、取消传播、幂等键与 physical receipt；
+- SimulatorBackend 覆盖成功、失败、取消和 indeterminate，成为无 ROS CI 路径；
+- simulation/hardware 身份必须显式，物理安全与 Agent 授权分层；
+- 真实 ROS graph、Gazebo 和硬件验收单独运行，不能由模拟器测试代替。
+
+验收：同一 `navigate_to` 调用通过 Tool Catalog 产生 Run、Tool Step 和结构化 Artifact；没有 motion
+scope 时不可发现动作；取消能到达 backend；不能确认停止时保存为 `indeterminate`；核心包在没有
+ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
+
+### M4：`0.5` Artifact 与特色工作流
 
 - Artifact、Citation、Decision/Memory 的版本和来源闭环；
 - 以多模型研究/讨论/共识作为首个上层工作流；
 - 结果可回到 workspace search，并能追溯对应 Run、模型和工具；
 - 工作流保持可选，不把多 Agent 调度变成核心强依赖。
 
-### M4：可运营自托管版
+### M5：可运营自托管版
 
 - platform/workspace 角色闭环；
 - Alembic migration 与 PostgreSQL contract CI；
@@ -445,7 +490,7 @@ POST /api/v1/agent-runs/{run_id}/cancel
 - health/readiness、结构化日志、OpenTelemetry 可选输出；
 - 备份恢复和版本升级文档。
 
-### M5：扩展生态
+### M6：扩展生态
 
 - 将 knowledge/embedding/vector store 改成独立 capability seam；
 - 定义 Python entry point 插件发现和 manifest；
@@ -504,6 +549,10 @@ POST /api/v1/agent-runs/{run_id}/cancel
     plan/run/attempt/artifact/evaluation 的稳定关联和输入输出摘要。无效模型输出、上游失败与取消
     均失败关闭并保留终态；自动 Gate 要求触发它的本次 Attempt 自身通过，不能借历史通过记录
     为失败执行顺带晋升。Agent 结果固定为非独立验证，不能自动满足独立 review criterion。
+14. 进行中：增加独立 `aigc-lite-ros2` Physical Capability Bridge。当前已完成通用 MCP tool 策略
+    元数据、显式管理员额外 scope、SimulatorBackend、Nav2/TF2 懒加载 adapter、状态/检查/导航/取消
+    capability、动作幂等和 `robot.action-receipt.v1`。无 ROS CI 验证 simulator、MCP 投影、权限、
+    取消、失败和 indeterminate；真实 Nav2/Gazebo/DDS 与硬件仍需单独集成环境验收。
 
 每个切片都必须产生可查询的真实纵向行为，不为了目录完整度创建没有 consumer 的抽象。
 
@@ -519,4 +568,4 @@ POST /api/v1/agent-runs/{run_id}/cancel
 - Artifact：结果本体与 Citation 来源分离，并可从 Run/Step 双向追溯；
 - Transport：HTTP、MCP、UI 共享 application service；
 - 存储：显式 migration，同一 repository contract 覆盖 SQLite/PostgreSQL；
-- 扩展：先代码内 seam，第二个真实实现出现后再拆包。
+- 扩展：通用 capability 先代码内 seam；ROS 2 因平台依赖和物理安全边界从第一天保持独立进程与发行包。

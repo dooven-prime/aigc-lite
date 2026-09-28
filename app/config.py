@@ -53,6 +53,7 @@ class Settings:
     default_tool_timeout_seconds: float = float(
         os.getenv("AIGC_LITE_DEFAULT_TOOL_TIMEOUT_SECONDS", "30")
     )
+    admin_tool_scopes: str = os.getenv("AIGC_LITE_ADMIN_TOOL_SCOPES", "")
     tenants_json: str = os.getenv("AIGC_LITE_TENANTS_JSON", "")
     database_url: str = os.getenv("AIGC_LITE_DATABASE_URL", "")
     auth_secret: str = os.getenv("AIGC_LITE_AUTH_SECRET", "change-this-in-production")

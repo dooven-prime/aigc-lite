@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import Callable
+from math import isfinite
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -142,6 +143,8 @@ class ToolSession:
                     "cancellation_mode": spec.execution_mode.cancellation_mode,
                 }
             )
+        if spec.extensions:
+            metadata["extensions"] = redact(spec.extensions)
         return metadata
 
 
@@ -245,6 +248,12 @@ def _remote_provider(value: Any) -> MCPToolProvider:
         isinstance(scope, str) and bool(scope) for scope in required_scopes
     ):
         raise TypeError
+    raw_timeout = value.get("timeout_seconds", 30.0)
+    if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
+        raise TypeError
+    timeout_seconds = float(raw_timeout)
+    if not isfinite(timeout_seconds) or not 0 < timeout_seconds <= 300:
+        raise ValueError
 
     return MCPToolProvider(
         provider_id,
@@ -253,6 +262,7 @@ def _remote_provider(value: Any) -> MCPToolProvider:
         header_env=header_env,
         risk=ToolRisk(value.get("risk", ToolRisk.LOW.value)),
         required_scopes=frozenset(required_scopes),
+        timeout_seconds=timeout_seconds,
     )
 
 

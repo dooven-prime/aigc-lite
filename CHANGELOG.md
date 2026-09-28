@@ -5,7 +5,20 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
-No unreleased changes.
+- Started the `0.4.0` Physical Capability Bridge as a separately installable
+  `aigc-lite-ros2` package rather than adding ROS/DDS dependencies to core.
+- Added bounded `get_state`, `inspect`, `navigate_to`, and `cancel_action` MCP
+  capabilities with high-risk motion scopes, idempotency conflict detection,
+  cancellation propagation, bounded feedback, simulation/hardware identity,
+  and versioned physical action/observation receipts.
+- Added a deterministic simulator for CI and failure/indeterminate demos plus a
+  lazy ROS 2/Nav2 adapter using NavigateToPose Action cancellation and TF2 pose
+  observations. Live ROS graph and hardware validation remain external.
+- Added safe remote MCP policy metadata: tools can only elevate configured
+  risk, add required scopes, or shorten provider timeouts; bounded extension
+  metadata is retained in Tool Steps and inbound MCP discovery.
+- Added explicitly configured administrator tool scopes so physical motion
+  permissions remain disabled by default.
 
 ## 0.3.0 - 2026-09-28
 - Added a workspace-isolated encrypted Credential Store with write-only API,

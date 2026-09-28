@@ -85,7 +85,7 @@ from .services.task_runner import TaskRunner
 from .services.tool_catalog import create_default_tool_catalog
 from .services.tools import ToolService
 from .services.verification_runner import VerificationRunner
-from .tenancy import Tenant, current_tenant
+from .tenancy import Tenant, _role_scopes, current_tenant
 
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 tool_catalog = create_default_tool_catalog()
@@ -260,9 +260,7 @@ class MCPAuthMiddleware:
             if legacy_key:
                 tenant = Tenant("default", "Default")
                 request.state.tenant_id = tenant.id
-                request.state.scopes = frozenset(
-                    {"tools:write", "tools:high-risk"}
-                )
+                request.state.scopes = _role_scopes("admin")
             else:
                 try:
                     tenant = await current_tenant(request, authorization)

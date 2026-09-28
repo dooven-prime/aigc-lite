@@ -14,6 +14,7 @@ from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 from . import __version__
 from .config import settings
 from .core.contracts import RequestContext
+from .redaction import redact
 from .services.tools import ToolService
 from .tools import invoke, schemas
 
@@ -85,6 +86,13 @@ class CatalogMCPServer(MCPServer if MCPServer is not None else object):
                             "source": spec.source.value,
                             "provider_id": spec.provider_id,
                             "risk": spec.risk.value,
+                            "required_scopes": sorted(spec.required_scopes),
+                            "timeout_seconds": spec.timeout_seconds,
+                            **(
+                                {"extensions": redact(spec.extensions)}
+                                if spec.extensions
+                                else {}
+                            ),
                             **(
                                 {
                                     "execution_mode": spec.execution_mode.value,

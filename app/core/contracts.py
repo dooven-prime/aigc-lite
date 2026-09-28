@@ -137,6 +137,7 @@ class ToolSpec:
     enabled: bool = True
     timeout_seconds: float = 30.0
     execution_mode: ToolExecutionMode | None = None
+    extensions: dict = field(default_factory=dict)
 
     def model_schema(self) -> dict:
         return {

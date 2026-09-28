@@ -20,6 +20,7 @@
 - `/ui` 聊天、知识库与执行记忆工作台，包含 Run Explorer
 - 跨领域 Protocol/Claim/Receipt/Review/Freeze 证据控制层，以及首个 Decision Lab
 - 可导入版本化 Claim Registry 的 Research Workspace，以及支持类型化关系、版本化 Verification Plan、Agent/计划任务验证、验证收据和逐级晋升门的 Claim Explorer
+- 可选的独立 ROS 2 Physical Capability Bridge：模拟器与 Nav2 backend 通过 MCP 投影，复用权限、预算、取消、Run/Step、Artifact 和 Receipt
 - 可作为 Python 包或独立服务运行
 
 企业私有业务、数据库连接器、第三方平台凭据和运行时数据不属于公开核心，将通过独立扩展接入。
@@ -298,6 +299,8 @@ AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","
 
 每个配置可选 `risk`（`low`、`medium`、`high`）和 `required_scopes`。`medium` 默认要求 `tools:write`，`high` 默认要求 `tools:high-risk`；管理员和显式配置的 tenant API key 拥有这两个内置 scope，普通成员及无认证 quick start 只发现低风险工具。自定义 scope 预留给后续 scoped API key。单个远程 Provider 发现失败不会影响本地工具或其他 Provider；已经发现的远程工具若调用断连，会生成稳定的 `tool_provider_unavailable` 失败结果和失败 Step。
 
+远程 tool 还可以通过 `_meta.aigc-lite` 声明更严格的单工具风险、scope、超时上限和通用扩展元数据。声明只能提升 Provider 的最低风险、追加 scope 或缩短超时，不能由远端自行降权。管理员额外 scope 必须由部署方通过 `AIGC_LITE_ADMIN_TOOL_SCOPES` 显式授予。
+
 登录后的 workspace 管理员也可以通过 `/api/mcp-servers` 持久化配置。请求中的认证 header 只能保存凭据引用，不能保存明文：
 
 ```json
@@ -383,6 +386,18 @@ Run/Step metadata 会记录 `execution_mode` 和 `cancellation_mode`：异步是
 
 每次入站 `tools/call` 都创建独立 Run 和 Tool Step，MCP 响应的 `_meta.aigc-lite.run_id` 可用于查询执行详情。参数和结果使用与 Agent 相同的账本脱敏规则；客户端仍获得工具原始结果。出站 MCP 请求会附带内部 hop 标记，收到 hop 标记的 aigc-lite 只投影本地工具，避免两个 Catalog 互相代理或配置指回自身时形成递归发现。正式 `/mcp` 的协议版本由官方 SDK 协商，当前 SDK v2 回归测试固定为 `2026-07-28`；`AIGC_LITE_LEGACY_MCP_PROTOCOL_VERSION` 仅影响手写的 `/mcp-legacy`，后者只用于本地调试兼容。
 
+### ROS 2 Physical Capability Bridge
+
+`extensions/ros2-bridge` 是独立发行包和进程，核心不导入 ROS 2。它先提供
+`robot_get_state`、`robot_inspect`、`robot_navigate_to` 与 `robot_cancel_action`，通过现有远程 MCP
+Provider 自动进入 Tool Catalog、Run/Step、结构化 Artifact 和 Citation。导航要求幂等键，收据明确
+区分 simulation/hardware、成功、失败、取消、状态不确定和停止是否确认。没有 ROS 的环境可用确定性
+SimulatorBackend 完整验证；安装并 source ROS 2/Nav2 后再切换 Nav2Backend。安装、配置、验证边界和
+安全要求见 [`extensions/ros2-bridge/README.md`](extensions/ros2-bridge/README.md)。
+
+Agent/MCP 的取消不是急停。真实机器人必须把 e-stop、安全 PLC/控制器、碰撞保护、速度限制和 watchdog
+保留在独立的物理安全路径中，不能依赖模型、网络、Python event loop 或 Tool Catalog。
+
 同步 Agent 会把本地和远程 MCP 的每次模型调用、工具调用分别记录为 Step，并记录
 `source`、`provider_id`、原始工具名与风险级别。工具参数和结构化结果中常见的
 `api_key`、`token`、`password`、`secret` 等嵌套字段，以及常见 AWS/GCS 预签名 URL 参数和 Bearer token，在进入执行账本或审计记录前会统一脱敏；模型实际执行仍接收原始工具结果。任意纯文本中的非结构化秘密仍无法可靠识别，因此涉及敏感数据的工具应返回 JSON 对象。流式响应通过 `X-Run-Id` 和 `X-Session-Id` header 返回追踪身份。
@@ -393,7 +408,7 @@ Run/Step metadata 会记录 `execution_mode` 和 `cancellation_mode`：异步是
 
 ```bash
 pytest
-ruff check app tests
+ruff check app tests extensions/ros2-bridge/src
 ```
 
 当前知识检索使用 SQLite 中保存的分块哈希向量，Repository 可切换 PostgreSQL；后续可把
