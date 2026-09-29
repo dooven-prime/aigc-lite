@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aigc-lite-ros2"
-version = "0.4.0"
+version = "0.4.1"
 description = "ROS 2 physical capability bridge for aigc-lite."
 readme = "README.md"
 requires-python = ">=3.11"

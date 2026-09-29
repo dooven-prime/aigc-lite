@@ -36,8 +36,9 @@
 
 版本变化见 [`CHANGELOG.md`](CHANGELOG.md)，安全部署边界与漏洞报告方式见
 [`SECURITY.md`](SECURITY.md)，生产部署检查见 [`docs/PRODUCTION.md`](docs/PRODUCTION.md)，
-配置变量索引见 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。当前 `v0.4.0` 的
-冻结范围与未完成边界见 [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md)，已冻结的
+配置变量索引见 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。当前 `v0.4.1` 的
+补丁范围与未完成边界见 [`docs/releases/v0.4.1.md`](docs/releases/v0.4.1.md)，基础功能
+范围仍由 [`v0.4.0` release closure](docs/releases/v0.4.0.md) 定义，已冻结的
 `v0.3.0` 验证记录见 [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md)，初始 `v0.2.0` 基线保留在
 [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md)。
 

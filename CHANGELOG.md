@@ -5,6 +5,24 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+## 0.4.1 - 2026-09-29
+
+- Fixed the hardened Docker CI smoke so authentication and encryption use
+  independently generated valid secrets.
+- Added a fail-closed physical execution authorization gate. ROS 2 motion now
+  consumes a current, actor/action/provider/robot-bound `AuthorizationGrant`
+  atomically before provider dispatch, records the consumed grant in the Tool
+  Step, and rejects missing, expired, exhausted, stale, or superseded grants.
+- Prevented authorization grants from binding an older Qualification Receipt
+  when a newer receipt owns the current-use binding, and excluded expired or
+  exhausted grants from portable Assurance Bundle authority.
+- Made dependency taint propagation recursive, cycle-safe, and duplicate-edge
+  safe so transitive stale qualifications cannot remain current.
+- Made the theorem verifier select the newest policy-valid Lean/Coq kernel
+  certificate instead of being pinned by an older invalid certificate.
+- Preserved the default model-provider flag when workspace administrators
+  rebind an existing provider to an encrypted credential.
+
 ## 0.4.0 - 2026-09-29
 
 - Closed two credential-confusion boundaries: workspace MCP records now accept
