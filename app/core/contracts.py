@@ -68,6 +68,20 @@ class ToolExecutionMode(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ToolHints:
+    """Non-authoritative behavior hints exposed to tool clients.
+
+    These values describe expected behavior only. Permission, risk, and
+    execution decisions must continue to use host-owned policy fields.
+    """
+
+    read_only: bool = False
+    destructive: bool = True
+    idempotent: bool = False
+    open_world: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class RequestContext:
     """Authenticated identity and trace information for one operation."""
 
@@ -137,6 +151,7 @@ class ToolSpec:
     enabled: bool = True
     timeout_seconds: float = 30.0
     execution_mode: ToolExecutionMode | None = None
+    hints: ToolHints = field(default_factory=ToolHints)
     extensions: dict = field(default_factory=dict)
 
     def model_schema(self) -> dict:

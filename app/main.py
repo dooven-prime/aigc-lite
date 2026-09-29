@@ -14,11 +14,12 @@ from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from . import __version__
+from .adapters.kernel_verification import KernelVerifierRegistry
 from .adapters.scheduling import TimeWheelScheduler
 from .audit import record_request
 from .auth import (
@@ -37,14 +38,22 @@ from .core.errors import (
     ApplicationError,
     InvalidArtifactError,
     InvalidEvidenceError,
+    InvalidKernelVerificationError,
     InvalidScheduleError,
     InvalidVerificationResultError,
+    KernelVerifierNotConfiguredError,
     LLMError,
     ProviderNotConfiguredError,
     ResourceConflictError,
     ResourceNotFoundError,
     RunNotActiveError,
     ScheduleNotActiveError,
+)
+from .core.kernel_verification import KernelBackendKind, KernelVerificationDraft
+from .core.qualification import (
+    AuthorizationGrantDraft,
+    MathTheoremCandidateDraft,
+    ValidationModality,
 )
 from .core.research import (
     ClaimPromotionStage,
@@ -72,13 +81,16 @@ from .database import (
 )
 from .mcp import build_transport_apps, call_local_tool, create_mcp_server, handle_rpc
 from .services.artifacts import ArtifactService
+from .services.assurance import AssuranceBundleService
 from .services.credentials import CredentialService
 from .services.decision_lab import DecisionLabService
 from .services.evidence import EvidenceService
 from .services.gateway import GatewayService
 from .services.http_poll import HTTPPollService
+from .services.kernel_verification import KernelVerificationService
 from .services.mcp_probe import MCPProbeService
 from .services.memory import MemoryService
+from .services.qualification import QualificationService
 from .services.research_registry import ResearchRegistryService
 from .services.scheduler import SchedulerService
 from .services.task_runner import TaskRunner
@@ -107,6 +119,23 @@ decision_lab_service = DecisionLabService(
     artifact_service=artifact_service, evidence_service=evidence_service
 )
 research_registry_service = ResearchRegistryService(
+    artifact_service=artifact_service, evidence_service=evidence_service
+)
+kernel_verifier_registry = KernelVerifierRegistry.from_config(
+    lean_executable=settings.lean_executable,
+    coq_executable=settings.coq_executable,
+    timeout_seconds=settings.kernel_verify_timeout_seconds,
+    max_output_bytes=settings.kernel_verify_max_output_bytes,
+    memory_mb=settings.kernel_verify_memory_mb,
+)
+kernel_verification_service = KernelVerificationService(
+    registry=kernel_verifier_registry,
+    artifact_service=artifact_service,
+    research_registry_service=research_registry_service,
+    max_source_bytes=settings.kernel_verify_max_source_bytes,
+)
+assurance_bundle_service = AssuranceBundleService()
+qualification_service = QualificationService(
     artifact_service=artifact_service, evidence_service=evidence_service
 )
 verification_runner = VerificationRunner(
@@ -323,7 +352,10 @@ app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
 app.add_middleware(MCPAuthMiddleware)
 app.mount(
     "/ui",
-    StaticFiles(directory=FRONTEND_DIST if FRONTEND_DIST.exists() else Path(__file__).parent / "static", html=True),
+    StaticFiles(
+        directory=FRONTEND_DIST if FRONTEND_DIST.exists() else Path(__file__).parent / "static",
+        html=True,
+    ),
     name="ui",
 )
 app.mount("/mcp", mcp_app, name="mcp")
@@ -358,6 +390,7 @@ async def application_error_handler(_request: Request, exc: ApplicationError) ->
         (
             InvalidArtifactError,
             InvalidEvidenceError,
+            InvalidKernelVerificationError,
             InvalidScheduleError,
             InvalidVerificationResultError,
         ),
@@ -368,6 +401,8 @@ async def application_error_handler(_request: Request, exc: ApplicationError) ->
     elif isinstance(exc, AgentLimitError):
         status_code = 429
     elif isinstance(exc, ProviderNotConfiguredError):
+        status_code = 503
+    elif isinstance(exc, KernelVerifierNotConfiguredError):
         status_code = 503
     elif isinstance(exc, LLMError):
         status_code = 502
@@ -426,13 +461,15 @@ class RelationWithdrawalRequest(BaseModel):
 
 
 class VerificationAttemptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: VerificationKind
     outcome: VerificationOutcome
+    validation_modality: ValidationModality = ValidationModality.AGENT_REVIEW
     method: str = Field(min_length=1, max_length=4_000)
     scope: str = Field(min_length=1, max_length=8_000)
     input_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     output_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    independent: bool = False
     run_id: str | None = Field(default=None, max_length=100)
     artifact_ids: list[str] = Field(default_factory=list, max_length=100)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -464,6 +501,51 @@ class VerificationPlanRequest(BaseModel):
     model: str | None = Field(default=None, max_length=200)
     auto_promote: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MathTheoremCandidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_key: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=200)
+    statement: str = Field(min_length=1, max_length=20_000)
+    scope: str = Field(min_length=1, max_length=10_000)
+    definitions: list[str] = Field(default_factory=list, max_length=100)
+    negative_boundaries: list[str] = Field(default_factory=list, max_length=100)
+    dependency_claim_ids: list[str] = Field(default_factory=list, max_length=500)
+    parent_revision_id: str | None = Field(default=None, max_length=100)
+
+
+class QualificationEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: str = Field(min_length=1, max_length=200)
+
+
+class KernelVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backend: KernelBackendKind
+    declaration_name: str = Field(
+        min_length=1,
+        max_length=300,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_']*(?:\.[A-Za-z_][A-Za-z0-9_']*)*$",
+    )
+    source: str = Field(min_length=1, max_length=1_000_000)
+
+
+class AuthorizationGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    qualification_receipt_id: str = Field(min_length=1, max_length=100)
+    actor_id: str = Field(min_length=1, max_length=200)
+    action: str = Field(min_length=1, max_length=200)
+    target: str = Field(min_length=1, max_length=1_000)
+    scope: dict[str, Any] = Field(default_factory=dict)
+    conditions: dict[str, Any] = Field(default_factory=dict)
+    expires_at: str | None = Field(default=None, max_length=100)
+    budget: dict[str, Any] = Field(default_factory=dict)
+    max_calls: int = Field(default=1, ge=1, le=1_000_000)
 
 
 def request_context(request: Request, tenant: Tenant) -> RequestContext:
@@ -559,7 +641,11 @@ async def register(request: RegisterRequest) -> dict[str, str]:
     user = repository.create_user(
         tenant["id"], request.email, request.name, hash_password(request.password), role="admin"
     )
-    return {"access_token": create_login_session(user), "token_type": "bearer", "tenant_id": tenant["id"]}
+    return {
+        "access_token": create_login_session(user),
+        "token_type": "bearer",
+        "tenant_id": tenant["id"],
+    }
 
 
 @app.post("/api/auth/login")
@@ -567,7 +653,11 @@ async def login(request: LoginRequest) -> dict[str, str]:
     user = get_repository().get_user_by_email(request.email)
     if not user or not verify_password(request.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    return {"access_token": create_login_session(user), "token_type": "bearer", "tenant_id": user["tenant_id"]}
+    return {
+        "access_token": create_login_session(user),
+        "token_type": "bearer",
+        "tenant_id": user["tenant_id"],
+    }
 
 
 @app.get("/api/auth/me")
@@ -723,14 +813,212 @@ async def research_registry(
     )
 
 
+@app.get("/api/qualification/profiles")
+async def qualification_profiles(
+    _tenant: Tenant = Depends(current_tenant),
+) -> list[dict]:
+    return qualification_service.list_profiles()
+
+
+@app.get("/api/qualification/kernel-verifiers")
+async def kernel_verifiers(
+    _tenant: Tenant = Depends(current_tenant),
+) -> list[dict]:
+    return kernel_verification_service.list_backends()
+
+
+@app.post(
+    "/api/qualification/claims/{claim_id}/kernel-verifications",
+    status_code=201,
+)
+async def execute_kernel_verification(
+    claim_id: str,
+    payload: KernelVerificationRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    result = await kernel_verification_service.verify(
+        _schedule_context(http_request, user),
+        claim_id,
+        KernelVerificationDraft(
+            backend=payload.backend,
+            declaration_name=payload.declaration_name,
+            source=payload.source,
+        ),
+    )
+    get_repository().write_audit(
+        user["tenant_id"],
+        "qualification.kernel_verification.execute",
+        f"/api/qualification/claims/{claim_id}/kernel-verifications",
+        {
+            "claim_revision_id": claim_id,
+            "backend": payload.backend.value,
+            "status": result["status"],
+            "run_id": result["run"]["id"],
+            "attempt_id": result["verification_attempt"]["id"],
+            "certificate_artifact_id": result["certificate_artifact"]["id"],
+        },
+        user_id=user["id"],
+    )
+    return result
+
+
+@app.post("/api/qualification/math-theorems", status_code=201)
+async def register_math_theorem_candidate(
+    payload: MathTheoremCandidateRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    context = _schedule_context(http_request, user)
+    result = qualification_service.register_math_theorem(
+        context,
+        MathTheoremCandidateDraft(
+            claim_key=payload.claim_key,
+            name=payload.name,
+            statement=payload.statement,
+            scope=payload.scope,
+            definitions=tuple(payload.definitions),
+            negative_boundaries=tuple(payload.negative_boundaries),
+            dependency_claim_ids=tuple(payload.dependency_claim_ids),
+            parent_revision_id=payload.parent_revision_id,
+        ),
+    )
+    get_repository().write_audit(
+        user["tenant_id"],
+        "qualification.math_theorem.register",
+        "/api/qualification/math-theorems",
+        {
+            "claim_revision_id": result["claim"]["id"],
+            "semantic_hash": result["claim"]["semantic_hash"],
+            "storage_admission_only": True,
+        },
+        user_id=user["id"],
+    )
+    return result
+
+
+@app.post("/api/qualification/claims/{claim_id}/evaluations")
+async def evaluate_claim_qualification(
+    claim_id: str,
+    payload: QualificationEvaluationRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    result = qualification_service.evaluate(
+        _schedule_context(http_request, user), claim_id, payload.profile_id
+    )
+    evaluation = result["evaluation"]
+    get_repository().write_audit(
+        user["tenant_id"],
+        "qualification.gate.evaluate",
+        f"/api/qualification/claims/{claim_id}/evaluations",
+        {
+            "claim_revision_id": claim_id,
+            "profile_id": payload.profile_id,
+            "evaluation_id": evaluation["id"],
+            "verdict": evaluation["verdict"],
+            "evidence_closure_hash": evaluation["evidence_closure_hash"],
+        },
+        user_id=user["id"],
+    )
+    return result
+
+
+@app.get("/api/qualification/receipts/{receipt_id}")
+async def qualification_receipt(
+    receipt_id: str,
+    http_request: Request,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    return qualification_service.get_receipt(request_context(http_request, tenant), receipt_id)
+
+
+@app.get("/api/qualification/search")
+async def qualified_search(
+    q: str,
+    profile: str,
+    http_request: Request,
+    limit: int = 20,
+    tenant: Tenant = Depends(current_tenant),
+) -> list[dict]:
+    return qualification_service.qualified_search(
+        request_context(http_request, tenant), q, profile, max(1, min(limit, 100))
+    )
+
+
+@app.post("/api/authorization-grants", status_code=201)
+async def create_authorization_grant(
+    payload: AuthorizationGrantRequest,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> dict:
+    context = _schedule_context(http_request, user)
+    grant = qualification_service.create_authorization(
+        context,
+        payload.actor_id,
+        AuthorizationGrantDraft(
+            qualification_receipt_id=payload.qualification_receipt_id,
+            action=payload.action,
+            target=payload.target,
+            scope=payload.scope,
+            conditions=payload.conditions,
+            expires_at=payload.expires_at,
+            budget=payload.budget,
+            max_calls=payload.max_calls,
+        ),
+    )
+    get_repository().write_audit(
+        user["tenant_id"],
+        "authorization.grant.create",
+        "/api/authorization-grants",
+        {
+            "grant_id": grant["id"],
+            "qualification_receipt_id": grant["qualification_receipt_id"],
+            "actor_id": grant["actor_id"],
+            "action": grant["action"],
+            "target": grant["target"],
+        },
+        user_id=user["id"],
+    )
+    return grant
+
+
 @app.get("/api/research-registry/claims/{claim_id}")
 async def research_claim_detail(
     claim_id: str,
     http_request: Request,
     tenant: Tenant = Depends(current_tenant),
 ) -> dict:
-    return research_registry_service.get_claim(
-        request_context(http_request, tenant), claim_id
+    return research_registry_service.get_claim(request_context(http_request, tenant), claim_id)
+
+
+@app.get("/api/research-registry/cases/{research_case_id}/assurance-bundle")
+async def export_research_assurance_bundle(
+    research_case_id: str,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> Response:
+    archive, manifest = assurance_bundle_service.export_zip(
+        _schedule_context(http_request, user), research_case_id
+    )
+    get_repository().write_audit(
+        user["tenant_id"],
+        "research.assurance_bundle.export",
+        f"/api/research-registry/cases/{research_case_id}/assurance-bundle",
+        {
+            "research_case_id": research_case_id,
+            "bundle_digest": manifest["bundle_digest"],
+            "member_count": len(manifest["members"]),
+        },
+        user_id=user["id"],
+    )
+    return Response(
+        archive,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (f'attachment; filename="assurance-{research_case_id}.zip"'),
+            "X-Assurance-Bundle-Digest": manifest["bundle_digest"],
+        },
     )
 
 
@@ -811,11 +1099,11 @@ async def record_research_verification_attempt(
         VerificationAttemptDraft(
             kind=payload.kind,
             outcome=payload.outcome,
+            validation_modality=payload.validation_modality,
             method=payload.method,
             scope=payload.scope,
             input_digest=payload.input_digest,
             output_digest=payload.output_digest,
-            independent=payload.independent,
             run_id=payload.run_id,
             artifact_ids=tuple(payload.artifact_ids),
             metadata=payload.metadata,
@@ -831,6 +1119,7 @@ async def record_research_verification_attempt(
             "kind": attempt["kind"],
             "outcome": attempt["outcome"],
             "independent": attempt["independent"],
+            "independence": attempt["independence"],
         },
         user_id=user["id"],
     )
@@ -1172,7 +1461,10 @@ async def add_document(request: DocumentRequest, tenant: Tenant = Depends(curren
 @app.post("/api/knowledge/upload")
 async def upload_document(file: UploadFile = File(...), tenant: Tenant = Depends(current_tenant)) -> dict:
     if not file.filename or not file.filename.lower().endswith((".txt", ".md", ".csv", ".json")):
-        return JSONResponse(status_code=415, content={"detail": "Only text, Markdown, CSV, and JSON files are supported"})
+        return JSONResponse(
+            status_code=415,
+            content={"detail": "Only text, Markdown, CSV, and JSON files are supported"},
+        )
     content = (await file.read(2_000_001)).decode("utf-8", errors="replace")
     if not content.strip() or len(content) > 2_000_000:
         return JSONResponse(status_code=400, content={"detail": "Document must contain 1-2,000,000 characters"})

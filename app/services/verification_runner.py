@@ -20,6 +20,7 @@ from ..core.errors import (
     InvalidVerificationResultError,
     ResourceNotFoundError,
 )
+from ..core.qualification import ValidationModality
 from ..core.research import (
     VerificationAttemptDraft,
     VerificationExecutionStatus,
@@ -198,6 +199,7 @@ class VerificationRunner:
                 "request_id": request_id,
                 "scheduled_task_id": scheduled_task_id,
                 "input_digest": input_digest,
+                "input_snapshot": input_snapshot,
                 "metadata": {
                     "executor": VerificationExecutor.AGENT.value,
                     "result_contract_version": RESULT_CONTRACT_VERSION,
@@ -429,7 +431,7 @@ class VerificationRunner:
                 scope=plan["scope"],
                 input_digest=input_digest,
                 output_digest=artifact["content_hash"],
-                independent=False,
+                validation_modality=ValidationModality.AGENT_REVIEW,
                 run_id=run_id,
                 artifact_ids=(artifact["id"],),
                 metadata={

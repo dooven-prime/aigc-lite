@@ -12,6 +12,7 @@ from app.adapters.tools.local import LocalToolProvider
 from app.adapters.tools.mcp import MCPToolProvider
 from app.core.contracts import (
     RequestContext,
+    ToolHints,
     ToolProviderResult,
     ToolSource,
     ToolSpec,
@@ -23,7 +24,13 @@ from app.services.tools import ToolService
 from app.tools import tool
 
 
-@tool("transport_echo")
+@tool(
+    "transport_echo",
+    read_only=True,
+    destructive=False,
+    idempotent=True,
+    open_world=False,
+)
 async def transport_echo(value: str) -> dict[str, str]:
     """Echo a value through the MCP transport."""
     return {"value": value}
@@ -38,7 +45,7 @@ def test_official_streamable_http_transport(tmp_path) -> None:
     )
     streamable_app, _ = build_transport_apps(server)
 
-    async def run() -> tuple[str, dict[str, str]]:
+    async def run() -> tuple[str, dict[str, bool], dict[str, str]]:
         url = "http://127.0.0.1/"
 
         @asynccontextmanager
@@ -56,10 +63,23 @@ def test_official_streamable_http_transport(tmp_path) -> None:
                 tools = await client.list_tools()
                 result = await client.call_tool("transport_echo", {"value": "ok"})
                 assert not result.is_error
-                return tools.tools[0].name, json.loads(result.content[0].text)
+                annotations = tools.tools[0].annotations.model_dump(
+                    by_alias=True, exclude_none=True
+                )
+                return (
+                    tools.tools[0].name,
+                    annotations,
+                    json.loads(result.content[0].text),
+                )
 
-    name, result = asyncio.run(run())
+    name, annotations, result = asyncio.run(run())
     assert name == "workspace_status"
+    assert annotations == {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
     assert result == {"value": "ok"}
 
 
@@ -73,6 +93,23 @@ def test_legacy_rpc_protocol_version_is_explicitly_separate(monkeypatch) -> None
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
     )
     assert response["result"]["protocolVersion"] == "2025-06-18"
+
+
+def test_legacy_tool_list_includes_explicit_behavior_hints() -> None:
+    response = mcp_runtime.handle_rpc(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    )
+    status = next(
+        item
+        for item in response["result"]["tools"]
+        if item["name"] == "workspace_status"
+    )
+    assert status["annotations"] == {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
 
 
 def test_remote_mcp_provider_uses_catalog_namespace_and_workspace_policy(
@@ -120,6 +157,15 @@ def test_remote_mcp_provider_uses_catalog_namespace_and_workspace_policy(
 
     allowed, denied, result = asyncio.run(run())
     assert "research__transport_echo" in {spec.name for spec in allowed.specs}
+    remote_spec = next(
+        spec for spec in allowed.specs if spec.name == "research__transport_echo"
+    )
+    assert remote_spec.hints == ToolHints(
+        read_only=True,
+        destructive=False,
+        idempotent=True,
+        open_world=False,
+    )
     assert denied.specs == []
     assert json.loads(result.content) == {"value": "remote ok"}
     assert result.metadata["source"] == "mcp"
@@ -145,6 +191,12 @@ class ProjectedRemoteProvider:
                 source=ToolSource.MCP,
                 provider_id=self.provider_id,
                 workspace_id="workspace-a",
+                hints=ToolHints(
+                    read_only=True,
+                    destructive=False,
+                    idempotent=True,
+                    open_world=True,
+                ),
             )
         ]
 
@@ -216,6 +268,14 @@ def test_inbound_mcp_projects_remote_catalog_and_records_safe_step(tmp_path) -> 
 
     discovered, result, forwarded = asyncio.run(run())
     assert [item.name for item in discovered.tools] == ["research__lookup"]
+    assert discovered.tools[0].annotations.model_dump(
+        by_alias=True, exclude_none=True
+    ) == {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    }
     assert not result.is_error
     assert result.structured_content == {
         "token": "private-value",

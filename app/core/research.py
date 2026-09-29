@@ -10,6 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from .assurance import VerificationIndependence
+from .qualification import ValidationModality
+
 
 class ResearchCaseStatus(StrEnum):
     DRAFT = "draft"
@@ -141,7 +144,11 @@ class VerificationAttemptDraft:
     scope: str
     input_digest: str
     output_digest: str
-    independent: bool = False
+    validation_modality: ValidationModality = ValidationModality.AGENT_REVIEW
+    # Deprecated internal compatibility fields. Transport clients cannot set
+    # these; the service derives both projections from server-owned lineage.
+    independence: VerificationIndependence = field(default_factory=VerificationIndependence)
+    independent: bool | None = None
     run_id: str | None = None
     artifact_ids: tuple[str, ...] = ()
     metadata: dict = field(default_factory=dict)

@@ -76,6 +76,20 @@ class Settings:
     )
     mcp_allowed_origins: str = os.getenv("AIGC_LITE_MCP_ALLOWED_ORIGINS", "")
     mcp_servers_json: str = os.getenv("AIGC_LITE_MCP_SERVERS_JSON", "")
+    lean_executable: str = os.getenv("AIGC_LITE_LEAN_EXECUTABLE", "")
+    coq_executable: str = os.getenv("AIGC_LITE_COQ_EXECUTABLE", "")
+    kernel_verify_timeout_seconds: float = float(
+        os.getenv("AIGC_LITE_KERNEL_VERIFY_TIMEOUT_SECONDS", "30")
+    )
+    kernel_verify_max_source_bytes: int = int(
+        os.getenv("AIGC_LITE_KERNEL_VERIFY_MAX_SOURCE_BYTES", "500000")
+    )
+    kernel_verify_max_output_bytes: int = int(
+        os.getenv("AIGC_LITE_KERNEL_VERIFY_MAX_OUTPUT_BYTES", "100000")
+    )
+    kernel_verify_memory_mb: int = int(
+        os.getenv("AIGC_LITE_KERNEL_VERIFY_MEMORY_MB", "512")
+    )
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_agent_steps <= 32:
@@ -101,6 +115,25 @@ class Settings:
         if not 1 <= self.scheduler_max_concurrency <= 64:
             raise ValueError(
                 "AIGC_LITE_SCHEDULER_MAX_CONCURRENCY must be between 1 and 64"
+            )
+        if (
+            not isfinite(self.kernel_verify_timeout_seconds)
+            or not 0.1 <= self.kernel_verify_timeout_seconds <= 600
+        ):
+            raise ValueError(
+                "AIGC_LITE_KERNEL_VERIFY_TIMEOUT_SECONDS must be between 0.1 and 600"
+            )
+        if not 1 <= self.kernel_verify_max_source_bytes <= 1_000_000:
+            raise ValueError(
+                "AIGC_LITE_KERNEL_VERIFY_MAX_SOURCE_BYTES must be between 1 and 1000000"
+            )
+        if not 1_024 <= self.kernel_verify_max_output_bytes <= 1_000_000:
+            raise ValueError(
+                "AIGC_LITE_KERNEL_VERIFY_MAX_OUTPUT_BYTES must be between 1024 and 1000000"
+            )
+        if not 64 <= self.kernel_verify_memory_mb <= 16_384:
+            raise ValueError(
+                "AIGC_LITE_KERNEL_VERIFY_MEMORY_MB must be between 64 and 16384"
             )
 
     @property

@@ -44,6 +44,7 @@ class LocalToolProvider:
                         or settings.default_tool_timeout_seconds
                     ),
                     execution_mode=policy["execution_mode"],
+                    hints=policy["hints"],
                 )
             )
         return values

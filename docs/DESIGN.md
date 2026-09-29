@@ -330,7 +330,50 @@ Protocol -> Claim -> ExecutionReceipt -> Review -> FreezeManifest
 `manual_review`，概率或 argmax 不会直接触发工具和外部写操作。主机文件路径不进入 API，管理员
 通过上传显式提供 bundle，避免任意文件读取和本地路径泄漏。
 
-### 4.10 Physical Capability Bridge
+### 4.10 Qualification Plane
+
+Qualification 只回答“一个低成本生成物凭什么取得某种可使用资格”，不定义全局 trust flag：
+
+```text
+Q(ClaimRevision, QualificationProfile, EvidenceClosure, PolicyVersion)
+```
+
+系统分成 Semantic、Evidence、Authority 三本账和一个确定性 Gate。Verification 永远绑定 exact
+`revision_id + semantic_hash`；Artifact、Run、Attempt、Receipt 和 dependency binding 形成可哈希的
+Evidence DAG；`QualificationGate` 只读冻结输入并输出 `ADMITTED / BLOCKED / UNRESOLVED / STALE /
+NOT_APPLICABLE`。模型输出无权直接修改 claim semantics、qualification verdict、current binding 或
+authorization。
+
+`registered -> evidence_ready -> review_ready -> release_ready` 保留为 workflow stage，不作为证据强度。
+证据强度使用多轴向量：statement identity、artifact integrity、local correctness、semantic alignment、
+replayability、independent validation、external reality、disconfirmation。生命周期与证据强度继续分开。
+
+`DomainVerifierRegistry` 以不可重复的 profile id 注册代码内 verifier。首个 `math.formal.v1` 要求 formal
+proof、内容绑定的 kernel certificate、无 placeholder/额外公理、current dependency closure 和非模型
+semantic-alignment review。Profile snapshot/hash、policy hash、逐 criterion receipt 与 Evidence Vector
+随每次 Evaluation 冻结；只有 ADMITTED 产生 portable Qualification Receipt。
+Kernel modality 只接受服务端持有的 `system:verifier:*` identity 且拒绝 model route。Lean 4/Coq
+kernel process adapter 已接入：服务端选择固定 executable/argv/environment，在一次性工作目录执行
+冻结 proof，硬超时/取消并限制输出，记录 executable/toolchain hash、版本、退出码、axiom closure 和
+不夸大的 isolation disclosure，再生成 certificate、Run/Step、Artifact、Receipt 与 Attempt。Lean
+通过 `--trust=0` + `#print axioms`，Coq 通过 `Print Assumptions` 失败关闭 placeholder 和额外公理。
+客户端不能提交命令或 verifier identity，普通管理员上传 JSON 不能把自己提升为 kernel verifier。
+
+当前 `bounded_process` 不是 OS 安全沙箱，certificate 明确声明 network/host filesystem 未隔离；它适合
+管理员配置、受信 toolchain 的单文件 proof replay。公开接收任意 Lean metaprogram、Coq plugin 或项目
+依赖前，必须增加 container/VM runner、只读 toolchain、禁网、资源 cgroup/job 和可携带 dependency
+closure profile；临时目录不能被描述成这类保证。
+
+Verifier independence 不接受客户端 bool。服务端从 principal/workspace/Run/model route/plan/checker、
+toolchain/environment/data snapshot 绑定 `VerifierLineage`，再派生 orthogonal checker 等关系。多个同源
+Agent 的一致意见不会自动获得独立性。
+
+`qualified != authorized`。CurrentUseBinding 决定哪个历史 Qualification Receipt 当前可用于某个 retrieval
+scope；任何外部发布或高风险 Tool 还需要单独的 AuthorizationGrant，限定 actor/action/target/scope/
+budget/expiry/max_calls。统一搜索保留候选面，qualified-only search 是独立查询面。Assurance Bundle
+携带 Evaluation、Receipt、CurrentUseBinding 和 Grant，离线验证不再把 `release_ready` 当成 authority。
+
+### 4.11 Physical Capability Bridge
 
 物理运行时不进入核心依赖，而是作为独立 MCP Provider 进程：
 
@@ -553,6 +596,23 @@ ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
     元数据、显式管理员额外 scope、SimulatorBackend、Nav2/TF2 懒加载 adapter、状态/检查/导航/取消
     capability、动作幂等和 `robot.action-receipt.v1`。无 ROS CI 验证 simulator、MCP 投影、权限、
     取消、失败和 indeterminate；真实 Nav2/Gazebo/DDS 与硬件仍需单独集成环境验收。
+15. 已完成：增加 `assurance.bundle.v1` 可移植可信工件包。Research Case 可只读导出为确定性 ZIP，
+    将 Artifact 原始 payload、Claim/Relation、来源、Run/Step、Receipt、Citation、Verification
+    Plan/Execution/Attempt、Review、Promotion Gate 和限制声明纳入 manifest 哈希闭包；离线 CLI 在
+    不连接数据库、网络或模型的条件下校验成员、引用和可重算摘要，并输出多轴 Assurance 状态而非
+    总分。Verification Independence 同时从布尔值升级为重叠关系和依据结构；旧布尔声明不被推断
+    为独立，Agent 自查仍不能跨过 review gate。Execution 与 Gate 保存冻结输入快照，避免 Claim
+    后续晋升导致历史摘要不可重算。签名目录当前明确为 unsigned，后续可添加签名算法而不改变
+    核心成员格式。
+16. 已完成：增加 Qualification Plane 与 `math.formal.v1`。Qualification 是 exact ClaimRevision、
+    Profile、EvidenceClosure 和 PolicyVersion 的关系，不是 Artifact/Agent 的布尔属性；验证 lineage
+    由服务器从已有 Run/Plan/Artifact 绑定，确定性 Gate 独占 verdict，ADMITTED 才生成 portable
+    receipt。CurrentUse 与 AuthorizationGrant 分账，qualified-only retrieval 隔离候选知识；Assurance
+    Bundle 同步携带 qualification/authorization closure。
+17. 已完成：接入真实 Lean 4/Coq KernelVerifier Backend。命令与 checker identity 由服务端持有；
+    proof replay 受墙钟/输出限制并支持硬取消，axiom/placeholder closure 失败关闭，执行自动形成
+    Run、Step、proof/certificate Artifact、Receipt 与 server-derived VerificationAttempt。当前明确是
+    bounded host process，不冒充容器级不可信代码沙箱。
 
 每个切片都必须产生可查询的真实纵向行为，不为了目录完整度创建没有 consumer 的抽象。
 

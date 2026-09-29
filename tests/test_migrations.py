@@ -51,7 +51,7 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "last_latency_ms",
         "last_tool_count",
     } <= columns
-    assert revision == "0010_verification_runner"
+    assert revision == "0012_qualification_plane"
     assert {
         "artifacts",
         "citations",
@@ -74,6 +74,35 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "research_verification_attempts",
         "research_verification_executions",
         "research_verification_plans",
+        "qualification_evaluations",
+        "qualification_receipts",
+        "evidence_edges",
+        "current_use_bindings",
+        "authorization_grants",
     } <= tables
     assert "promotion_stage" in research_claim_columns
+    assert {
+        "semantic_hash",
+        "definitions",
+        "negative_boundaries",
+        "dependency_claim_ids",
+        "parent_revision_id",
+    } <= research_claim_columns
+    with sqlite3.connect(path) as connection:
+        attempt_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(research_verification_attempts)")
+        }
+        promotion_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(research_promotion_evaluations)")
+        }
+        execution_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(research_verification_executions)")
+        }
+    assert "independence" in attempt_columns
+    assert {"validation_modality", "verifier_lineage"} <= attempt_columns
+    assert "input_snapshot" in promotion_columns
+    assert "input_snapshot" in execution_columns
     assert repository.get_mcp_server("workspace-a", "server-1")["provider_id"] == "research"

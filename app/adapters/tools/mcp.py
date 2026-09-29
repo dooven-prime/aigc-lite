@@ -21,6 +21,7 @@ from ...core.artifacts import (
     CitationSourceKind,
 )
 from ...core.contracts import (
+    ToolHints,
     ToolProviderResult,
     ToolRisk,
     ToolSource,
@@ -90,6 +91,22 @@ def _declared_extensions(value: Any) -> dict[str, Any]:
     if len(encoded) > _MAX_EXTENSION_METADATA_CHARS:
         return {}
     return safe
+
+
+def _remote_hints(tool: Any) -> ToolHints:
+    """Project untrusted MCP annotations as hints with conservative defaults."""
+    annotations = getattr(tool, "annotations", None)
+
+    def value(name: str, default: bool) -> bool:
+        candidate = getattr(annotations, name, None)
+        return candidate if isinstance(candidate, bool) else default
+
+    return ToolHints(
+        read_only=value("read_only_hint", False),
+        destructive=value("destructive_hint", True),
+        idempotent=value("idempotent_hint", False),
+        open_world=value("open_world_hint", True),
+    )
 
 
 def _resource_name(item: Any, uri: str, fallback: str) -> str:
@@ -232,6 +249,7 @@ class MCPToolProvider:
                     timeout_seconds=_declared_timeout(
                         metadata.get("timeout_seconds"), self.timeout_seconds
                     ),
+                    hints=_remote_hints(tool),
                     extensions=_declared_extensions(metadata.get("extensions")),
                 )
             )

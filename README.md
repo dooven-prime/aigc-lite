@@ -1,5 +1,9 @@
 # aigc-lite
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/dooven-prime/aigc-lite)](https://m8ven.ai/mcp/dooven-prime/aigc-lite)
+
+> M8ven 徽章表示第三方对公开 MCP 源码的扫描状态，不构成本项目 Qualification Plane 的资格或授权结论。
+
 一个可自托管、以可搜索执行记忆为核心的 AI 工作台与 Agent/MCP 运行时。项目通过 OpenAI-compatible 上游调用模型，但不以重复建设通用 AI Gateway 为目标；重点是持久化对话、Agent Run、执行步骤、知识和后续工具产物，让运行过程可以查询、搜索和复用。
 
 ## 当前范围
@@ -20,6 +24,7 @@
 - `/ui` 聊天、知识库与执行记忆工作台，包含 Run Explorer
 - 跨领域 Protocol/Claim/Receipt/Review/Freeze 证据控制层，以及首个 Decision Lab
 - 可导入版本化 Claim Registry 的 Research Workspace，以及支持类型化关系、版本化 Verification Plan、Agent/计划任务验证、验证收据和逐级晋升门的 Claim Explorer
+- Qualification Plane：领域 Verifier Registry、冻结 ClaimRevision、证据闭包、确定性 Gate、可携带 Qualification Receipt、独立授权账本和 qualified-only retrieval
 - 可选的独立 ROS 2 Physical Capability Bridge：模拟器与 Nav2 backend 通过 MCP 投影，复用权限、预算、取消、Run/Step、Artifact 和 Receipt
 - 可作为 Python 包或独立服务运行
 
@@ -117,6 +122,14 @@ python -m app.main
 - `POST /api/research-registry/verification-plans/{plan_id}/runs`：通过 Agent 立即执行有效 Plan，并闭合 Run/Step/Artifact/Receipt/Promotion Gate
 - `POST /api/research-registry/claims/{claim_id}/promotion-gates`：管理员执行下一阶段的失败关闭晋升评估
 - `POST /api/research-registry/import/frontier`：管理员上传、验证并冻结 Claim Registry
+- `GET /api/qualification/profiles`：列出代码注册、版本固定的领域资格 Profile
+- `GET /api/qualification/kernel-verifiers`：列出 Lean/Coq backend 的配置状态和非敏感执行边界
+- `POST /api/qualification/math-theorems`：冻结 theorem 候选；只完成存储准入，不授予资格或权限
+- `POST /api/qualification/claims/{claim_id}/kernel-verifications`：用服务端配置的 Lean/Coq 可执行文件验证冻结 proof，并写入 Run/Step/Artifact/Receipt/Attempt
+- `POST /api/qualification/claims/{claim_id}/evaluations`：按指定 Profile 运行确定性 Qualification Gate
+- `GET /api/qualification/receipts/{receipt_id}`：读取不可变、可携带的资格证书
+- `GET /api/qualification/search?q=...&profile=math.formal.v1`：只查询当前仍具该资格的 ClaimRevision
+- `POST /api/authorization-grants`：基于 current Qualification Receipt 签发窄 action/target/scope/budget/max_calls 授权
 - `GET|POST /api/schedules`：管理员创建或列出当前 workspace 的计划任务
 - `GET /api/schedules/{task_id}`：管理员读取计划任务详情
 - `POST /api/schedules/{task_id}/pause|resume|cancel`：管理员控制后续触发
@@ -215,7 +228,100 @@ Verification Plan 是不可变版本；创建同一 `plan_key` 的新版本会�
 合同；有效结果以及无效输出、上游失败或取消都会形成可查询的 execution。只要 Agent Run 已建立，
 Runner 还会写入结果/错误 Artifact、Receipt-bound Attempt 和失败关闭的下一阶段 Promotion Gate。
 自动 Gate 额外要求触发它的本次 Attempt 为 `passed`，不会借用历史通过记录为一次失败执行顺带
-晋升。Agent 执行永远记录为 `independent=false`，不会凭模型自述越过独立复核边界。
+晋升。Agent 执行永远不能自述独立性。Verification Attempt API 不接受 `independent` 或客户端填写的
+overlap assessment；principal、workspace、Run、model route、plan hash、checker/toolchain 和数据/环境
+摘要由服务端从已有对象绑定，independence 只是 lineage 上的派生投影。旧布尔值仍可读，但不能成为
+资格或权限依据。`registered -> release_ready` 只表示 workflow stage，不是证据强度。
+
+## Qualification Plane
+
+Qualification 不是 Artifact 属性，而是冻结关系：
+
+```text
+Q(ClaimRevision, QualificationProfile, EvidenceClosure, PolicyVersion)
+```
+
+系统中没有 `artifact.trusted=true` 或 `trusted_agent=true`。模型只能产生 candidate、Artifact、验证/复核
+proposal 和反例；只有确定性的 `QualificationGate` 能写 `ADMITTED / BLOCKED / UNRESOLVED / STALE /
+NOT_APPLICABLE` 评估，且只有 `ADMITTED` 才签发不可变 Qualification Receipt。Claim statement、scope、
+定义、负边界或依赖发生变化时 semantic hash 改变，旧证据继续作为历史记录存在，但不会自动继承。
+
+首个领域锁 `math.formal.v1` 要求 exact revision identity、formal proof Artifact、带 checker identity 与
+executable hash 的 kernel certificate、无 `sorry`/额外公理、current dependency closure，以及非模型的
+semantic-alignment review。资格与权力严格分账：发布或高风险执行仍需要独立、窄范围的
+`AuthorizationGrant(action, target, scope, budget, expiry, max_calls)`。原始候选进入 `/api/search`；
+知识使用面可走 `/api/qualification/search`，避免未资格化候选被下一轮 Agent 当成事实。
+Kernel attempt 还必须来自服务端持有的 `system:verifier:*` identity 且不能带 model route。真实
+Lean 4/Coq process backend 只接受 proof source、固定 declaration 和 backend id；可执行文件、argv、
+环境与 verifier identity 都由服务器配置，客户端不能上传 command 或用普通 JSON 冒充 certificate。
+Lean 使用 `--trust=0` 并读取 `#print axioms`，Coq 读取 `Print Assumptions`；非零退出、超时、缺失
+closure marker、`sorry`/`Admitted` 或任意额外公理都生成失败 Attempt，不能通过 Gate。
+即使 kernel 通过也只增加一条合格的 evidence edge，不直接写 Qualification verdict；语义对齐 review、
+dependency closure 和显式 `QualificationGate` 仍必须分别满足。
+
+```dotenv
+# 默认留空并失败关闭；生产环境建议固定到具体 toolchain 的绝对路径。
+AIGC_LITE_LEAN_EXECUTABLE=C:\Users\you\.elan\toolchains\stable\bin\lean.exe
+AIGC_LITE_COQ_EXECUTABLE=/usr/bin/coqc
+AIGC_LITE_KERNEL_VERIFY_TIMEOUT_SECONDS=30
+AIGC_LITE_KERNEL_VERIFY_MEMORY_MB=512
+```
+
+```json
+POST /api/qualification/claims/{claim_revision_id}/kernel-verifications
+{
+  "backend": "lean4",
+  "declaration_name": "add_zero_demo",
+  "source": "theorem add_zero_demo (n : Nat) : n + 0 = n := by exact Nat.add_zero n"
+}
+```
+
+当前 backend 使用无 shell、有限时间/输出的子进程和一次性工作目录，但这不是 OS 安全沙箱；Lean
+metaprogram 与 Coq plugin 仍可能接触宿主文件系统/网络。因此该入口只开放给 workspace admin，
+不应作为公开匿名 proof upload 服务。需要验证不可信任意代码时，应把同一 backend 放进独立容器/
+VM，并把镜像、库闭包和网络策略纳入后续 Qualification Profile。
+
+## Portable Assurance Bundle
+
+管理员可以把一个 Research Case 只读导出为确定性 ZIP：
+
+```text
+GET /api/research-registry/cases/{case_id}/assurance-bundle
+
+research-artifact/
+├── artifact.json
+├── claims.json
+├── provenance.json
+├── receipts.json
+├── evidence.json
+├── verification.json
+├── qualification.json
+├── reviews.json
+├── limitations.json
+├── manifest.json
+├── payloads/
+└── signatures/status.json
+```
+
+`manifest.json` 对每个 JSON 文档和 Artifact 原始 payload 保存 SHA-256 与字节长度，并对成员清单
+再形成 `bundle_digest`。相同数据库快照会导出相同字节；ZIP 时间戳固定，不把导出时间伪装成研究
+事件。当前版本明确标记 `unsigned`：哈希闭包可以发现导出后的改动，但不能冒充发布者签名。
+通用离线 verifier 只检查基础设施闭包，不重新裁决数学定理、实验设计或领域事实；这些锁必须由
+对应 profile 的领域验证器提供，包中会明确报告 `domain_semantics=not_evaluated_by_bundle_verifier`。
+
+包的校验完全离线，不启动数据库、模型、MCP 或网络：
+
+```bash
+aigc-lite verify research-artifact.zip
+aigc-lite verify research-artifact/ --require-authorized
+```
+
+命令输出 `identity / provenance / reproducibility / evidence_closure / verification /
+independence / epistemic_state / authority_state` 状态包，而不是总分。普通 `verify` 只以格式、引用与
+摘要闭包决定退出码；`--require-authorized` 要求包中存在仍绑定 current qualification 的有效
+AuthorizationGrant，workflow 的 `release_ready` 不再冒充 authority。验证器
+会重算 Artifact、Verification Plan、冻结 Execution Input 与 Promotion Gate 摘要；旧版只有
+`independent=true`、没有重叠依据的记录会显示为 `undetermined`，不会被升级成独立验证。
 
 HTTP 轮询必须在 `AIGC_LITE_HTTP_POLL_ALLOWED_HOSTS` 中逐个配置精确 host 或 `host:port`。它不接受
 自定义 header、请求体或 URL 凭据，不跟随重定向，也不读取或保存响应正文。带认证的服务应封装为

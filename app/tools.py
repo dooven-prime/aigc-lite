@@ -8,7 +8,7 @@ import types
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
-from .core.contracts import ToolExecutionMode, ToolRisk
+from .core.contracts import ToolExecutionMode, ToolHints, ToolRisk
 from .core.errors import ErrorCode
 
 Tool = Callable[..., Any] | Callable[..., Awaitable[Any]]
@@ -41,6 +41,10 @@ def tool(
     required_scopes: tuple[str, ...] = (),
     execution: ToolExecutionMode | str | None = None,
     timeout_seconds: float | None = None,
+    read_only: bool = False,
+    destructive: bool = True,
+    idempotent: bool = False,
+    open_world: bool = True,
 ):
     def register(function: Tool) -> Tool:
         execution_mode = (
@@ -66,13 +70,25 @@ def tool(
             "required_scopes": frozenset(required_scopes),
             "execution_mode": execution_mode,
             "timeout_seconds": timeout_seconds,
+            "hints": ToolHints(
+                read_only=read_only,
+                destructive=destructive,
+                idempotent=idempotent,
+                open_world=open_world,
+            ),
         }
         return function
 
     return register
 
 
-@tool("workspace_status")
+@tool(
+    "workspace_status",
+    read_only=True,
+    destructive=False,
+    idempotent=True,
+    open_world=False,
+)
 def workspace_status() -> dict[str, str]:
     """Return the current aigc-lite service status."""
     return {"status": "ok", "service": "aigc-lite"}
@@ -165,6 +181,7 @@ def registration(name: str) -> tuple[Tool, dict[str, Any]] | None:
                 else ToolExecutionMode.THREAD
             ),
             "timeout_seconds": None,
+            "hints": ToolHints(),
         },
     )
 

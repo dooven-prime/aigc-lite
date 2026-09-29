@@ -5,6 +5,32 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+- Added real Lean 4 and Coq KernelVerifier process backends. Server-owned
+  executable selection, bounded output, wall-clock termination, cancellation,
+  executable/toolchain identity, `#print axioms`/`Print Assumptions` closure,
+  and fail-closed placeholder detection now produce linked Run, Step, proof and
+  certificate Artifacts, Receipt, and server-derived Verification Attempt.
+  The certificate explicitly discloses that the bounded host process is not an
+  OS network/filesystem sandbox.
+- Added the Qualification Plane with a versioned Domain Verifier Registry and
+  the first `math.formal.v1` theorem profile. Exact ClaimRevision semantic
+  hashes, Merkle-like evidence closures, deterministic criterion receipts,
+  immutable Qualification Receipts, CurrentUse bindings, and separate narrow
+  Authorization Grants prevent storage or workflow admission from becoming a
+  trust/authority flag.
+- Verification independence is now derived from server-bound verifier lineage
+  rather than accepted from request booleans. Added qualified-only search and
+  qualification/authorization closure to portable Assurance Bundles.
+
+- Added deterministic, read-only Research Case Assurance Bundle export with
+  content-addressed Artifact payloads, a closed member manifest, explicit
+  limitations and unsigned-signature status, plus `aigc-lite verify` for
+  bounded directory/ZIP verification without a database or network.
+- Replaced boolean-only verification independence as a promotion authority
+  with a structured overlap disclosure and explicit qualification basis.
+  Legacy `independent=true` rows remain visible but fail closed. Verification
+  executions and promotion gates now retain their frozen input snapshots so
+  offline verifiers can recompute historical digests after Claim state moves.
 - Started the `0.4.0` Physical Capability Bridge as a separately installable
   `aigc-lite-ros2` package rather than adding ROS/DDS dependencies to core.
 - Added bounded `get_state`, `inspect`, `navigate_to`, and `cancel_action` MCP

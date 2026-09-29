@@ -305,13 +305,50 @@ class Repository(Protocol):
         self, tenant_id: str, values: dict[str, Any], *, promote: bool
     ) -> dict: ...
 
-    def list_research_promotion_evaluations(
-        self, tenant_id: str, claim_id: str
+    def list_research_promotion_evaluations(self, tenant_id: str, claim_id: str) -> list[dict]: ...
+
+    def create_qualification_evaluation(self, tenant_id: str, values: dict[str, Any]) -> dict: ...
+
+    def list_qualification_evaluations(
+        self, tenant_id: str, claim_id: str, profile_id: str | None = None
+    ) -> list[dict]: ...
+
+    def create_qualification_receipt(self, tenant_id: str, values: dict[str, Any]) -> dict: ...
+
+    def get_qualification_receipt(self, tenant_id: str, receipt_id: str) -> dict | None: ...
+
+    def list_qualification_receipts(
+        self, tenant_id: str, claim_id: str | None = None
+    ) -> list[dict]: ...
+
+    def create_evidence_edges(
+        self, tenant_id: str, evaluation_id: str, edges: list[dict[str, Any]]
+    ) -> list[dict]: ...
+
+    def upsert_current_use_binding(self, tenant_id: str, values: dict[str, Any]) -> dict: ...
+
+    def get_current_use_binding(
+        self,
+        tenant_id: str,
+        claim_id: str,
+        profile_id: str,
+        use_scope: str = "knowledge",
+    ) -> dict | None: ...
+
+    def list_current_use_bindings(
+        self, tenant_id: str, profile_id: str, state: str = "current"
+    ) -> list[dict]: ...
+
+    def create_authorization_grant(self, tenant_id: str, values: dict[str, Any]) -> dict: ...
+
+    def list_authorization_grants(
+        self, tenant_id: str, qualification_receipt_ids: list[str] | None = None
     ) -> list[dict]: ...
 
     def search_backend(self) -> SearchBackend: ...
 
     def search_memory(self, tenant_id: str, query: str, limit: int = 20) -> list[dict]: ...
+
 
 def _decode_metadata(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
@@ -462,6 +499,9 @@ def _decode_research_claim(row: Any) -> dict[str, Any]:
     value["revision_number"] = int(value.get("revision_number") or 1)
     value["status_axes"] = _decode_metadata(value.get("status_axes"))
     value["blockers"] = _decode_list(value.get("blockers"))
+    value["definitions"] = _decode_list(value.get("definitions"))
+    value["negative_boundaries"] = _decode_list(value.get("negative_boundaries"))
+    value["dependency_claim_ids"] = _decode_list(value.get("dependency_claim_ids"))
     value.setdefault("sources", [])
     return value
 
@@ -476,8 +516,44 @@ def _decode_research_relation(row: Any) -> dict[str, Any]:
 def _decode_verification_attempt(row: Any) -> dict[str, Any]:
     value = dict(row)
     value["independent"] = bool(value.get("independent"))
+    value["independence"] = _decode_metadata(value.get("independence"))
+    value["verifier_lineage"] = _decode_metadata(value.get("verifier_lineage"))
     value["artifact_ids"] = _decode_list(value.get("artifact_ids"))
     value["metadata"] = _decode_metadata(value.get("metadata"))
+    return value
+
+
+def _decode_qualification_evaluation(row: Any) -> dict[str, Any]:
+    value = dict(row)
+    value["profile_version"] = int(value.get("profile_version") or 1)
+    for field in (
+        "profile_snapshot",
+        "evidence_closure",
+        "evidence_vector",
+        "independence_summary",
+    ):
+        value[field] = _decode_metadata(value.get(field))
+    for field in ("criteria", "blockers"):
+        value[field] = _decode_list(value.get(field))
+    return value
+
+
+def _decode_qualification_receipt(row: Any) -> dict[str, Any]:
+    value = dict(row)
+    value["profile_version"] = int(value.get("profile_version") or 1)
+    for field in ("evidence_vector", "independence_summary"):
+        value[field] = _decode_metadata(value.get(field))
+    for field in ("criteria", "blockers"):
+        value[field] = _decode_list(value.get(field))
+    return value
+
+
+def _decode_authorization_grant(row: Any) -> dict[str, Any]:
+    value = dict(row)
+    for field in ("scope", "conditions", "budget"):
+        value[field] = _decode_metadata(value.get(field))
+    value["max_calls"] = int(value.get("max_calls") or 0)
+    value["calls_used"] = int(value.get("calls_used") or 0)
     return value
 
 
@@ -492,12 +568,14 @@ def _decode_verification_plan(row: Any) -> dict[str, Any]:
 def _decode_verification_execution(row: Any) -> dict[str, Any]:
     value = dict(row)
     value["plan_version"] = int(value.get("plan_version") or 1)
+    value["input_snapshot"] = _decode_metadata(value.get("input_snapshot"))
     value["metadata"] = _decode_metadata(value.get("metadata"))
     return value
 
 
 def _decode_promotion_evaluation(row: Any) -> dict[str, Any]:
     value = dict(row)
+    value["input_snapshot"] = _decode_metadata(value.get("input_snapshot"))
     for field in ("criteria", "blockers", "attempt_ids", "relation_ids"):
         value[field] = _decode_list(value.get(field))
     return value
@@ -736,8 +814,14 @@ class SQLiteRepository:
             "created_at": values.get("created_at", utc_now()),
         }
         with self._connect() as db:
-            db.execute("DELETE FROM model_configs WHERE tenant_id = ? AND name = ?", (tenant_id, model["name"]))
-            db.execute("INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", tuple(model.values()))
+            db.execute(
+                "DELETE FROM model_configs WHERE tenant_id = ? AND name = ?",
+                (tenant_id, model["name"]),
+            )
+            db.execute(
+                "INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(model.values()),
+            )
         return {key: value for key, value in model.items() if key != "api_key"}
 
     def list_model_configs(self, tenant_id: str) -> list[dict]:
@@ -766,8 +850,7 @@ class SQLiteRepository:
         now = utc_now()
         with self._connect() as db:
             existing = db.execute(
-                "SELECT id, created_at FROM mcp_servers "
-                "WHERE tenant_id = ? AND provider_id = ?",
+                "SELECT id, created_at FROM mcp_servers WHERE tenant_id = ? AND provider_id = ?",
                 (tenant_id, values["provider_id"]),
             ).fetchone()
             server = {
@@ -944,8 +1027,7 @@ class SQLiteRepository:
     def list_scheduled_tasks(self, tenant_id: str) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM scheduled_tasks WHERE tenant_id = ? "
-                "ORDER BY created_at DESC",
+                "SELECT * FROM scheduled_tasks WHERE tenant_id = ? ORDER BY created_at DESC",
                 (tenant_id,),
             ).fetchall()
         return [_decode_scheduled_task(row) for row in rows]
@@ -961,8 +1043,7 @@ class SQLiteRepository:
     def list_active_scheduled_tasks(self) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' "
-                "ORDER BY next_run_at, id"
+                "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' ORDER BY next_run_at, id"
             ).fetchall()
         return [_decode_scheduled_task(row) for row in rows]
 
@@ -990,11 +1071,7 @@ class SQLiteRepository:
                 "WHERE tenant_id = ? AND id = ? AND status = ?",
                 (status, utc_now(), tenant_id, task_id, expected_status),
             )
-        return (
-            self.get_scheduled_task(tenant_id, task_id)
-            if result.rowcount > 0
-            else None
-        )
+        return self.get_scheduled_task(tenant_id, task_id) if result.rowcount > 0 else None
 
     def advance_scheduled_task(
         self,
@@ -1021,11 +1098,7 @@ class SQLiteRepository:
                     expected_next_run_at,
                 ),
             )
-        return (
-            self.get_scheduled_task(tenant_id, task_id)
-            if result.rowcount > 0
-            else None
-        )
+        return self.get_scheduled_task(tenant_id, task_id) if result.rowcount > 0 else None
 
     def write_audit(self, tenant_id: str, action: str, path: str, metadata: dict, user_id: str | None = None) -> None:
         from .redaction import redact
@@ -1033,7 +1106,14 @@ class SQLiteRepository:
         with self._connect() as db:
             db.execute(
                 "INSERT INTO audit_logs(tenant_id, user_id, action, path, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (tenant_id, user_id, action, path, json.dumps(redact(metadata), ensure_ascii=False), utc_now()),
+                (
+                    tenant_id,
+                    user_id,
+                    action,
+                    path,
+                    json.dumps(redact(metadata), ensure_ascii=False),
+                    utc_now(),
+                ),
             )
 
     def usage(self, tenant_id: str, model: str, prompt_tokens: int, completion_tokens: int, cost: float) -> None:
@@ -1438,10 +1518,13 @@ class SQLiteRepository:
             "created_at": utc_now(),
         }
         with self._connect() as db:
-            if db.execute(
-                "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
-                (tenant_id, value["protocol_id"]),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, value["protocol_id"]),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(value["protocol_id"])
             db.execute(
                 "INSERT INTO evidence_claims(id, tenant_id, protocol_id, run_id, statement, "
@@ -1468,15 +1551,22 @@ class SQLiteRepository:
             "created_at": utc_now(),
         }
         with self._connect() as db:
-            if db.execute(
-                "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
-                (tenant_id, value["protocol_id"]),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, value["protocol_id"]),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(value["protocol_id"])
-            if value["run_id"] is not None and db.execute(
-                "SELECT 1 FROM agent_runs WHERE tenant_id = ? AND id = ?",
-                (tenant_id, value["run_id"]),
-            ).fetchone() is None:
+            if (
+                value["run_id"] is not None
+                and db.execute(
+                    "SELECT 1 FROM agent_runs WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, value["run_id"]),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(value["run_id"])
             if artifact_ids:
                 placeholders = ",".join("?" for _ in artifact_ids)
@@ -1509,10 +1599,13 @@ class SQLiteRepository:
             "created_at": utc_now(),
         }
         with self._connect() as db:
-            if db.execute(
-                "SELECT 1 FROM execution_receipts WHERE tenant_id = ? AND id = ?",
-                (tenant_id, value["receipt_id"]),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM execution_receipts WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, value["receipt_id"]),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(value["receipt_id"])
             db.execute(
                 "INSERT INTO evidence_reviews(id, tenant_id, receipt_id, reviewer_kind, "
@@ -1534,10 +1627,13 @@ class SQLiteRepository:
             "created_at": utc_now(),
         }
         with self._connect() as db:
-            if db.execute(
-                "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
-                (tenant_id, value["protocol_id"]),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, value["protocol_id"]),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(value["protocol_id"])
             db.execute(
                 "INSERT INTO freeze_manifests(id, tenant_id, protocol_id, name, version, "
@@ -1576,15 +1672,21 @@ class SQLiteRepository:
                 }
             )
         with self._connect() as db:
-            if db.execute(
-                "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
-                (tenant_id, protocol_id),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, protocol_id),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(protocol_id)
-            if db.execute(
-                "SELECT 1 FROM execution_receipts WHERE tenant_id = ? AND id = ?",
-                (tenant_id, receipt_id),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM execution_receipts WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, receipt_id),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(receipt_id)
             db.executemany(
                 "INSERT INTO decision_cases(id, tenant_id, protocol_id, receipt_id, "
@@ -1691,6 +1793,15 @@ class SQLiteRepository:
                     "status_axes": json.dumps(item.get("status_axes") or {}, ensure_ascii=False),
                     "closure_status": item["closure_status"],
                     "blockers": json.dumps(item.get("blockers") or [], ensure_ascii=False),
+                    "semantic_hash": item.get("semantic_hash") or "",
+                    "definitions": json.dumps(item.get("definitions") or [], ensure_ascii=False),
+                    "negative_boundaries": json.dumps(
+                        item.get("negative_boundaries") or [], ensure_ascii=False
+                    ),
+                    "dependency_claim_ids": json.dumps(
+                        item.get("dependency_claim_ids") or [], ensure_ascii=False
+                    ),
+                    "parent_revision_id": item.get("parent_revision_id"),
                     "created_at": created_at,
                 }
             )
@@ -1704,15 +1815,21 @@ class SQLiteRepository:
                 for ref_key in item.get("source_ref_keys") or []
             )
         with self._connect() as db:
-            if db.execute(
-                "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
-                (tenant_id, case["protocol_id"]),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, case["protocol_id"]),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(case["protocol_id"])
-            if db.execute(
-                "SELECT 1 FROM execution_receipts WHERE tenant_id = ? AND id = ?",
-                (tenant_id, case["receipt_id"]),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM execution_receipts WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, case["receipt_id"]),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(case["receipt_id"])
             db.execute(
                 "INSERT INTO research_cases(id, tenant_id, protocol_id, receipt_id, "
@@ -1730,8 +1847,10 @@ class SQLiteRepository:
             db.executemany(
                 "INSERT INTO research_claim_revisions(id, tenant_id, research_case_id, "
                 "claim_key, revision_number, statement, claim_type, scope, method_revision, "
-                "lifecycle_status, status_axes, closure_status, blockers, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "lifecycle_status, status_axes, closure_status, blockers, semantic_hash, "
+                "definitions, negative_boundaries, dependency_claim_ids, "
+                "parent_revision_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [tuple(row.values()) for row in claim_rows],
             )
             db.executemany(
@@ -1782,10 +1901,7 @@ class SQLiteRepository:
         closure_status: str | None = None,
         limit: int = 1_000,
     ) -> list[dict]:
-        sql = (
-            "SELECT * FROM research_claim_revisions "
-            "WHERE tenant_id = ? AND research_case_id = ?"
-        )
+        sql = "SELECT * FROM research_claim_revisions WHERE tenant_id = ? AND research_case_id = ?"
         parameters: list[Any] = [tenant_id, research_case_id]
         for column, value in (("claim_type", claim_type), ("closure_status", closure_status)):
             if value is not None:
@@ -1946,6 +2062,11 @@ class SQLiteRepository:
             "method": values["method"],
             "scope": values["scope"],
             "independent": int(bool(values.get("independent"))),
+            "independence": json.dumps(values.get("independence") or {}, ensure_ascii=False),
+            "validation_modality": values.get("validation_modality") or "agent_review",
+            "verifier_lineage": json.dumps(
+                values.get("verifier_lineage") or {}, ensure_ascii=False
+            ),
             "input_digest": values["input_digest"],
             "output_digest": values["output_digest"],
             "artifact_ids": json.dumps(
@@ -1956,27 +2077,34 @@ class SQLiteRepository:
             "created_at": utc_now(),
         }
         with self._connect() as db:
-            if db.execute(
-                "SELECT 1 FROM research_claim_revisions WHERE tenant_id = ? AND id = ? "
-                "AND research_case_id = ?",
-                (
-                    tenant_id,
-                    value["claim_revision_id"],
-                    value["research_case_id"],
-                ),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM research_claim_revisions WHERE tenant_id = ? AND id = ? "
+                    "AND research_case_id = ?",
+                    (
+                        tenant_id,
+                        value["claim_revision_id"],
+                        value["research_case_id"],
+                    ),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(value["claim_revision_id"])
-            if db.execute(
-                "SELECT 1 FROM execution_receipts WHERE tenant_id = ? AND id = ?",
-                (tenant_id, value["receipt_id"]),
-            ).fetchone() is None:
+            if (
+                db.execute(
+                    "SELECT 1 FROM execution_receipts WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, value["receipt_id"]),
+                ).fetchone()
+                is None
+            ):
                 raise KeyError(value["receipt_id"])
             db.execute(
                 "INSERT INTO research_verification_attempts(id, tenant_id, "
                 "research_case_id, claim_revision_id, receipt_id, run_id, plan_id, "
                 "verification_execution_id, kind, outcome, method, scope, independent, "
-                "input_digest, output_digest, artifact_ids, metadata, created_by, "
-                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "independence, validation_modality, verifier_lineage, input_digest, "
+                "output_digest, artifact_ids, metadata, created_by, created_at) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(value.values()),
             )
         return _decode_verification_attempt(value)
@@ -2055,8 +2183,7 @@ class SQLiteRepository:
     ) -> dict | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM research_verification_plans "
-                "WHERE tenant_id = ? AND id = ?",
+                "SELECT * FROM research_verification_plans WHERE tenant_id = ? AND id = ?",
                 (tenant_id, plan_id),
             ).fetchone()
         return _decode_verification_plan(row) if row is not None else None
@@ -2091,6 +2218,7 @@ class SQLiteRepository:
             "promotion_evaluation_id": None,
             "outcome": None,
             "input_digest": values["input_digest"],
+            "input_snapshot": json.dumps(values.get("input_snapshot") or {}, ensure_ascii=False),
             "output_digest": None,
             "error_code": None,
             "metadata": json.dumps(values.get("metadata") or {}, ensure_ascii=False),
@@ -2114,9 +2242,9 @@ class SQLiteRepository:
                 "INSERT INTO research_verification_executions(id, tenant_id, "
                 "research_case_id, claim_revision_id, plan_id, plan_version, status, "
                 "request_id, run_id, scheduled_task_id, attempt_id, artifact_id, "
-                "promotion_evaluation_id, outcome, input_digest, output_digest, "
+                "promotion_evaluation_id, outcome, input_digest, input_snapshot, output_digest, "
                 "error_code, metadata, created_by, started_at, completed_at) VALUES "
-                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(value.values()),
             )
         return _decode_verification_execution(value)
@@ -2149,8 +2277,7 @@ class SQLiteRepository:
             if cursor.rowcount == 0:
                 return None
             row = db.execute(
-                "SELECT * FROM research_verification_executions "
-                "WHERE tenant_id = ? AND id = ?",
+                "SELECT * FROM research_verification_executions WHERE tenant_id = ? AND id = ?",
                 (tenant_id, execution_id),
             ).fetchone()
         return _decode_verification_execution(row) if row is not None else None
@@ -2181,6 +2308,7 @@ class SQLiteRepository:
             "input_digest": values["input_digest"],
             "evaluation_digest": values["evaluation_digest"],
             "criteria": json.dumps(values.get("criteria") or [], ensure_ascii=False),
+            "input_snapshot": json.dumps(values.get("input_snapshot") or {}, ensure_ascii=False),
             "blockers": json.dumps(values.get("blockers") or [], ensure_ascii=False),
             "attempt_ids": json.dumps(values.get("attempt_ids") or [], ensure_ascii=False),
             "relation_ids": json.dumps(
@@ -2204,9 +2332,9 @@ class SQLiteRepository:
             db.execute(
                 "INSERT INTO research_promotion_evaluations(id, tenant_id, "
                 "research_case_id, claim_revision_id, from_stage, target_stage, decision, "
-                "policy_version, input_digest, evaluation_digest, criteria, blockers, "
-                "attempt_ids, relation_ids, created_by, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "policy_version, input_digest, evaluation_digest, criteria, input_snapshot, "
+                "blockers, attempt_ids, relation_ids, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(value.values()),
             )
             if promote:
@@ -2232,6 +2360,265 @@ class SQLiteRepository:
                 (tenant_id, claim_id),
             ).fetchall()
         return [_decode_promotion_evaluation(row) for row in rows]
+
+    def create_qualification_evaluation(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        value = {
+            "id": values.get("id") or str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "claim_revision_id": values["claim_revision_id"],
+            "claim_semantic_hash": values["claim_semantic_hash"],
+            "profile_id": values["profile_id"],
+            "profile_version": int(values["profile_version"]),
+            "profile_hash": values["profile_hash"],
+            "profile_snapshot": json.dumps(values["profile_snapshot"], ensure_ascii=False),
+            "evidence_closure_hash": values["evidence_closure_hash"],
+            "evidence_closure": json.dumps(values["evidence_closure"], ensure_ascii=False),
+            "policy_version": values["policy_version"],
+            "policy_hash": values["policy_hash"],
+            "verdict": values["verdict"],
+            "criteria": json.dumps(values.get("criteria") or [], ensure_ascii=False),
+            "blockers": json.dumps(values.get("blockers") or [], ensure_ascii=False),
+            "evidence_vector": json.dumps(values.get("evidence_vector") or {}, ensure_ascii=False),
+            "independence_summary": json.dumps(
+                values.get("independence_summary") or {}, ensure_ascii=False
+            ),
+            "evaluated_by": values.get("evaluated_by"),
+            "created_at": utc_now(),
+        }
+        with self._connect() as db:
+            if (
+                db.execute(
+                    "SELECT 1 FROM research_claim_revisions WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, value["claim_revision_id"]),
+                ).fetchone()
+                is None
+            ):
+                raise KeyError(value["claim_revision_id"])
+            db.execute(
+                "INSERT INTO qualification_evaluations(id, tenant_id, claim_revision_id, "
+                "claim_semantic_hash, profile_id, profile_version, profile_hash, "
+                "profile_snapshot, evidence_closure_hash, evidence_closure, policy_version, "
+                "policy_hash, verdict, criteria, blockers, evidence_vector, "
+                "independence_summary, evaluated_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(value.values()),
+            )
+        return _decode_qualification_evaluation(value)
+
+    def list_qualification_evaluations(
+        self, tenant_id: str, claim_id: str, profile_id: str | None = None
+    ) -> list[dict]:
+        sql = (
+            "SELECT * FROM qualification_evaluations WHERE tenant_id = ? AND claim_revision_id = ?"
+        )
+        parameters: list[Any] = [tenant_id, claim_id]
+        if profile_id is not None:
+            sql += " AND profile_id = ?"
+            parameters.append(profile_id)
+        sql += " ORDER BY created_at DESC, id DESC"
+        with self._connect() as db:
+            rows = db.execute(sql, parameters).fetchall()
+        return [_decode_qualification_evaluation(row) for row in rows]
+
+    def create_qualification_receipt(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        value = {
+            "id": values.get("id") or str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "evaluation_id": values["evaluation_id"],
+            "claim_revision_id": values["claim_revision_id"],
+            "claim_semantic_hash": values["claim_semantic_hash"],
+            "profile_id": values["profile_id"],
+            "profile_version": int(values["profile_version"]),
+            "evidence_closure_hash": values["evidence_closure_hash"],
+            "policy_version": values["policy_version"],
+            "policy_hash": values["policy_hash"],
+            "verdict": values["verdict"],
+            "criteria": json.dumps(values.get("criteria") or [], ensure_ascii=False),
+            "blockers": json.dumps(values.get("blockers") or [], ensure_ascii=False),
+            "evidence_vector": json.dumps(values.get("evidence_vector") or {}, ensure_ascii=False),
+            "independence_summary": json.dumps(
+                values.get("independence_summary") or {}, ensure_ascii=False
+            ),
+            "receipt_hash": values["receipt_hash"],
+            "issued_at": values.get("issued_at") or utc_now(),
+        }
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO qualification_receipts(id, tenant_id, evaluation_id, "
+                "claim_revision_id, claim_semantic_hash, profile_id, profile_version, "
+                "evidence_closure_hash, policy_version, policy_hash, verdict, criteria, "
+                "blockers, evidence_vector, independence_summary, receipt_hash, issued_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(value.values()),
+            )
+        return _decode_qualification_receipt(value)
+
+    def get_qualification_receipt(self, tenant_id: str, receipt_id: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM qualification_receipts WHERE tenant_id = ? AND id = ?",
+                (tenant_id, receipt_id),
+            ).fetchone()
+        return _decode_qualification_receipt(row) if row is not None else None
+
+    def list_qualification_receipts(
+        self, tenant_id: str, claim_id: str | None = None
+    ) -> list[dict]:
+        sql = "SELECT * FROM qualification_receipts WHERE tenant_id = ?"
+        parameters: list[Any] = [tenant_id]
+        if claim_id is not None:
+            sql += " AND claim_revision_id = ?"
+            parameters.append(claim_id)
+        sql += " ORDER BY issued_at, id"
+        with self._connect() as db:
+            rows = db.execute(sql, parameters).fetchall()
+        return [_decode_qualification_receipt(row) for row in rows]
+
+    def create_evidence_edges(
+        self, tenant_id: str, evaluation_id: str, edges: list[dict[str, Any]]
+    ) -> list[dict]:
+        created_at = utc_now()
+        rows = [
+            {
+                "id": str(uuid.uuid4()),
+                "tenant_id": tenant_id,
+                "evaluation_id": evaluation_id,
+                "source_node_type": item["source_node_type"],
+                "source_node_id": item["source_node_id"],
+                "target_node_type": item["target_node_type"],
+                "target_node_id": item["target_node_id"],
+                "edge_type": item["edge_type"],
+                "source_hash": item.get("source_hash"),
+                "target_hash": item.get("target_hash"),
+                "status": item.get("status") or "active",
+                "created_at": created_at,
+            }
+            for item in edges
+        ]
+        if not rows:
+            return []
+        with self._connect() as db:
+            db.executemany(
+                "INSERT INTO evidence_edges(id, tenant_id, evaluation_id, "
+                "source_node_type, source_node_id, target_node_type, target_node_id, "
+                "edge_type, source_hash, target_hash, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [tuple(row.values()) for row in rows],
+            )
+        return rows
+
+    def upsert_current_use_binding(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        now = utc_now()
+        value = {
+            "id": values.get("id") or str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "claim_revision_id": values["claim_revision_id"],
+            "profile_id": values["profile_id"],
+            "use_scope": values.get("use_scope") or "knowledge",
+            "qualification_receipt_id": values["qualification_receipt_id"],
+            "state": values.get("state") or "current",
+            "stale_reason": values.get("stale_reason"),
+            "bound_by": values.get("bound_by"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, "
+                "profile_id, use_scope, qualification_receipt_id, state, stale_reason, "
+                "bound_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(tenant_id, claim_revision_id, profile_id, use_scope) DO UPDATE "
+                "SET qualification_receipt_id = excluded.qualification_receipt_id, "
+                "state = excluded.state, stale_reason = excluded.stale_reason, "
+                "bound_by = excluded.bound_by, updated_at = excluded.updated_at",
+                tuple(value.values()),
+            )
+            row = db.execute(
+                "SELECT * FROM current_use_bindings WHERE tenant_id = ? "
+                "AND claim_revision_id = ? AND profile_id = ? AND use_scope = ?",
+                (tenant_id, value["claim_revision_id"], value["profile_id"], value["use_scope"]),
+            ).fetchone()
+        return dict(row)
+
+    def get_current_use_binding(
+        self,
+        tenant_id: str,
+        claim_id: str,
+        profile_id: str,
+        use_scope: str = "knowledge",
+    ) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM current_use_bindings WHERE tenant_id = ? "
+                "AND claim_revision_id = ? AND profile_id = ? AND use_scope = ?",
+                (tenant_id, claim_id, profile_id, use_scope),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_current_use_bindings(
+        self, tenant_id: str, profile_id: str, state: str = "current"
+    ) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM current_use_bindings WHERE tenant_id = ? "
+                "AND profile_id = ? AND state = ? ORDER BY updated_at DESC",
+                (tenant_id, profile_id, state),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_authorization_grant(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        value = {
+            "id": values.get("id") or str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "qualification_receipt_id": values["qualification_receipt_id"],
+            "actor_id": values["actor_id"],
+            "action": values["action"],
+            "target": values["target"],
+            "scope": json.dumps(values.get("scope") or {}, ensure_ascii=False),
+            "conditions": json.dumps(values.get("conditions") or {}, ensure_ascii=False),
+            "expires_at": values.get("expires_at"),
+            "budget": json.dumps(values.get("budget") or {}, ensure_ascii=False),
+            "max_calls": int(values.get("max_calls") or 1),
+            "calls_used": 0,
+            "policy_version": values["policy_version"],
+            "state": values.get("state") or "active",
+            "grant_receipt": values["grant_receipt"],
+            "created_by": values.get("created_by"),
+            "created_at": utc_now(),
+        }
+        with self._connect() as db:
+            if (
+                db.execute(
+                    "SELECT 1 FROM qualification_receipts WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, value["qualification_receipt_id"]),
+                ).fetchone()
+                is None
+            ):
+                raise KeyError(value["qualification_receipt_id"])
+            db.execute(
+                "INSERT INTO authorization_grants(id, tenant_id, qualification_receipt_id, "
+                "actor_id, action, target, scope, conditions, expires_at, budget, max_calls, "
+                "calls_used, policy_version, state, grant_receipt, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(value.values()),
+            )
+        return _decode_authorization_grant(value)
+
+    def list_authorization_grants(
+        self, tenant_id: str, qualification_receipt_ids: list[str] | None = None
+    ) -> list[dict]:
+        sql = "SELECT * FROM authorization_grants WHERE tenant_id = ?"
+        parameters: list[Any] = [tenant_id]
+        if qualification_receipt_ids is not None:
+            if not qualification_receipt_ids:
+                return []
+            placeholders = ",".join("?" for _ in qualification_receipt_ids)
+            sql += f" AND qualification_receipt_id IN ({placeholders})"
+            parameters.extend(qualification_receipt_ids)
+        sql += " ORDER BY created_at, id"
+        with self._connect() as db:
+            rows = db.execute(sql, parameters).fetchall()
+        return [_decode_authorization_grant(row) for row in rows]
 
     def _search_candidates(self, tenant_id: str, limit: int) -> list[dict]:
         with self._connect() as db:
@@ -2305,7 +2692,12 @@ class PostgresRepository:
         return [dict(row) for row in rows]
 
     def create_session(self, tenant_id: str, title: str = "New conversation") -> dict:
-        value = {"id": str(uuid.uuid4()), "tenant_id": tenant_id, "title": title, "created_at": utc_now()}
+        value = {
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "title": title,
+            "created_at": utc_now(),
+        }
         self._execute(
             "INSERT INTO sessions(id, tenant_id, title, created_at, updated_at) "
             "VALUES (:id, :tenant_id, :title, :created_at, :created_at)", value,
@@ -2342,7 +2734,13 @@ class PostgresRepository:
         self._execute(
             "INSERT INTO messages(session_id, tenant_id, role, content, created_at) "
             "VALUES (:session_id, :tenant_id, :role, :content, :created_at)",
-            {"session_id": session_id, "tenant_id": tenant_id, "role": role, "content": content, "created_at": now},
+            {
+                "session_id": session_id,
+                "tenant_id": tenant_id,
+                "role": role,
+                "content": content,
+                "created_at": now,
+            },
         )
         self._execute(
             "UPDATE sessions SET updated_at = :now WHERE tenant_id = :tenant_id AND id = :id",
@@ -2380,14 +2778,22 @@ class PostgresRepository:
             lexical = sum(row["content"].lower().count(term) for term in terms)
             score = lexical + cosine_similarity(vector, json.loads(row["vector"]))
             if score > 0:
-                ranked.append({"id": row["id"], "name": row["name"], "content": row["content"], "score": score})
+                ranked.append(
+                    {
+                        "id": row["id"],
+                        "name": row["name"],
+                        "content": row["content"],
+                        "score": score,
+                    }
+                )
         ranked.sort(key=lambda item: item["score"], reverse=True)
         return ranked[: max(1, min(limit, 20))]
 
     def create_tenant(self, name: str, tenant_id: str | None = None) -> dict:
         value = {"id": tenant_id or str(uuid.uuid4()), "name": name, "created_at": utc_now()}
         self._execute(
-            "INSERT INTO tenants(id, name, created_at, is_active) VALUES (:id, :name, :created_at, 1)", value
+            "INSERT INTO tenants(id, name, created_at, is_active) VALUES (:id, :name, :created_at, 1)",
+            value,
         )
         return value
 
@@ -2430,7 +2836,13 @@ class PostgresRepository:
     def save_auth_session(self, token_hash: str, user_id: str, tenant_id: str, expires_at: str) -> None:
         self._execute(
             "INSERT INTO auth_sessions VALUES (:token_hash, :user_id, :tenant_id, :expires_at, :created_at)",
-            {"token_hash": token_hash, "user_id": user_id, "tenant_id": tenant_id, "expires_at": expires_at, "created_at": utc_now()},
+            {
+                "token_hash": token_hash,
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "expires_at": expires_at,
+                "created_at": utc_now(),
+            },
         )
 
     def get_auth_session(self, token_hash: str) -> dict | None:
@@ -2449,8 +2861,13 @@ class PostgresRepository:
             "output_price": values.get("output_price", 0), "is_default": int(values.get("is_default", False)),
             "created_at": values.get("created_at", utc_now()),
         }
-        self._execute("DELETE FROM model_configs WHERE tenant_id = :tenant_id AND name = :name", model)
-        self._execute("INSERT INTO model_configs VALUES (:id, :tenant_id, :name, :base_url, :model, :api_key, :input_price, :output_price, :is_default, :created_at)", model)
+        self._execute(
+            "DELETE FROM model_configs WHERE tenant_id = :tenant_id AND name = :name", model
+        )
+        self._execute(
+            "INSERT INTO model_configs VALUES (:id, :tenant_id, :name, :base_url, :model, :api_key, :input_price, :output_price, :is_default, :created_at)",
+            model,
+        )
         return {key: value for key, value in model.items() if key != "api_key"}
 
     def list_model_configs(self, tenant_id: str) -> list[dict]:
@@ -2496,8 +2913,7 @@ class PostgresRepository:
             "updated_at": now,
         }
         self._execute(
-            "DELETE FROM mcp_servers "
-            "WHERE tenant_id = :tenant_id AND provider_id = :provider_id",
+            "DELETE FROM mcp_servers WHERE tenant_id = :tenant_id AND provider_id = :provider_id",
             server,
         )
         self._execute(
@@ -2512,8 +2928,7 @@ class PostgresRepository:
 
     def list_mcp_servers(self, tenant_id: str) -> list[dict]:
         rows = self._many(
-            "SELECT * FROM mcp_servers WHERE tenant_id = :tenant_id "
-            "ORDER BY provider_id",
+            "SELECT * FROM mcp_servers WHERE tenant_id = :tenant_id ORDER BY provider_id",
             {"tenant_id": tenant_id},
         )
         return [_decode_mcp_server(row) for row in rows]
@@ -2601,11 +3016,7 @@ class PostgresRepository:
                 "id": credential_id,
             },
         )
-        return (
-            self.get_credential(tenant_id, credential_id)
-            if result.rowcount > 0
-            else None
-        )
+        return self.get_credential(tenant_id, credential_id) if result.rowcount > 0 else None
 
     def revoke_credential(self, tenant_id: str, credential_id: str) -> dict | None:
         now = utc_now()
@@ -2614,11 +3025,7 @@ class PostgresRepository:
             "updated_at = :now WHERE tenant_id = :tenant_id AND id = :id",
             {"now": now, "tenant_id": tenant_id, "id": credential_id},
         )
-        return (
-            self.get_credential(tenant_id, credential_id)
-            if result.rowcount > 0
-            else None
-        )
+        return self.get_credential(tenant_id, credential_id) if result.rowcount > 0 else None
 
     def create_scheduled_task(
         self, tenant_id: str, values: dict[str, Any]
@@ -2650,8 +3057,7 @@ class PostgresRepository:
 
     def list_scheduled_tasks(self, tenant_id: str) -> list[dict]:
         rows = self._many(
-            "SELECT * FROM scheduled_tasks WHERE tenant_id = :tenant_id "
-            "ORDER BY created_at DESC",
+            "SELECT * FROM scheduled_tasks WHERE tenant_id = :tenant_id ORDER BY created_at DESC",
             {"tenant_id": tenant_id},
         )
         return [_decode_scheduled_task(row) for row in rows]
@@ -2665,8 +3071,7 @@ class PostgresRepository:
 
     def list_active_scheduled_tasks(self) -> list[dict]:
         rows = self._many(
-            "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' "
-            "ORDER BY next_run_at, id"
+            "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' ORDER BY next_run_at, id"
         )
         return [_decode_scheduled_task(row) for row in rows]
 
@@ -2699,11 +3104,7 @@ class PostgresRepository:
                 "expected_status": expected_status,
             },
         )
-        return (
-            self.get_scheduled_task(tenant_id, task_id)
-            if result.rowcount > 0
-            else None
-        )
+        return self.get_scheduled_task(tenant_id, task_id) if result.rowcount > 0 else None
 
     def advance_scheduled_task(
         self,
@@ -2730,11 +3131,7 @@ class PostgresRepository:
                 "expected_next_run_at": expected_next_run_at,
             },
         )
-        return (
-            self.get_scheduled_task(tenant_id, task_id)
-            if result.rowcount > 0
-            else None
-        )
+        return self.get_scheduled_task(tenant_id, task_id) if result.rowcount > 0 else None
 
     def write_audit(self, tenant_id: str, action: str, path: str, metadata: dict, user_id: str | None = None) -> None:
         from .redaction import redact
@@ -2742,14 +3139,28 @@ class PostgresRepository:
         self._execute(
             "INSERT INTO audit_logs(tenant_id, user_id, action, path, metadata, created_at) "
             "VALUES (:tenant_id, :user_id, :action, :path, :metadata, :created_at)",
-            {"tenant_id": tenant_id, "user_id": user_id, "action": action, "path": path, "metadata": json.dumps(redact(metadata)), "created_at": utc_now()},
+            {
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "action": action,
+                "path": path,
+                "metadata": json.dumps(redact(metadata)),
+                "created_at": utc_now(),
+            },
         )
 
     def usage(self, tenant_id: str, model: str, prompt_tokens: int, completion_tokens: int, cost: float) -> None:
         self._execute(
             "INSERT INTO usage_records(tenant_id, model, prompt_tokens, completion_tokens, cost, created_at) "
             "VALUES (:tenant_id, :model, :prompt_tokens, :completion_tokens, :cost, :created_at)",
-            {"tenant_id": tenant_id, "model": model, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "cost": cost, "created_at": utc_now()},
+            {
+                "tenant_id": tenant_id,
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cost": cost,
+                "created_at": utc_now(),
+            },
         )
 
     def usage_summary(self, tenant_id: str) -> dict:
@@ -3196,7 +3607,9 @@ class PostgresRepository:
             "independent": int(bool(values.get("independent"))),
             "status": values["status"],
             "finding": values["finding"],
-            "evidence_refs": json.dumps(values.get("evidence_refs") or [], ensure_ascii=False),
+            "evidence_refs": json.dumps(
+                values.get("evidence_refs") or [], ensure_ascii=False
+            ),
             "created_at": utc_now(),
         }
         if not self._one(
@@ -3386,6 +3799,15 @@ class PostgresRepository:
                     "status_axes": json.dumps(item.get("status_axes") or {}, ensure_ascii=False),
                     "closure_status": item["closure_status"],
                     "blockers": json.dumps(item.get("blockers") or [], ensure_ascii=False),
+                    "semantic_hash": item.get("semantic_hash") or "",
+                    "definitions": json.dumps(item.get("definitions") or [], ensure_ascii=False),
+                    "negative_boundaries": json.dumps(
+                        item.get("negative_boundaries") or [], ensure_ascii=False
+                    ),
+                    "dependency_claim_ids": json.dumps(
+                        item.get("dependency_claim_ids") or [], ensure_ascii=False
+                    ),
+                    "parent_revision_id": item.get("parent_revision_id"),
                     "created_at": created_at,
                 }
             )
@@ -3402,17 +3824,11 @@ class PostgresRepository:
 
         with self.engine.begin() as connection:
             protocol = connection.execute(
-                text(
-                    "SELECT 1 FROM evidence_protocols "
-                    "WHERE tenant_id = :tenant_id AND id = :id"
-                ),
+                text("SELECT 1 FROM evidence_protocols WHERE tenant_id = :tenant_id AND id = :id"),
                 {"tenant_id": tenant_id, "id": case["protocol_id"]},
             ).first()
             receipt = connection.execute(
-                text(
-                    "SELECT 1 FROM execution_receipts "
-                    "WHERE tenant_id = :tenant_id AND id = :id"
-                ),
+                text("SELECT 1 FROM execution_receipts WHERE tenant_id = :tenant_id AND id = :id"),
                 {"tenant_id": tenant_id, "id": case["receipt_id"]},
             ).first()
             if protocol is None:
@@ -3446,10 +3862,13 @@ class PostgresRepository:
                     "INSERT INTO research_claim_revisions(id, tenant_id, research_case_id, "
                     "claim_key, revision_number, statement, claim_type, scope, "
                     "method_revision, lifecycle_status, status_axes, closure_status, "
-                    "blockers, created_at) VALUES (:id, :tenant_id, :research_case_id, "
+                    "blockers, semantic_hash, definitions, negative_boundaries, "
+                    "dependency_claim_ids, parent_revision_id, created_at) VALUES (:id, :tenant_id, "
+                    ":research_case_id, "
                     ":claim_key, :revision_number, :statement, :claim_type, :scope, "
                     ":method_revision, :lifecycle_status, :status_axes, :closure_status, "
-                    ":blockers, :created_at)"
+                    ":blockers, :semantic_hash, :definitions, :negative_boundaries, "
+                    ":dependency_claim_ids, :parent_revision_id, :created_at)"
                 ),
                 claim_rows,
             )
@@ -3537,8 +3956,7 @@ class PostgresRepository:
 
     def get_research_claim(self, tenant_id: str, claim_id: str) -> dict | None:
         row = self._one(
-            "SELECT * FROM research_claim_revisions "
-            "WHERE tenant_id = :tenant_id AND id = :id",
+            "SELECT * FROM research_claim_revisions WHERE tenant_id = :tenant_id AND id = :id",
             {"tenant_id": tenant_id, "id": claim_id},
         )
         if row is None:
@@ -3566,9 +3984,7 @@ class PostgresRepository:
             "relation_type": values["relation_type"],
             "status": values.get("status") or "active",
             "rationale": values["rationale"],
-            "evidence_refs": json.dumps(
-                values.get("evidence_refs") or [], ensure_ascii=False
-            ),
+            "evidence_refs": json.dumps(values.get("evidence_refs") or [], ensure_ascii=False),
             "metadata": json.dumps(values.get("metadata") or {}, ensure_ascii=False),
             "created_by": values.get("created_by"),
             "withdrawal_reason": None,
@@ -3618,9 +4034,7 @@ class PostgresRepository:
             "research_case_id": research_case_id,
         }
         if claim_id is not None:
-            statement += (
-                " AND (r.source_claim_id = :claim_id OR r.target_claim_id = :claim_id)"
-            )
+            statement += " AND (r.source_claim_id = :claim_id OR r.target_claim_id = :claim_id)"
             parameters["claim_id"] = claim_id
         statement += " ORDER BY r.created_at, r.id"
         return [
@@ -3678,6 +4092,11 @@ class PostgresRepository:
             "method": values["method"],
             "scope": values["scope"],
             "independent": int(bool(values.get("independent"))),
+            "independence": json.dumps(values.get("independence") or {}, ensure_ascii=False),
+            "validation_modality": values.get("validation_modality") or "agent_review",
+            "verifier_lineage": json.dumps(
+                values.get("verifier_lineage") or {}, ensure_ascii=False
+            ),
             "input_digest": values["input_digest"],
             "output_digest": values["output_digest"],
             "artifact_ids": json.dumps(
@@ -3694,19 +4113,20 @@ class PostgresRepository:
         ):
             raise KeyError(value["claim_revision_id"])
         if not self._one(
-            "SELECT 1 FROM execution_receipts WHERE tenant_id = :tenant_id "
-            "AND id = :receipt_id",
+            "SELECT 1 FROM execution_receipts WHERE tenant_id = :tenant_id AND id = :receipt_id",
             value,
         ):
             raise KeyError(value["receipt_id"])
         self._execute(
             "INSERT INTO research_verification_attempts(id, tenant_id, research_case_id, "
             "claim_revision_id, receipt_id, run_id, plan_id, verification_execution_id, "
-            "kind, outcome, method, scope, independent, input_digest, output_digest, "
-            "artifact_ids, metadata, created_by, created_at) VALUES (:id, :tenant_id, "
+            "kind, outcome, method, scope, independent, independence, validation_modality, "
+            "verifier_lineage, input_digest, output_digest, artifact_ids, metadata, "
+            "created_by, created_at) VALUES (:id, :tenant_id, "
             ":research_case_id, :claim_revision_id, :receipt_id, :run_id, :plan_id, "
             ":verification_execution_id, :kind, :outcome, :method, :scope, :independent, "
-            ":input_digest, :output_digest, :artifact_ids, :metadata, :created_by, :created_at)",
+            ":independence, :validation_modality, :verifier_lineage, :input_digest, "
+            ":output_digest, :artifact_ids, :metadata, :created_by, :created_at)",
             value,
         )
         return _decode_verification_attempt(value)
@@ -3730,23 +4150,31 @@ class PostgresRepository:
         from sqlalchemy import text
 
         with self.engine.begin() as connection:
-            claim = connection.execute(
-                text(
-                    "SELECT research_case_id FROM research_claim_revisions "
-                    "WHERE tenant_id = :tenant_id AND id = :claim_revision_id FOR UPDATE"
-                ),
-                {"tenant_id": tenant_id, **values},
-            ).mappings().first()
+            claim = (
+                connection.execute(
+                    text(
+                        "SELECT research_case_id FROM research_claim_revisions "
+                        "WHERE tenant_id = :tenant_id AND id = :claim_revision_id FOR UPDATE"
+                    ),
+                    {"tenant_id": tenant_id, **values},
+                )
+                .mappings()
+                .first()
+            )
             if claim is None or claim["research_case_id"] != values["research_case_id"]:
                 raise KeyError(values["claim_revision_id"])
-            versions = connection.execute(
-                text(
-                    "SELECT version FROM research_verification_plans "
-                    "WHERE tenant_id = :tenant_id AND claim_revision_id = :claim_revision_id "
-                    "AND plan_key = :plan_key FOR UPDATE"
-                ),
-                {"tenant_id": tenant_id, **values},
-            ).scalars().all()
+            versions = (
+                connection.execute(
+                    text(
+                        "SELECT version FROM research_verification_plans "
+                        "WHERE tenant_id = :tenant_id AND claim_revision_id = :claim_revision_id "
+                        "AND plan_key = :plan_key FOR UPDATE"
+                    ),
+                    {"tenant_id": tenant_id, **values},
+                )
+                .scalars()
+                .all()
+            )
             version = max((int(item) for item in versions), default=0) + 1
             connection.execute(
                 text(
@@ -3836,6 +4264,7 @@ class PostgresRepository:
             "promotion_evaluation_id": None,
             "outcome": None,
             "input_digest": values["input_digest"],
+            "input_snapshot": json.dumps(values.get("input_snapshot") or {}, ensure_ascii=False),
             "output_digest": None,
             "error_code": None,
             "metadata": json.dumps(values.get("metadata") or {}, ensure_ascii=False),
@@ -3854,11 +4283,12 @@ class PostgresRepository:
             "INSERT INTO research_verification_executions(id, tenant_id, research_case_id, "
             "claim_revision_id, plan_id, plan_version, status, request_id, run_id, "
             "scheduled_task_id, attempt_id, artifact_id, promotion_evaluation_id, outcome, "
-            "input_digest, output_digest, error_code, metadata, created_by, started_at, "
+            "input_digest, input_snapshot, output_digest, error_code, metadata, created_by, started_at, "
             "completed_at) VALUES (:id, :tenant_id, :research_case_id, :claim_revision_id, "
             ":plan_id, :plan_version, :status, :request_id, :run_id, :scheduled_task_id, "
             ":attempt_id, :artifact_id, :promotion_evaluation_id, :outcome, :input_digest, "
-            ":output_digest, :error_code, :metadata, :created_by, :started_at, :completed_at)",
+            ":input_snapshot, :output_digest, :error_code, :metadata, :created_by, :started_at, "
+            ":completed_at)",
             value,
         )
         return _decode_verification_execution(value)
@@ -3925,6 +4355,7 @@ class PostgresRepository:
             "input_digest": values["input_digest"],
             "evaluation_digest": values["evaluation_digest"],
             "criteria": json.dumps(values.get("criteria") or [], ensure_ascii=False),
+            "input_snapshot": json.dumps(values.get("input_snapshot") or {}, ensure_ascii=False),
             "blockers": json.dumps(values.get("blockers") or [], ensure_ascii=False),
             "attempt_ids": json.dumps(values.get("attempt_ids") or [], ensure_ascii=False),
             "relation_ids": json.dumps(
@@ -3936,14 +4367,18 @@ class PostgresRepository:
         from sqlalchemy import text
 
         with self.engine.begin() as connection:
-            claim = connection.execute(
-                text(
-                    "SELECT promotion_stage FROM research_claim_revisions "
-                    "WHERE tenant_id = :tenant_id AND id = :claim_revision_id "
-                    "AND research_case_id = :research_case_id FOR UPDATE"
-                ),
-                value,
-            ).mappings().first()
+            claim = (
+                connection.execute(
+                    text(
+                        "SELECT promotion_stage FROM research_claim_revisions "
+                        "WHERE tenant_id = :tenant_id AND id = :claim_revision_id "
+                        "AND research_case_id = :research_case_id FOR UPDATE"
+                    ),
+                    value,
+                )
+                .mappings()
+                .first()
+            )
             if claim is None or claim["promotion_stage"] != value["from_stage"]:
                 raise KeyError("promotion_stage_changed")
             connection.execute(
@@ -3951,10 +4386,10 @@ class PostgresRepository:
                     "INSERT INTO research_promotion_evaluations(id, tenant_id, "
                     "research_case_id, claim_revision_id, from_stage, target_stage, "
                     "decision, policy_version, input_digest, evaluation_digest, criteria, "
-                    "blockers, attempt_ids, relation_ids, created_by, created_at) VALUES "
+                    "input_snapshot, blockers, attempt_ids, relation_ids, created_by, created_at) VALUES "
                     "(:id, :tenant_id, :research_case_id, :claim_revision_id, :from_stage, "
                     ":target_stage, :decision, :policy_version, :input_digest, "
-                    ":evaluation_digest, :criteria, :blockers, :attempt_ids, "
+                    ":evaluation_digest, :criteria, :input_snapshot, :blockers, :attempt_ids, "
                     ":relation_ids, :created_by, :created_at)"
                 ),
                 value,
@@ -3982,6 +4417,263 @@ class PostgresRepository:
                 {"tenant_id": tenant_id, "claim_id": claim_id},
             )
         ]
+
+    def create_qualification_evaluation(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        value = {
+            "id": values.get("id") or str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "claim_revision_id": values["claim_revision_id"],
+            "claim_semantic_hash": values["claim_semantic_hash"],
+            "profile_id": values["profile_id"],
+            "profile_version": int(values["profile_version"]),
+            "profile_hash": values["profile_hash"],
+            "profile_snapshot": json.dumps(values["profile_snapshot"], ensure_ascii=False),
+            "evidence_closure_hash": values["evidence_closure_hash"],
+            "evidence_closure": json.dumps(values["evidence_closure"], ensure_ascii=False),
+            "policy_version": values["policy_version"],
+            "policy_hash": values["policy_hash"],
+            "verdict": values["verdict"],
+            "criteria": json.dumps(values.get("criteria") or [], ensure_ascii=False),
+            "blockers": json.dumps(values.get("blockers") or [], ensure_ascii=False),
+            "evidence_vector": json.dumps(values.get("evidence_vector") or {}, ensure_ascii=False),
+            "independence_summary": json.dumps(
+                values.get("independence_summary") or {}, ensure_ascii=False
+            ),
+            "evaluated_by": values.get("evaluated_by"),
+            "created_at": utc_now(),
+        }
+        if not self._one(
+            "SELECT 1 FROM research_claim_revisions WHERE tenant_id = :tenant_id "
+            "AND id = :claim_revision_id",
+            value,
+        ):
+            raise KeyError(value["claim_revision_id"])
+        self._execute(
+            "INSERT INTO qualification_evaluations(id, tenant_id, claim_revision_id, "
+            "claim_semantic_hash, profile_id, profile_version, profile_hash, "
+            "profile_snapshot, evidence_closure_hash, evidence_closure, policy_version, "
+            "policy_hash, verdict, criteria, blockers, evidence_vector, "
+            "independence_summary, evaluated_by, created_at) VALUES (:id, :tenant_id, "
+            ":claim_revision_id, :claim_semantic_hash, :profile_id, :profile_version, "
+            ":profile_hash, :profile_snapshot, :evidence_closure_hash, :evidence_closure, "
+            ":policy_version, :policy_hash, :verdict, :criteria, :blockers, "
+            ":evidence_vector, :independence_summary, :evaluated_by, :created_at)",
+            value,
+        )
+        return _decode_qualification_evaluation(value)
+
+    def list_qualification_evaluations(
+        self, tenant_id: str, claim_id: str, profile_id: str | None = None
+    ) -> list[dict]:
+        statement = (
+            "SELECT * FROM qualification_evaluations WHERE tenant_id = :tenant_id "
+            "AND claim_revision_id = :claim_id"
+        )
+        parameters = {"tenant_id": tenant_id, "claim_id": claim_id}
+        if profile_id is not None:
+            statement += " AND profile_id = :profile_id"
+            parameters["profile_id"] = profile_id
+        statement += " ORDER BY created_at DESC, id DESC"
+        return [_decode_qualification_evaluation(row) for row in self._many(statement, parameters)]
+
+    def create_qualification_receipt(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        value = {
+            "id": values.get("id") or str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "evaluation_id": values["evaluation_id"],
+            "claim_revision_id": values["claim_revision_id"],
+            "claim_semantic_hash": values["claim_semantic_hash"],
+            "profile_id": values["profile_id"],
+            "profile_version": int(values["profile_version"]),
+            "evidence_closure_hash": values["evidence_closure_hash"],
+            "policy_version": values["policy_version"],
+            "policy_hash": values["policy_hash"],
+            "verdict": values["verdict"],
+            "criteria": json.dumps(values.get("criteria") or [], ensure_ascii=False),
+            "blockers": json.dumps(values.get("blockers") or [], ensure_ascii=False),
+            "evidence_vector": json.dumps(values.get("evidence_vector") or {}, ensure_ascii=False),
+            "independence_summary": json.dumps(
+                values.get("independence_summary") or {}, ensure_ascii=False
+            ),
+            "receipt_hash": values["receipt_hash"],
+            "issued_at": values.get("issued_at") or utc_now(),
+        }
+        self._execute(
+            "INSERT INTO qualification_receipts(id, tenant_id, evaluation_id, "
+            "claim_revision_id, claim_semantic_hash, profile_id, profile_version, "
+            "evidence_closure_hash, policy_version, policy_hash, verdict, criteria, "
+            "blockers, evidence_vector, independence_summary, receipt_hash, issued_at) "
+            "VALUES (:id, :tenant_id, :evaluation_id, :claim_revision_id, "
+            ":claim_semantic_hash, :profile_id, :profile_version, :evidence_closure_hash, "
+            ":policy_version, :policy_hash, :verdict, :criteria, :blockers, "
+            ":evidence_vector, :independence_summary, :receipt_hash, :issued_at)",
+            value,
+        )
+        return _decode_qualification_receipt(value)
+
+    def get_qualification_receipt(self, tenant_id: str, receipt_id: str) -> dict | None:
+        row = self._one(
+            "SELECT * FROM qualification_receipts WHERE tenant_id = :tenant_id "
+            "AND id = :receipt_id",
+            {"tenant_id": tenant_id, "receipt_id": receipt_id},
+        )
+        return _decode_qualification_receipt(row) if row is not None else None
+
+    def list_qualification_receipts(
+        self, tenant_id: str, claim_id: str | None = None
+    ) -> list[dict]:
+        statement = "SELECT * FROM qualification_receipts WHERE tenant_id = :tenant_id"
+        parameters: dict[str, Any] = {"tenant_id": tenant_id}
+        if claim_id is not None:
+            statement += " AND claim_revision_id = :claim_id"
+            parameters["claim_id"] = claim_id
+        statement += " ORDER BY issued_at, id"
+        return [
+            _decode_qualification_receipt(row)
+            for row in self._many(statement, parameters)
+        ]
+
+    def create_evidence_edges(
+        self, tenant_id: str, evaluation_id: str, edges: list[dict[str, Any]]
+    ) -> list[dict]:
+        rows = [
+            {
+                "id": str(uuid.uuid4()),
+                "tenant_id": tenant_id,
+                "evaluation_id": evaluation_id,
+                "source_node_type": item["source_node_type"],
+                "source_node_id": item["source_node_id"],
+                "target_node_type": item["target_node_type"],
+                "target_node_id": item["target_node_id"],
+                "edge_type": item["edge_type"],
+                "source_hash": item.get("source_hash"),
+                "target_hash": item.get("target_hash"),
+                "status": item.get("status") or "active",
+                "created_at": utc_now(),
+            }
+            for item in edges
+        ]
+        for row in rows:
+            self._execute(
+                "INSERT INTO evidence_edges(id, tenant_id, evaluation_id, source_node_type, "
+                "source_node_id, target_node_type, target_node_id, edge_type, source_hash, "
+                "target_hash, status, created_at) VALUES (:id, :tenant_id, :evaluation_id, "
+                ":source_node_type, :source_node_id, :target_node_type, :target_node_id, "
+                ":edge_type, :source_hash, :target_hash, :status, :created_at)",
+                row,
+            )
+        return rows
+
+    def upsert_current_use_binding(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        now = utc_now()
+        value = {
+            "id": values.get("id") or str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "claim_revision_id": values["claim_revision_id"],
+            "profile_id": values["profile_id"],
+            "use_scope": values.get("use_scope") or "knowledge",
+            "qualification_receipt_id": values["qualification_receipt_id"],
+            "state": values.get("state") or "current",
+            "stale_reason": values.get("stale_reason"),
+            "bound_by": values.get("bound_by"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._execute(
+            "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, profile_id, "
+            "use_scope, qualification_receipt_id, state, stale_reason, bound_by, created_at, "
+            "updated_at) VALUES (:id, :tenant_id, :claim_revision_id, :profile_id, "
+            ":use_scope, :qualification_receipt_id, :state, :stale_reason, :bound_by, "
+            ":created_at, :updated_at) ON CONFLICT(tenant_id, claim_revision_id, "
+            "profile_id, use_scope) DO UPDATE SET qualification_receipt_id = "
+            "excluded.qualification_receipt_id, state = excluded.state, stale_reason = "
+            "excluded.stale_reason, bound_by = excluded.bound_by, updated_at = excluded.updated_at",
+            value,
+        )
+        return (
+            self.get_current_use_binding(
+                tenant_id, value["claim_revision_id"], value["profile_id"], value["use_scope"]
+            )
+            or value
+        )
+
+    def get_current_use_binding(
+        self,
+        tenant_id: str,
+        claim_id: str,
+        profile_id: str,
+        use_scope: str = "knowledge",
+    ) -> dict | None:
+        return self._one(
+            "SELECT * FROM current_use_bindings WHERE tenant_id = :tenant_id "
+            "AND claim_revision_id = :claim_id AND profile_id = :profile_id "
+            "AND use_scope = :use_scope",
+            {
+                "tenant_id": tenant_id,
+                "claim_id": claim_id,
+                "profile_id": profile_id,
+                "use_scope": use_scope,
+            },
+        )
+
+    def list_current_use_bindings(
+        self, tenant_id: str, profile_id: str, state: str = "current"
+    ) -> list[dict]:
+        return self._many(
+            "SELECT * FROM current_use_bindings WHERE tenant_id = :tenant_id "
+            "AND profile_id = :profile_id AND state = :state ORDER BY updated_at DESC",
+            {"tenant_id": tenant_id, "profile_id": profile_id, "state": state},
+        )
+
+    def create_authorization_grant(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        value = {
+            "id": values.get("id") or str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "qualification_receipt_id": values["qualification_receipt_id"],
+            "actor_id": values["actor_id"],
+            "action": values["action"],
+            "target": values["target"],
+            "scope": json.dumps(values.get("scope") or {}, ensure_ascii=False),
+            "conditions": json.dumps(values.get("conditions") or {}, ensure_ascii=False),
+            "expires_at": values.get("expires_at"),
+            "budget": json.dumps(values.get("budget") or {}, ensure_ascii=False),
+            "max_calls": int(values.get("max_calls") or 1),
+            "calls_used": 0,
+            "policy_version": values["policy_version"],
+            "state": values.get("state") or "active",
+            "grant_receipt": values["grant_receipt"],
+            "created_by": values.get("created_by"),
+            "created_at": utc_now(),
+        }
+        if not self.get_qualification_receipt(tenant_id, value["qualification_receipt_id"]):
+            raise KeyError(value["qualification_receipt_id"])
+        self._execute(
+            "INSERT INTO authorization_grants(id, tenant_id, qualification_receipt_id, "
+            "actor_id, action, target, scope, conditions, expires_at, budget, max_calls, "
+            "calls_used, policy_version, state, grant_receipt, created_by, created_at) "
+            "VALUES (:id, :tenant_id, :qualification_receipt_id, :actor_id, :action, "
+            ":target, :scope, :conditions, :expires_at, :budget, :max_calls, :calls_used, "
+            ":policy_version, :state, :grant_receipt, :created_by, :created_at)",
+            value,
+        )
+        return _decode_authorization_grant(value)
+
+    def list_authorization_grants(
+        self, tenant_id: str, qualification_receipt_ids: list[str] | None = None
+    ) -> list[dict]:
+        statement = "SELECT * FROM authorization_grants WHERE tenant_id = :tenant_id"
+        parameters: dict[str, Any] = {"tenant_id": tenant_id}
+        if qualification_receipt_ids is not None:
+            if not qualification_receipt_ids:
+                return []
+            placeholders = []
+            for index, receipt_id in enumerate(qualification_receipt_ids):
+                key = f"receipt_{index}"
+                placeholders.append(f":{key}")
+                parameters[key] = receipt_id
+            statement += " AND qualification_receipt_id IN (" + ",".join(placeholders) + ")"
+        statement += " ORDER BY created_at, id"
+        return [_decode_authorization_grant(row) for row in self._many(statement, parameters)]
 
     def _search_candidates(self, tenant_id: str, limit: int) -> list[dict]:
         values = {"tenant_id": tenant_id, "candidate_limit": limit}
