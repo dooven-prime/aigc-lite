@@ -621,9 +621,11 @@ ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
     必须原子绑定自己的 encrypted credential，绝不继承平台 LLM key；非 loopback 启动要求
     关闭 signup、替换 auth/master secret 并存在认证主体。React build 成为 wheel/Docker 唯一 UI，
     CI 增加 core/ROS2 clean-install wheel、PostgreSQL 17 contract 与 hardened Docker smoke。
-19. 进行中：按领域拆分 transport、repository 与 UI view。第一刀把 credential/model/MCP
-    配置 API 移入显式依赖注入的 `api.configuration` router，并把 Models UI 移出 `App.tsx`；
-    后续 repository 拆分保持现有 `Repository` contract，不在发布加固提交中同时改写存储语义。
+19. 进行中：按领域拆分 transport、repository 与 UI view。已把 credential/model/MCP 配置
+    API 移入 `api.configuration`，把 Research Registry、Decision Lab、Qualification Plane、
+    Kernel Verification、Authorization Grant 与 Assurance Bundle HTTP 面移入显式依赖注入的
+    `api.research` router，并把 Models UI 移出 `App.tsx`；后续 repository 拆分保持现有
+    `Repository` contract，不在同一切片同时改写存储语义。
 
 每个切片都必须产生可查询的真实纵向行为，不为了目录完整度创建没有 consumer 的抽象。
 

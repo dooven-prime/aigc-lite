@@ -49,6 +49,25 @@ def test_current_http_surface_remains_available() -> None:
     } <= paths
 
 
+def test_research_control_plane_is_owned_by_domain_router() -> None:
+    route_modules = {
+        route.path: route.endpoint.__module__
+        for route in main.app.routes
+        if hasattr(route, "endpoint")
+    }
+    assert {
+        route_modules[path]
+        for path in {
+            "/api/research-registry",
+            "/api/research-registry/import/frontier",
+            "/api/decision-lab",
+            "/api/qualification/math-theorems",
+            "/api/qualification/claims/{claim_id}/evaluations",
+            "/api/authorization-grants",
+        }
+    } == {"app.api.research"}
+
+
 def test_sessions_and_documents_are_isolated_across_tenant_api_keys(
     tmp_path, monkeypatch
 ) -> None:

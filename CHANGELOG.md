@@ -5,6 +5,11 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+- Continued the domain architecture split by moving Research Registry, Decision
+  Lab, Qualification Plane, kernel verification, authorization grant, and
+  Assurance Bundle HTTP contracts into an explicitly injected `api.research`
+  router without changing their persisted evidence or authority semantics.
+
 ## 0.4.1 - 2026-09-29
 
 - Fixed the hardened Docker CI smoke so authentication and encryption use
