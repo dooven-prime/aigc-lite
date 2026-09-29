@@ -5,6 +5,10 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+- Reduced the root README to project positioning, quick start, security
+  boundaries, and a documentation map. Detailed HTTP, execution/scheduling,
+  MCP/tool, and qualification/assurance guidance now lives in focused files
+  under `docs/`.
 - Continued the domain architecture split by moving Research Registry, Decision
   Lab, Qualification Plane, kernel verification, authorization grant, and
   Assurance Bundle HTTP contracts into an explicitly injected `api.research`

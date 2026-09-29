@@ -28,6 +28,25 @@ in [`PRODUCTION.md`](PRODUCTION.md).
 | `AIGC_LITE_API_KEY` | empty | Single-tenant compatibility API key. |
 | `AIGC_LITE_TENANTS_JSON` | empty | Static tenant/API-key list. |
 
+Local single-workspace mode can leave the API key empty. With
+`AIGC_LITE_API_KEY` enabled, requests use `Authorization: Bearer <key>`.
+Multiple static tenants can be declared as JSON; every persisted query is still
+scoped by the resolved `tenant_id`:
+
+```dotenv
+AIGC_LITE_TENANTS_JSON=[{"id":"team-a","name":"Team A","api_key":"team-a-secret"},{"id":"team-b","name":"Team B","api_key":"team-b-secret"}]
+```
+
+Generate the credential encryption key independently from the login signing
+secret:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Store the output as `AIGC_LITE_MASTER_KEY`. Existing legacy ciphertext can be
+read during migration, but new writes use the authenticated `enc:v1:` format.
+
 ## Model access
 
 | Variable | Default | Purpose |
@@ -41,6 +60,18 @@ in [`PRODUCTION.md`](PRODUCTION.md).
 Workspace model records are API-managed and require an active same-workspace
 `encrypted-db://credential/UUID`. Their endpoint and credential are atomic; an
 empty workspace credential never falls back to `AIGC_LITE_LLM_API_KEY`.
+
+MiniMax Token Plan uses its OpenAI-compatible endpoint and M-series model, for
+example:
+
+```dotenv
+AIGC_LITE_LLM_API_KEY=your-sk-cp-key
+AIGC_LITE_LLM_BASE_URL=https://api.minimaxi.com/v1
+AIGC_LITE_LLM_MODEL=MiniMax-M3
+```
+
+The provider adapter separates MiniMax thinking content from final `content`,
+so reasoning tags do not enter the final chat answer or the Agent tool loop.
 
 ## Agent, tools, and scheduling
 
