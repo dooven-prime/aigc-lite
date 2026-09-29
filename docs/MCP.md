@@ -5,7 +5,44 @@ workspace credentials, tool execution backends, and the optional ROS 2
 capability provider. Production credential rules remain normative in
 [PRODUCTION.md](PRODUCTION.md).
 
-## MCP
+## Workspace capability surface
+
+Direct MCP clients and the built-in Agent discover a context-bound, read-only
+workspace provider in addition to ordinary Python and remote MCP tools:
+
+| Tool | Purpose |
+|---|---|
+| `workspace_search` | Search candidate conversations, knowledge, Steps, Artifacts, Citations, and Claims |
+| `workspace_qualified_search` | Search only current ClaimRevisions for an explicit qualification profile |
+| `workspace_get_run` | Read one Run and bounded Step content previews |
+| `workspace_get_artifact` | Read Artifact identity, provenance, bounded content, and Citations |
+| `workspace_get_claim` | Read one exact ClaimRevision and bounded verification/promotion history |
+| `workspace_get_qualification_receipt` | Read an immutable qualification certificate |
+| `workspace_list_qualification_profiles` | Discover server-owned profile and policy versions |
+
+The provider is created for each authenticated `RequestContext`; clients cannot
+submit a workspace or principal argument. It calls application services
+directly rather than making loopback HTTP requests. All tools carry MCP
+read-only/non-destructive/idempotent hints, use `openWorld=false`, reject
+unknown arguments, and return the envelope:
+
+```json
+{
+  "schema": "aigc-lite.workspace-capability.v1",
+  "capability": "workspace_get_run",
+  "result": {}
+}
+```
+
+Large fields are returned as explicit bounded previews with original character
+counts and truncation flags, so result limiting never produces invalid JSON.
+Calls still pass through `ToolService` and therefore create an observable
+Run/Step with `source=workspace`. These capabilities cannot create or promote
+Claims, evaluate a Gate, change a current-use binding, issue authorization, or
+execute an external action. Qualified search may deterministically mark stale
+bindings while refreshing evidence closure, but it can never grant authority.
+
+## MCP transport
 
 本地工具通过 `@tool` 注册，工具 JSON Schema 会在发现时根据函数签名、类型注解和 docstring 重新生成；修改代码并重启后不需要单独维护一份参数描述。支持 MCP Streamable HTTP 的客户端可直接连接 `/mcp`。服务端使用官方 Python SDK 的 session manager、协议协商和 `Mcp-Session-Id` 会话机制；`/mcp-sse/sse` 保留 SSE transport 兼容性：
 

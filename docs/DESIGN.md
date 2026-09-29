@@ -277,6 +277,12 @@ MCP 有两个方向：
 两者都必须使用 workspace 身份和同一套权限策略。`mcp-legacy` 只作调试兼容，标记
 deprecated，不扩展其能力。
 
+核心 application service 通过 context-bound `WorkspaceCapabilityProviderSource`
+投影为 AI-first MCP surface，而不是让模型拼 REST 或让 adapter 回调本机 HTTP。首个版本只提供
+统一搜索、qualified-only search，以及 Run、Artifact、ClaimRevision、QualificationReceipt 和
+Profile 的有界读取；provider 不接受 workspace/principal 参数，也不能写 Gate、current binding、
+AuthorizationGrant 或外部执行权。每次调用仍形成 `source=workspace` 的 Run/Step。
+
 ### 4.7 可观测性与审计
 
 最小关联键：

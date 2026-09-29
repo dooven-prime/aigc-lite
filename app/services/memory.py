@@ -8,8 +8,9 @@ from ..core.contracts import RequestContext
 from ..core.errors import ResourceNotFoundError
 from ..database import get_repository
 from ..ports.search import SearchBackend
-from .gateway import RepositoryProvider
+from ..repository import Repository
 
+RepositoryProvider = Callable[[], Repository]
 SearchBackendProvider = Callable[[], SearchBackend]
 
 

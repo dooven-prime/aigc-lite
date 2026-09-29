@@ -14,6 +14,7 @@ from ..adapters.credentials import EnvCredentialProvider
 from ..adapters.tools.local import LocalToolProvider
 from ..adapters.tools.mcp import MCPToolProvider
 from ..adapters.tools.repository import RepositoryMCPProviderSource
+from ..adapters.tools.workspace import WorkspaceCapabilityProviderSource
 from ..config import settings
 from ..core.contracts import (
     RequestContext,
@@ -354,7 +355,10 @@ def create_default_tool_catalog(
 ) -> ToolCatalog:
     catalog = ToolCatalog(
         [LocalToolProvider()],
-        [RepositoryMCPProviderSource(repository_provider)],
+        [
+            WorkspaceCapabilityProviderSource(repository_provider),
+            RepositoryMCPProviderSource(repository_provider),
+        ],
         authorization_gate=ToolAuthorizationGate(
             repository_provider
         ).authorize_and_consume,

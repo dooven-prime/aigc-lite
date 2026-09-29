@@ -42,6 +42,7 @@ class StepStatus(StrEnum):
 
 class ToolSource(StrEnum):
     LOCAL = "local"
+    WORKSPACE = "workspace"
     MCP = "mcp"
 
 

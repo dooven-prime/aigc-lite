@@ -5,6 +5,11 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+- Added a context-bound, AI-first `WorkspaceCapabilityProvider` to the default
+  Tool Catalog. MCP clients and Agents can now search execution memory and
+  qualified knowledge, and read Runs, Artifacts, ClaimRevisions,
+  Qualification Receipts, and profiles through seven bounded read-only tools;
+  calls retain workspace isolation and the normal Run/Step ledger.
 - Reduced the root README to project positioning, quick start, security
   boundaries, and a documentation map. Detailed HTTP, execution/scheduling,
   MCP/tool, and qualification/assurance guidance now lives in focused files

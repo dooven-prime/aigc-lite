@@ -24,6 +24,7 @@ class ErrorCode(StrEnum):
     TOOL_PROVIDER_CONFLICT = "tool_provider_conflict"
     TOOL_AUTHORIZATION_REQUIRED = "tool_authorization_required"
     TOOL_TIMEOUT = "tool_timeout"
+    TOOL_RESULT_TOO_LARGE = "tool_result_too_large"
     CREDENTIAL_NOT_CONFIGURED = "credential_not_configured"
     CREDENTIAL_KEY_NOT_CONFIGURED = "credential_key_not_configured"
     CREDENTIAL_DECRYPTION_FAILED = "credential_decryption_failed"
