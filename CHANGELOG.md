@@ -5,6 +5,24 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+- Closed two credential-confusion boundaries: workspace MCP records now accept
+  only same-workspace encrypted credential references, while deployer-owned
+  static `env://` references require an explicit environment-variable
+  allowlist; workspace model endpoints now require their own encrypted
+  credential and never inherit the platform LLM key.
+- Added fail-closed non-loopback startup checks, a loopback-only default
+  Compose port, and hardened bootstrap requirements for public binds.
+- Made the React application the canonical packaged UI, added wheel and Docker
+  UI smoke tests, exact frontend direct dependency versions, and reproducible
+  frontend-to-package synchronization.
+- Added live PostgreSQL migration/repository contract coverage plus core wheel,
+  ROS 2 simulator wheel, and container startup jobs to CI.
+- Added a fail-closed `/ready` projection for database connectivity, exact
+  Alembic head, and scheduler loop state; container smoke now gates on it while
+  `/health` remains dependency-free liveness.
+- Started the post-closure architecture split by moving the credential/model/MCP
+  configuration surface into an injected FastAPI router and the matching model
+  configuration UI into its own view module.
 - Added real Lean 4 and Coq KernelVerifier process backends. Server-owned
   executable selection, bounded output, wall-clock termination, cancellation,
   executable/toolchain identity, `#print axioms`/`Print Assumptions` closure,

@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+import pytest
 from httpx import AsyncClient, MockTransport, Request, Response
 
 from app import providers
@@ -56,6 +57,48 @@ def test_completion_forwards_openai_compatible_request(monkeypatch) -> None:
         "content": "hello",
         "_usage": {"prompt_tokens": 3, "completion_tokens": 1},
     }
+
+
+def test_workspace_endpoint_never_inherits_global_llm_key(monkeypatch) -> None:
+    monkeypatch.setattr(providers.settings, "llm_api_key", "platform-global-key")
+    called = False
+
+    def forbidden_client(**_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("request must fail before constructing a client")
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", forbidden_client)
+
+    with pytest.raises(providers.ProviderNotConfiguredError):
+        asyncio.run(
+            providers.completion(
+                [{"role": "user", "content": "hi"}],
+                provider={
+                    "base_url": "https://attacker.example.test/v1",
+                    "api_key": "",
+                    "model": "demo",
+                },
+            )
+        )
+    assert called is False
+
+
+def test_workspace_stream_never_inherits_global_llm_key(monkeypatch) -> None:
+    monkeypatch.setattr(providers.settings, "llm_api_key", "platform-global-key")
+
+    async def consume() -> None:
+        async for _ in providers.stream_chat(
+            [{"role": "user", "content": "hi"}],
+            provider={
+                "base_url": "https://attacker.example.test/v1",
+                "model": "demo",
+            },
+        ):
+            raise AssertionError("unreachable")
+
+    with pytest.raises(providers.ProviderNotConfiguredError):
+        asyncio.run(consume())
 
 
 def test_stream_accepts_keepalive_and_usage_only_chunks(monkeypatch) -> None:

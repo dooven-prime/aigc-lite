@@ -9,6 +9,9 @@ cross-workspace data may be exposed.
 
 ## Deployment baseline
 
+- The process binds to loopback by default. A non-loopback bind fails closed
+  unless open signup is disabled, authentication and encryption secrets are
+  non-default, and at least one bootstrap/authentication principal exists.
 - Replace `AIGC_LITE_AUTH_SECRET` and configure a separately generated
   `AIGC_LITE_MASTER_KEY` before storing credentials.
 - Keep `.env`, databases, logs, backups, and master keys outside version control.
@@ -24,10 +27,20 @@ cross-workspace data may be exposed.
 - Encrypted credential values are write-only through the API. Store references,
   replace values when rotating, and revoke records instead of attempting to
   recover plaintext through an administrative endpoint.
+- Workspace-persisted model and MCP configurations accept only active,
+  same-workspace `encrypted-db://credential/UUID` references. `env://` is
+  reserved for deployer-owned static MCP configuration and is disabled unless
+  the exact variable appears in `AIGC_LITE_MCP_ENV_CREDENTIAL_ALLOWLIST`.
+- A workspace model endpoint and its credential are one routing unit. A custom
+  endpoint never inherits the process-wide LLM key and redirects are disabled.
 
 Execution records and audit metadata use centralized best-effort redaction.
 This is defense in depth, not a substitute for keeping secrets out of prompts
 and tool results.
+
+See `docs/PRODUCTION.md` for the production startup contract, release smoke
+checks, backup/restore requirements, and the current tenant data lifecycle
+boundary.
 
 ## Physical capability extensions
 

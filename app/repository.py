@@ -13,6 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .core.credentials import (
+    encrypted_credential_id,
+    validate_workspace_credential_map,
+)
+
 if TYPE_CHECKING:
     from .ports.search import SearchBackend
 
@@ -23,6 +28,8 @@ def utc_now() -> str:
 
 class Repository(Protocol):
     def init(self) -> None: ...
+
+    def schema_revision(self) -> str | None: ...
 
     def create_session(self, tenant_id: str, title: str) -> dict: ...
 
@@ -619,6 +626,11 @@ class SQLiteRepository:
         finally:
             engine.dispose()
 
+    def schema_revision(self) -> str | None:
+        with self._connect() as db:
+            row = db.execute("SELECT version_num FROM alembic_version").fetchone()
+        return str(row[0]) if row is not None else None
+
     @staticmethod
     def _session(row: sqlite3.Row | dict, messages: list[dict] | None = None) -> dict:
         value = dict(row)
@@ -804,22 +816,31 @@ class SQLiteRepository:
         return dict(row) if row else None
 
     def save_model_config(self, tenant_id: str, values: dict[str, Any]) -> dict:
-        from .secrets import encrypt
-
+        credential_reference = values["credential_reference"]
+        credential_id = encrypted_credential_id(credential_reference)
         model = {
             "id": values.get("id") or str(uuid.uuid4()), "tenant_id": tenant_id,
             "name": values["name"], "base_url": values["base_url"], "model": values["model"],
-            "api_key": encrypt(values.get("api_key", "")), "input_price": values.get("input_price", 0),
+            "api_key": "", "input_price": values.get("input_price", 0),
             "output_price": values.get("output_price", 0), "is_default": int(values.get("is_default", False)),
             "created_at": values.get("created_at", utc_now()),
+            "credential_reference": credential_reference,
         }
         with self._connect() as db:
+            credential = db.execute(
+                "SELECT revoked_at FROM credentials WHERE tenant_id = ? AND id = ?",
+                (tenant_id, credential_id),
+            ).fetchone()
+            if credential is None or credential["revoked_at"]:
+                raise ValueError("credential_reference_not_active")
             db.execute(
                 "DELETE FROM model_configs WHERE tenant_id = ? AND name = ?",
                 (tenant_id, model["name"]),
             )
             db.execute(
-                "INSERT INTO model_configs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO model_configs(id, tenant_id, name, base_url, model, "
+                "api_key, input_price, output_price, is_default, created_at, "
+                "credential_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(model.values()),
             )
         return {key: value for key, value in model.items() if key != "api_key"}
@@ -827,7 +848,7 @@ class SQLiteRepository:
     def list_model_configs(self, tenant_id: str) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT id, tenant_id, name, base_url, model, input_price, output_price, is_default, created_at "
+                "SELECT id, tenant_id, name, base_url, model, input_price, output_price, is_default, created_at, credential_reference "
                 "FROM model_configs WHERE tenant_id = ? ORDER BY name", (tenant_id,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -841,12 +862,21 @@ class SQLiteRepository:
         if not row:
             return None
         value = dict(row)
-        from .secrets import decrypt
-
-        value["api_key"] = decrypt(value.get("api_key", ""))
+        value.pop("api_key", None)
         return value
 
     def save_mcp_server(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        header_credentials = validate_workspace_credential_map(
+            values.get("header_credentials") or {}
+        )
+        credential_ids = {
+            encrypted_credential_id(reference)
+            for reference in header_credentials.values()
+        }
+        for credential_id in credential_ids:
+            credential = self.get_credential(tenant_id, credential_id)
+            if credential is None or credential.get("revoked_at"):
+                raise ValueError("credential_reference_not_active")
         now = utc_now()
         with self._connect() as db:
             existing = db.execute(
@@ -859,7 +889,7 @@ class SQLiteRepository:
                 "provider_id": values["provider_id"],
                 "url": values["url"],
                 "header_credentials": json.dumps(
-                    values.get("header_credentials") or {}, ensure_ascii=False
+                    header_credentials, ensure_ascii=False
                 ),
                 "risk": values.get("risk", "low"),
                 "required_scopes": json.dumps(
@@ -2671,6 +2701,10 @@ class PostgresRepository:
         with self.engine.connect() as connection:
             upgrade_database(self.database_url, connection=connection)
 
+    def schema_revision(self) -> str | None:
+        value = self._one("SELECT version_num FROM alembic_version")
+        return str(value["version_num"]) if value is not None else None
+
     def _execute(self, statement: str, values: dict[str, Any] | None = None):
         from sqlalchemy import text
 
@@ -2852,43 +2886,70 @@ class PostgresRepository:
         )
 
     def save_model_config(self, tenant_id: str, values: dict[str, Any]) -> dict:
-        from .secrets import encrypt
-
+        credential_reference = values["credential_reference"]
+        credential_id = encrypted_credential_id(credential_reference)
+        credential = self._one(
+            "SELECT revoked_at FROM credentials WHERE tenant_id = :tenant_id AND id = :id",
+            {"tenant_id": tenant_id, "id": credential_id},
+        )
+        if credential is None or credential["revoked_at"]:
+            raise ValueError("credential_reference_not_active")
         model = {
             "id": values.get("id") or str(uuid.uuid4()), "tenant_id": tenant_id,
             "name": values["name"], "base_url": values["base_url"], "model": values["model"],
-            "api_key": encrypt(values.get("api_key", "")), "input_price": values.get("input_price", 0),
+            "api_key": "", "input_price": values.get("input_price", 0),
             "output_price": values.get("output_price", 0), "is_default": int(values.get("is_default", False)),
             "created_at": values.get("created_at", utc_now()),
+            "credential_reference": credential_reference,
         }
         self._execute(
             "DELETE FROM model_configs WHERE tenant_id = :tenant_id AND name = :name", model
         )
         self._execute(
-            "INSERT INTO model_configs VALUES (:id, :tenant_id, :name, :base_url, :model, :api_key, :input_price, :output_price, :is_default, :created_at)",
+            "INSERT INTO model_configs(id, tenant_id, name, base_url, model, api_key, "
+            "input_price, output_price, is_default, created_at, credential_reference) "
+            "VALUES (:id, :tenant_id, :name, :base_url, :model, :api_key, "
+            ":input_price, :output_price, :is_default, :created_at, :credential_reference)",
             model,
         )
         return {key: value for key, value in model.items() if key != "api_key"}
 
     def list_model_configs(self, tenant_id: str) -> list[dict]:
         return self._many(
-            "SELECT id, tenant_id, name, base_url, model, input_price, output_price, is_default, created_at "
+            "SELECT id, tenant_id, name, base_url, model, input_price, output_price, is_default, created_at, credential_reference "
             "FROM model_configs WHERE tenant_id = :tenant_id ORDER BY name", {"tenant_id": tenant_id},
         )
 
     def get_model_config(self, tenant_id: str, name: str | None = None) -> dict | None:
-        value = self._one(
-            "SELECT * FROM model_configs WHERE tenant_id = :tenant_id AND "
-            "(:name IS NOT NULL AND name = :name OR :name IS NULL AND is_default = 1) "
-            "ORDER BY is_default DESC LIMIT 1", {"tenant_id": tenant_id, "name": name},
-        )
+        if name is None:
+            statement = (
+                "SELECT * FROM model_configs WHERE tenant_id = :tenant_id "
+                "AND is_default = 1 ORDER BY created_at DESC LIMIT 1"
+            )
+            parameters = {"tenant_id": tenant_id}
+        else:
+            statement = (
+                "SELECT * FROM model_configs WHERE tenant_id = :tenant_id "
+                "AND name = :name LIMIT 1"
+            )
+            parameters = {"tenant_id": tenant_id, "name": name}
+        value = self._one(statement, parameters)
         if value:
-            from .secrets import decrypt
-
-            value["api_key"] = decrypt(value.get("api_key", ""))
+            value.pop("api_key", None)
         return value
 
     def save_mcp_server(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        header_credentials = validate_workspace_credential_map(
+            values.get("header_credentials") or {}
+        )
+        credential_ids = {
+            encrypted_credential_id(reference)
+            for reference in header_credentials.values()
+        }
+        for credential_id in credential_ids:
+            credential = self.get_credential(tenant_id, credential_id)
+            if credential is None or credential.get("revoked_at"):
+                raise ValueError("credential_reference_not_active")
         existing = self._one(
             "SELECT id, created_at FROM mcp_servers "
             "WHERE tenant_id = :tenant_id AND provider_id = :provider_id",
@@ -2901,7 +2962,7 @@ class PostgresRepository:
             "provider_id": values["provider_id"],
             "url": values["url"],
             "header_credentials": json.dumps(
-                values.get("header_credentials") or {}, ensure_ascii=False
+                header_credentials, ensure_ascii=False
             ),
             "risk": values.get("risk", "low"),
             "required_scopes": json.dumps(

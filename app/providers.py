@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -18,6 +18,67 @@ from .core.errors import (
 )
 
 _MINIMAX_HOSTS = {"api.minimax.io", "api.minimaxi.com"}
+
+
+def validate_workspace_model_base_url(value: str) -> str:
+    """Validate a workspace-controlled OpenAI-compatible HTTPS endpoint."""
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("base_url contains an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "base_url must be HTTPS without credentials, query, or fragment"
+        )
+    if port is not None and not 1 <= port <= 65_535:
+        raise ValueError("base_url contains an invalid port")
+    decoded_path = unquote(parsed.path)
+    if "\\" in decoded_path or any(
+        segment in {".", ".."} for segment in decoded_path.split("/")
+    ):
+        raise ValueError("base_url path must be canonical")
+    if any(ord(character) < 32 for character in value):
+        raise ValueError("base_url contains control characters")
+    return value.rstrip("/")
+
+
+def _provider_connection(
+    provider: dict[str, Any] | None,
+) -> tuple[str, str, dict[str, Any]]:
+    if provider is None:
+        api_key = settings.llm_api_key
+        base_url = settings.llm_base_url
+        values: dict[str, Any] = {}
+    else:
+        values = provider
+        api_key = values.get("api_key")
+        base_url = values.get("base_url")
+        if not isinstance(api_key, str) or not api_key:
+            raise ProviderNotConfiguredError(
+                "Selected workspace model has no bound credential"
+            )
+        if not isinstance(base_url, str) or not base_url:
+            raise ProviderNotConfiguredError(
+                "Selected workspace model has no bound endpoint"
+            )
+        try:
+            base_url = validate_workspace_model_base_url(base_url)
+        except ValueError as exc:
+            raise ProviderNotConfiguredError(
+                "Selected workspace model endpoint is invalid"
+            ) from exc
+    if not api_key:
+        raise ProviderNotConfiguredError("AIGC_LITE_LLM_API_KEY is not configured")
+    return api_key, base_url, values
 
 
 def _provider_payload(base_url: str) -> dict[str, Any]:
@@ -36,13 +97,9 @@ async def completion(
     tools: list[dict[str, Any]] | None = None,
     provider: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    provider = provider or {}
-    api_key = provider.get("api_key") or settings.llm_api_key
-    base_url = provider.get("base_url") or settings.llm_base_url
-    if not api_key:
-        raise ProviderNotConfiguredError("AIGC_LITE_LLM_API_KEY is not configured")
+    api_key, base_url, provider_values = _provider_connection(provider)
     payload: dict[str, Any] = {
-        "model": model or provider.get("model") or settings.llm_model,
+        "model": model or provider_values.get("model") or settings.llm_model,
         "messages": messages,
         **_provider_payload(base_url),
     }
@@ -51,7 +108,11 @@ async def completion(
         payload["tool_choice"] = "auto"
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        async with httpx.AsyncClient(base_url=base_url, timeout=settings.llm_timeout) as client:
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            timeout=settings.llm_timeout,
+            follow_redirects=False,
+        ) as client:
             response = await client.post("/chat/completions", json=payload, headers=headers)
             response.raise_for_status()
     except httpx.HTTPError as exc:
@@ -77,13 +138,9 @@ async def stream_chat(
     usage_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> AsyncIterator[str]:
     """Yield text chunks from a provider's SSE response."""
-    provider = provider or {}
-    api_key = provider.get("api_key") or settings.llm_api_key
-    base_url = provider.get("base_url") or settings.llm_base_url
-    if not api_key:
-        raise ProviderNotConfiguredError("AIGC_LITE_LLM_API_KEY is not configured")
+    api_key, base_url, provider_values = _provider_connection(provider)
     payload = {
-        "model": model or provider.get("model") or settings.llm_model,
+        "model": model or provider_values.get("model") or settings.llm_model,
         "messages": messages,
         "stream": True,
         "stream_options": {"include_usage": True},
@@ -92,7 +149,11 @@ async def stream_chat(
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         async with (
-            httpx.AsyncClient(base_url=base_url, timeout=settings.llm_timeout) as client,
+            httpx.AsyncClient(
+                base_url=base_url,
+                timeout=settings.llm_timeout,
+                follow_redirects=False,
+            ) as client,
             client.stream("POST", "/chat/completions", json=payload, headers=headers) as response,
         ):
             response.raise_for_status()

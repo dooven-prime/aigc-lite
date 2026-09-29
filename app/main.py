@@ -3,24 +3,23 @@
 from __future__ import annotations
 
 import json
-import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
 from .adapters.kernel_verification import KernelVerifierRegistry
 from .adapters.scheduling import TimeWheelScheduler
+from .api.configuration import create_configuration_router
 from .audit import record_request
 from .auth import (
     create_login_session,
@@ -91,15 +90,17 @@ from .services.kernel_verification import KernelVerificationService
 from .services.mcp_probe import MCPProbeService
 from .services.memory import MemoryService
 from .services.qualification import QualificationService
+from .services.readiness import ReadinessService
 from .services.research_registry import ResearchRegistryService
 from .services.scheduler import SchedulerService
 from .services.task_runner import TaskRunner
 from .services.tool_catalog import create_default_tool_catalog
 from .services.tools import ToolService
 from .services.verification_runner import VerificationRunner
+from .startup import validate_startup_security
 from .tenancy import Tenant, _role_scopes, current_tenant
 
-FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+PACKAGED_UI = Path(__file__).parent / "static"
 tool_catalog = create_default_tool_catalog()
 artifact_service = ArtifactService()
 tool_service = ToolService(
@@ -158,6 +159,10 @@ timewheel_scheduler = TimeWheelScheduler(
     reconcile_seconds=settings.scheduler_reconcile_seconds,
     max_concurrency=settings.scheduler_max_concurrency,
 )
+readiness_service = ReadinessService(
+    scheduler_enabled=lambda: settings.scheduler_enabled,
+    scheduler_running=lambda: timewheel_scheduler.running,
+)
 
 
 class LoginRequest(BaseModel):
@@ -170,84 +175,8 @@ class RegisterRequest(LoginRequest):
     workspace_name: str | None = Field(default=None, min_length=1, max_length=100)
 
 
-class ModelConfigRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-    base_url: str = Field(min_length=1, max_length=500)
-    model: str = Field(min_length=1, max_length=200)
-    api_key: str = Field(default="", max_length=500)
-    input_price: float = Field(default=0, ge=0)
-    output_price: float = Field(default=0, ge=0)
-    is_default: bool = False
-
-
-class MCPServerConfigRequest(BaseModel):
-    provider_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
-    url: str = Field(min_length=1, max_length=2000)
-    header_credentials: dict[str, str] = Field(default_factory=dict)
-    risk: str = Field(default="low", pattern="^(low|medium|high)$")
-    required_scopes: list[str] = Field(default_factory=list, max_length=32)
-    timeout_seconds: float = Field(default=30, ge=0.1, le=300)
-    enabled: bool = True
-
-    @field_validator("url")
-    @classmethod
-    def validate_url(cls, value: str) -> str:
-        parsed = urlsplit(value)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise ValueError("url must be HTTP(S) and must not contain credentials")
-        return value
-
-    @field_validator("header_credentials")
-    @classmethod
-    def validate_header_credentials(cls, value: dict[str, str]) -> dict[str, str]:
-        env_reference = re.compile(r"^env://[A-Za-z_][A-Za-z0-9_]*$")
-        encrypted_reference = re.compile(
-            r"^encrypted-db://credential/([0-9a-fA-F-]{36})$"
-        )
-        for header, item in value.items():
-            if not header.strip():
-                raise ValueError("header names must not be empty")
-            if env_reference.fullmatch(item):
-                continue
-            match = encrypted_reference.fullmatch(item)
-            if match is not None:
-                try:
-                    UUID(match.group(1))
-                    continue
-                except ValueError:
-                    pass
-            raise ValueError(
-                "header credential values must use env://NAME or "
-                "encrypted-db://credential/UUID references"
-            )
-        return value
-
-    @field_validator("required_scopes")
-    @classmethod
-    def validate_required_scopes(cls, value: list[str]) -> list[str]:
-        if not all(item.strip() and len(item) <= 100 for item in value):
-            raise ValueError("required scopes must be non-empty strings")
-        return sorted(set(value))
-
-
 class UserCreateRequest(RegisterRequest):
     role: str = Field(default="member", pattern="^(member|admin)$")
-
-
-class CredentialCreateRequest(BaseModel):
-    name: str = Field(
-        min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
-    )
-    secret: SecretStr = Field(min_length=1, max_length=10_000)
-
-
-class CredentialReplaceRequest(BaseModel):
-    secret: SecretStr = Field(min_length=1, max_length=10_000)
 
 
 class ScheduleCreateRequest(BaseModel):
@@ -329,8 +258,10 @@ class MCPAuthMiddleware:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    validate_startup_security(settings)
     init_db()
     ensure_bootstrap_admin()
+    validate_startup_security(settings, get_repository())
     if settings.scheduler_enabled:
         await timewheel_scheduler.start()
     try:
@@ -352,10 +283,7 @@ app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
 app.add_middleware(MCPAuthMiddleware)
 app.mount(
     "/ui",
-    StaticFiles(
-        directory=FRONTEND_DIST if FRONTEND_DIST.exists() else Path(__file__).parent / "static",
-        html=True,
-    ),
+    StaticFiles(directory=PACKAGED_UI, html=True),
     name="ui",
 )
 app.mount("/mcp", mcp_app, name="mcp")
@@ -623,6 +551,12 @@ def _schedule_spec(request: ScheduleCreateRequest) -> ScheduleSpec:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name}
+
+
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    is_ready, payload = readiness_service.snapshot()
+    return JSONResponse(status_code=200 if is_ready else 503, content=payload)
 
 
 @app.get("/", include_in_schema=False)
@@ -1476,106 +1410,6 @@ async def knowledge_search(q: str = "", limit: int = 5, tenant: Tenant = Depends
     return search_documents(tenant.id, q, limit)
 
 
-@app.get("/api/models")
-async def models(tenant: Tenant = Depends(current_tenant)) -> list[dict]:
-    return get_repository().list_model_configs(tenant.id)
-
-
-@app.post("/api/models")
-async def save_model(request: ModelConfigRequest, user: dict = Depends(current_admin_user)) -> dict:
-    return get_repository().save_model_config(user["tenant_id"], request.model_dump())
-
-
-@app.get("/api/mcp-servers")
-async def mcp_servers(user: dict = Depends(current_admin_user)) -> list[dict]:
-    return get_repository().list_mcp_servers(user["tenant_id"])
-
-
-@app.get("/api/credentials")
-async def credentials(
-    http_request: Request,
-    user: dict = Depends(current_admin_user),
-) -> list[dict]:
-    tenant = Tenant(user["tenant_id"], user["tenant_id"])
-    return credential_service.list(request_context(http_request, tenant))
-
-
-@app.post("/api/credentials")
-async def create_credential(
-    request: CredentialCreateRequest,
-    http_request: Request,
-    user: dict = Depends(current_admin_user),
-) -> dict:
-    tenant = Tenant(user["tenant_id"], user["tenant_id"])
-    return credential_service.create(
-        request_context(http_request, tenant),
-        request.name,
-        request.secret.get_secret_value(),
-    )
-
-
-@app.post("/api/credentials/{credential_id}/replace")
-async def replace_credential(
-    credential_id: str,
-    request: CredentialReplaceRequest,
-    http_request: Request,
-    user: dict = Depends(current_admin_user),
-) -> dict:
-    tenant = Tenant(user["tenant_id"], user["tenant_id"])
-    return credential_service.replace(
-        request_context(http_request, tenant),
-        credential_id,
-        request.secret.get_secret_value(),
-    )
-
-
-@app.delete("/api/credentials/{credential_id}")
-async def revoke_credential(
-    credential_id: str,
-    http_request: Request,
-    user: dict = Depends(current_admin_user),
-) -> dict:
-    tenant = Tenant(user["tenant_id"], user["tenant_id"])
-    return credential_service.revoke(
-        request_context(http_request, tenant), credential_id
-    )
-
-
-@app.post("/api/mcp-servers")
-async def save_mcp_server(
-    request: MCPServerConfigRequest,
-    user: dict = Depends(current_admin_user),
-) -> dict:
-    if request.provider_id == "local":
-        raise HTTPException(status_code=409, detail="Provider id is reserved")
-    return get_repository().save_mcp_server(
-        user["tenant_id"], request.model_dump()
-    )
-
-
-@app.post("/api/mcp-servers/{server_id}/probe")
-async def probe_mcp_server(
-    server_id: str,
-    http_request: Request,
-    user: dict = Depends(current_admin_user),
-) -> dict:
-    tenant = Tenant(user["tenant_id"], user["tenant_id"])
-    return await mcp_probe_service.probe(
-        request_context(http_request, tenant), server_id
-    )
-
-
-@app.delete("/api/mcp-servers/{server_id}")
-async def delete_mcp_server(
-    server_id: str,
-    user: dict = Depends(current_admin_user),
-) -> dict[str, bool]:
-    deleted = get_repository().delete_mcp_server(user["tenant_id"], server_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="MCP server not found")
-    return {"deleted": True}
-
-
 @app.get("/api/usage")
 async def usage(tenant: Tenant = Depends(current_tenant)) -> dict:
     return get_repository().usage_summary(tenant.id)
@@ -1611,6 +1445,15 @@ async def create_tenant_user(
     return repository.create_user(
         tenant_id, request.email, request.name, hash_password(request.password), request.role
     )
+
+
+app.include_router(
+    create_configuration_router(
+        credential_service=credential_service,
+        mcp_probe_service=mcp_probe_service,
+        request_context_factory=request_context,
+    )
+)
 
 
 @app.post("/mcp-legacy")

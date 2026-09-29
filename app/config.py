@@ -76,6 +76,9 @@ class Settings:
     )
     mcp_allowed_origins: str = os.getenv("AIGC_LITE_MCP_ALLOWED_ORIGINS", "")
     mcp_servers_json: str = os.getenv("AIGC_LITE_MCP_SERVERS_JSON", "")
+    mcp_env_credential_allowlist: str = os.getenv(
+        "AIGC_LITE_MCP_ENV_CREDENTIAL_ALLOWLIST", ""
+    )
     lean_executable: str = os.getenv("AIGC_LITE_LEAN_EXECUTABLE", "")
     coq_executable: str = os.getenv("AIGC_LITE_COQ_EXECUTABLE", "")
     kernel_verify_timeout_seconds: float = float(

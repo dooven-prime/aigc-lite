@@ -1,4 +1,8 @@
 import sqlite3
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
 
 from app.repository import SQLiteRepository
 
@@ -12,6 +16,14 @@ CREATE TABLE mcp_servers (
     UNIQUE(tenant_id, provider_id)
 );
 """
+
+
+def _alembic_config(database_path: Path) -> Config:
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    config = Config(str(app_root / "alembic.ini"))
+    config.set_main_option("script_location", str(app_root / "alembic"))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path.as_posix()}")
+    return config
 
 
 def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> None:
@@ -51,7 +63,7 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "last_latency_ms",
         "last_tool_count",
     } <= columns
-    assert revision == "0012_qualification_plane"
+    assert revision == "0013_model_credential_binding"
     assert {
         "artifacts",
         "citations",
@@ -106,3 +118,39 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
     assert "input_snapshot" in promotion_columns
     assert "input_snapshot" in execution_columns
     assert repository.get_mcp_server("workspace-a", "server-1")["provider_id"] == "research"
+
+
+def test_model_credential_binding_migration_drops_legacy_secret_authority(
+    tmp_path,
+) -> None:
+    path = tmp_path / "model-credential-migration.db"
+    config = _alembic_config(path)
+    command.upgrade(config, "0012_qualification_plane")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO model_configs(id, tenant_id, name, base_url, model, api_key, "
+            "input_price, output_price, is_default, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "model-1",
+                "workspace-a",
+                "legacy",
+                "https://models.example.test/v1",
+                "example-model",
+                "enc:v1:legacy-ciphertext",
+                0,
+                0,
+                1,
+                "now",
+            ),
+        )
+
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(path) as connection:
+        api_key, credential_reference = connection.execute(
+            "SELECT api_key, credential_reference FROM model_configs WHERE id = ?",
+            ("model-1",),
+        ).fetchone()
+    assert api_key == ""
+    assert credential_reference == ""

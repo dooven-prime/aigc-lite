@@ -8,7 +8,7 @@
 
 ## 当前范围
 
-- FastAPI HTTP API 与 `/health` 健康检查
+- FastAPI HTTP API、`/health` liveness 与数据库/迁移/scheduler `/ready`
 - 同步聊天和 SSE 流式聊天
 - 环境变量配置，不在代码中保存密钥
 - 独立 master key、版本化密文与严格解密错误
@@ -35,8 +35,10 @@
 共享同一套 Run/Step、工具、产物和检索基础。
 
 版本变化见 [`CHANGELOG.md`](CHANGELOG.md)，安全部署边界与漏洞报告方式见
-[`SECURITY.md`](SECURITY.md)。当前 `v0.3.0` 的本地冻结范围和验证记录见
-[`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md)，初始 `v0.2.0` 基线保留在
+[`SECURITY.md`](SECURITY.md)，生产部署检查见 [`docs/PRODUCTION.md`](docs/PRODUCTION.md)，
+配置变量索引见 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。当前 `v0.4.0` 候选的
+发布闭包与未完成边界见 [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md)，已冻结的
+`v0.3.0` 验证记录见 [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md)，初始 `v0.2.0` 基线保留在
 [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md)。
 
 ## 快速开始
@@ -61,7 +63,8 @@ pip install -e ".[postgres]"
 cd frontend
 npm ci
 npm run dev       # http://127.0.0.1:5173/ui/
-npm run build     # 输出到 frontend/dist，由后端 /ui/ 提供
+npm run build     # 输出到 frontend/dist
+python ../scripts/sync_frontend.py  # 同步到 wheel/Docker 使用的 app/static
 ```
 
 编辑 `.env`，至少设置：
@@ -100,7 +103,8 @@ python -m app.main
 
 主要接口：
 
-- `GET /health`：服务健康检查
+- `GET /health`：不访问依赖的进程 liveness
+- `GET /ready`：数据库、Alembic head 与 scheduler readiness；未就绪返回 503
 - `GET|POST /api/sessions`：创建和列出会话
 - `GET /api/sessions/{session_id}`：读取当前租户会话及消息
 - `POST /api/chat`：同步 Agent 对话
@@ -150,6 +154,7 @@ python -m app.main
 
 ```bash
 curl http://127.0.0.1:8000/health
+curl --fail http://127.0.0.1:8000/ready
 curl -X POST http://127.0.0.1:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"prompt":"用三句话介绍人工智能"}'
@@ -396,10 +401,13 @@ AIGC_LITE_TENANTS_JSON=[{"id":"team-a","name":"Team A","api_key":"team-a-secret"
 
 自定义工具可以放在应用启动代码中导入后注册。Agent 不直接读取全局工具字典，而是在每次 Run 开始时从 Tool Catalog 获取当前 workspace 和 scope 可见的快照。远程 MCP tool 以 `{provider_id}__{tool_name}` 暴露给模型，避免不同服务之间名称冲突。
 
-远程 Streamable HTTP MCP Server 通过环境变量装配。`header_env` 的值是环境变量名，不是密钥本身；对应环境变量在每次建立连接时读取。例如：
+部署者可以通过环境变量静态装配远程 Streamable HTTP MCP Server。`header_env` 的值是
+环境变量名，不是密钥本身；只有同时列入
+`AIGC_LITE_MCP_ENV_CREDENTIAL_ALLOWLIST` 的变量才可读取。例如：
 
 ```dotenv
 RESEARCH_MCP_AUTH=Bearer replace-with-real-token
+AIGC_LITE_MCP_ENV_CREDENTIAL_ALLOWLIST=RESEARCH_MCP_AUTH
 AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","workspace_id":"default","header_env":{"Authorization":"RESEARCH_MCP_AUTH"},"risk":"low"}]
 ```
 
@@ -413,7 +421,9 @@ AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","
 {
   "provider_id": "research",
   "url": "https://mcp.example.com/mcp",
-  "header_credentials": {"Authorization": "env://RESEARCH_MCP_AUTH"},
+  "header_credentials": {
+    "Authorization": "encrypted-db://credential/00000000-0000-0000-0000-000000000000"
+  },
   "risk": "medium",
   "required_scopes": [],
   "timeout_seconds": 30,
@@ -421,7 +431,9 @@ AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","
 }
 ```
 
-除了默认的 `env://`，管理员可以创建 workspace 隔离的加密凭据：
+workspace 持久化配置只接受同一 workspace 中处于 active 状态的
+`encrypted-db://credential/UUID`，不接受任何 `env://NAME`。因此 workspace 管理员不能借助
+任意 MCP 地址读取服务进程环境。管理员先创建 workspace 隔离的加密凭据：
 
 ```json
 POST /api/credentials
@@ -443,6 +455,10 @@ POST /api/credentials
 
 运行时在每次建立连接时按当前 workspace 解析引用，不缓存明文。替换操作会写入新的
 `enc:v1` 密文并恢复可用状态；删除接口执行可审计的撤销，已撤销或跨 workspace 的引用统一表现为 `credential_not_configured`。
+
+workspace 模型配置遵循同一边界：自定义 HTTPS endpoint 必须原子绑定自己的 active
+`credential_reference`，不会继承 `AIGC_LITE_LLM_API_KEY`。平台级 LLM 环境变量只服务于
+未选择 workspace model config 的默认路由；自定义 client 禁止跟随 HTTP redirect。
 
 配置按 workspace 隔离，每次 Agent Run 发现工具时重新读取，因此禁用、凭据轮换和配置更新不要求重启。凭据值只在建立远程连接时解析且不缓存。`timeout_seconds` 同时限制发现/调用所使用的 HTTP client 和单次工具调用。
 

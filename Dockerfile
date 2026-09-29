@@ -11,7 +11,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY app ./app
-COPY --from=frontend /frontend/dist ./frontend/dist
+COPY --from=frontend /frontend/dist ./app/static
 RUN pip install --no-cache-dir .
 
 ENV AIGC_LITE_HOST=0.0.0.0

@@ -13,6 +13,7 @@ from fastapi import Header, HTTPException, Request
 from .config import settings
 from .database import get_repository
 from .rate_limit import check_rate_limit
+from .startup import is_loopback_binding
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +83,8 @@ async def current_tenant(
                 return Tenant(user["tenant_id"], user["tenant_id"])
     configured = _configured_tenants()
     if list(configured) == [""]:
+        if not is_loopback_binding(settings.host):
+            raise HTTPException(status_code=401, detail="Authentication required")
         check_rate_limit("default")
         tenant = configured[""][0]
         request.state.tenant_id = tenant.id

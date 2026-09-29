@@ -10,6 +10,7 @@ from math import isfinite
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..adapters.credentials import EnvCredentialProvider
 from ..adapters.tools.local import LocalToolProvider
 from ..adapters.tools.mcp import MCPToolProvider
 from ..adapters.tools.repository import RepositoryMCPProviderSource
@@ -255,11 +256,20 @@ def _remote_provider(value: Any) -> MCPToolProvider:
     if not isfinite(timeout_seconds) or not 0 < timeout_seconds <= 300:
         raise ValueError
 
+    allowed_env_names = frozenset(
+        item.strip()
+        for item in settings.mcp_env_credential_allowlist.split(",")
+        if item.strip()
+    )
+    if not set(header_env.values()).issubset(allowed_env_names):
+        raise ValueError("Static MCP environment credential is not allowlisted")
+
     return MCPToolProvider(
         provider_id,
         url,
         workspace_id=workspace_id,
         header_env=header_env,
+        credential_provider=EnvCredentialProvider(allowed_env_names),
         risk=ToolRisk(value.get("risk", ToolRisk.LOW.value)),
         required_scopes=frozenset(required_scopes),
         timeout_seconds=timeout_seconds,

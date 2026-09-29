@@ -7,11 +7,7 @@ import re
 from collections.abc import Callable
 from time import monotonic
 
-from ..adapters.credentials import (
-    CompositeCredentialProvider,
-    EncryptedCredentialProvider,
-    EnvCredentialProvider,
-)
+from ..adapters.credentials import EncryptedCredentialProvider
 from ..adapters.tools.mcp import MCPToolProvider
 from ..adapters.tools.repository import provider_from_record
 from ..core.contracts import RequestContext
@@ -99,11 +95,8 @@ class MCPProbeService:
         started = monotonic()
         try:
             if self._provider_factory is None:
-                credential_provider = CompositeCredentialProvider(
-                    environment=EnvCredentialProvider(),
-                    encrypted_database=EncryptedCredentialProvider(
-                        context.workspace_id, self._repository_provider
-                    ),
+                credential_provider = EncryptedCredentialProvider(
+                    context.workspace_id, self._repository_provider
                 )
                 provider = provider_from_record(
                     server, context.workspace_id, credential_provider

@@ -1,6 +1,6 @@
 # aigc-lite 产品与架构设计
 
-状态：Draft，`0.3.0` 已冻结，当前面向 `0.4` Physical Capability Bridge。
+状态：Draft，`0.3.0` 已冻结，`0.4.0` 正在建立发布闭包。
 
 ## 1. 产品定义
 
@@ -55,8 +55,8 @@ Server、审计、用量和 Web UI。现有测试、Ruff 和前端构建均可�
    治理等待独立的 platform-admin 身份与 scope，不复用 workspace 角色；
 6. 已拆分登录签名密钥与凭据 master key，并使用版本化认证密文；后续仍需增加
    master key 轮换和批量重加密流程；
-7. Schema 通过应用启动时执行 DDL，没有版本化迁移，也没有 SQLite/PostgreSQL
-   一致性测试；
+7. Schema 已由 13 个 Alembic revision 管理，应用启动时升级到 head；SQLite 回归与
+   PostgreSQL 17 的真实迁移/repository contract 均进入 CI；
 8. Run/Step 已有首个同步聊天切片，但工具调用、流式事件、Artifact 和 Citation
    尚未接入执行账本；
 9. `main.py` 同时承担装配、协议模型、认证中间件、路由和业务编排，继续增加功能
@@ -187,7 +187,8 @@ ModelRoute
 配置保存 reference，不保存或传播 secret value：
 
 ```text
-CredentialRef: env://OPENAI_API_KEY
+DeploymentCredentialRef: env://OPENAI_API_KEY
+WorkspaceCredentialRef: encrypted-db://credential/UUID
 CredentialRef: encrypted-db://provider/<provider-id>
 ```
 
@@ -195,7 +196,8 @@ CredentialRef: encrypted-db://provider/<provider-id>
 
 - consumer 在每次上游操作边界解析一次，不跨操作缓存 secret；
 - API 只返回 `configured/source/writable`，永不返回值；
-- 环境变量 Provider 是默认核心能力；
+- 环境变量 Provider 只服务部署者静态配置，并要求显式变量 allowlist；workspace
+  持久化配置只能引用同 workspace 的 encrypted-db credential；
 - encrypted-db Provider 使用独立 `AIGC_LITE_MASTER_KEY`，不得从登录签名密钥派生；
 - 生产模式发现默认密钥、空 master key 或无法解密的记录时启动失败；
 - 日志、异常、审计 metadata 和 trace attributes 统一经过脱敏器。
@@ -530,7 +532,8 @@ ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
 - Alembic migration 与 PostgreSQL contract CI；
 - 配额、持久化限流、审计查询和使用量维度；
 - credential reference 管理与 master key 轮换流程；
-- health/readiness、结构化日志、OpenTelemetry 可选输出；
+- 已完成 dependency-free `/health` 与数据库/迁移/scheduler `/ready`；后续补结构化日志和
+  OpenTelemetry 可选输出；
 - 备份恢复和版本升级文档。
 
 ### M6：扩展生态
@@ -550,8 +553,9 @@ ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
 4. 已完成：streaming chat 进入同一 Run 生命周期，完成、失败和取消可追踪；
 5. 已完成：抽取 Tool Catalog；本地与远程 MCP tool 共享发现、workspace/risk/scope
    权限、结果上限、脱敏和 Tool Step；Provider 发现与调用失败使用稳定安全投影；
-6. 已完成：环境变量与 workspace 持久化 MCP server 配置、`env://` Credential
-   Provider、动态配置刷新、单工具 timeout、入站 MCP 的 workspace Catalog 投影、
+6. 已完成：部署者静态 MCP server 配置与显式 allowlist 的 `env://` Credential
+   Provider、只接受同 workspace `encrypted-db://` 引用的持久化 MCP 配置、动态配置刷新、
+   单工具 timeout、入站 MCP 的 workspace Catalog 投影、
    独立版本化 master key、统一账本/审计脱敏、Alembic migration、带稳定错误码的
    MCP 探测状态，以及 write-only `encrypted-db://credential/UUID` Credential Provider；
    Agent 模型轮次、工具次数和墙钟预算，稳定 `limit_reached` 状态，以及模型/MCP 等待链的
@@ -613,6 +617,13 @@ ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
     proof replay 受墙钟/输出限制并支持硬取消，axiom/placeholder closure 失败关闭，执行自动形成
     Run、Step、proof/certificate Artifact、Receipt 与 server-derived VerificationAttempt。当前明确是
     bounded host process，不冒充容器级不可信代码沙箱。
+18. 已完成：建立 `0.4.0` 发布候选的凭据和部署边界。workspace 自定义模型 endpoint
+    必须原子绑定自己的 encrypted credential，绝不继承平台 LLM key；非 loopback 启动要求
+    关闭 signup、替换 auth/master secret 并存在认证主体。React build 成为 wheel/Docker 唯一 UI，
+    CI 增加 core/ROS2 clean-install wheel、PostgreSQL 17 contract 与 hardened Docker smoke。
+19. 进行中：按领域拆分 transport、repository 与 UI view。第一刀把 credential/model/MCP
+    配置 API 移入显式依赖注入的 `api.configuration` router，并把 Models UI 移出 `App.tsx`；
+    后续 repository 拆分保持现有 `Repository` contract，不在发布加固提交中同时改写存储语义。
 
 每个切片都必须产生可查询的真实纵向行为，不为了目录完整度创建没有 consumer 的抽象。
 

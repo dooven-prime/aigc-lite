@@ -75,7 +75,9 @@ def test_composite_provider_dispatches_without_caching(monkeypatch, tmp_path) ->
         context, "stored", "database-secret"
     )
     provider = CompositeCredentialProvider(
-        environment=EnvCredentialProvider(),
+        environment=EnvCredentialProvider(
+            frozenset({"AIGC_LITE_TEST_CREDENTIAL"})
+        ),
         encrypted_database=EncryptedCredentialProvider(
             "workspace-a", lambda: repository
         ),
