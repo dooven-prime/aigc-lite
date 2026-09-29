@@ -21,18 +21,92 @@ from ...core.artifacts import (
     CitationSourceKind,
 )
 from ...core.contracts import (
+    ToolHints,
     ToolProviderResult,
     ToolRisk,
     ToolSource,
     ToolSpec,
 )
 from ...ports.credentials import CredentialProvider
+from ...redaction import redact
 
 TransportFactory = Callable[[], AbstractAsyncContextManager]
+
+_RISK_ORDER = {
+    ToolRisk.LOW: 0,
+    ToolRisk.MEDIUM: 1,
+    ToolRisk.HIGH: 2,
+}
+_MAX_EXTENSION_METADATA_CHARS = 16_384
 
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", value)
+
+
+def _remote_metadata(tool: Any) -> dict[str, Any]:
+    meta = getattr(tool, "meta", None)
+    if not isinstance(meta, dict):
+        return {}
+    value = meta.get("aigc-lite")
+    return value if isinstance(value, dict) else {}
+
+
+def _declared_risk(value: Any, minimum: ToolRisk) -> ToolRisk:
+    try:
+        declared = ToolRisk(value)
+    except (TypeError, ValueError):
+        return minimum
+    if _RISK_ORDER[declared] > _RISK_ORDER[minimum]:
+        return declared
+    return minimum
+
+
+def _declared_scopes(value: Any) -> frozenset[str]:
+    if not isinstance(value, list):
+        return frozenset()
+    return frozenset(
+        item
+        for item in value
+        if isinstance(item, str)
+        and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", item)
+    )
+
+
+def _declared_timeout(value: Any, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return maximum
+    declared = float(value)
+    return min(maximum, declared) if declared > 0 else maximum
+
+
+def _declared_extensions(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    safe = redact(value)
+    try:
+        encoded = json.dumps(safe, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return {}
+    if len(encoded) > _MAX_EXTENSION_METADATA_CHARS:
+        return {}
+    return safe
+
+
+def _remote_hints(tool: Any) -> ToolHints:
+    """Project untrusted MCP annotations as hints with conservative defaults."""
+    annotations = getattr(tool, "annotations", None)
+
+    def value(name: str, default: bool) -> bool:
+        candidate = getattr(annotations, name, None)
+        return candidate if isinstance(candidate, bool) else default
+
+    return ToolHints(
+        read_only=value("read_only_hint", False),
+        destructive=value("destructive_hint", True),
+        idempotent=value("idempotent_hint", False),
+        open_world=value("open_world_hint", True),
+    )
 
 
 def _resource_name(item: Any, uri: str, fallback: str) -> str:
@@ -156,21 +230,30 @@ class MCPToolProvider:
     async def list_tools(self) -> list[ToolSpec]:
         async with Client(self._transport_factory()) as client:
             result = await client.list_tools()
-        return [
-            ToolSpec(
-                name=f"{self.provider_id}__{_safe_name(tool.name)}",
-                native_name=tool.name,
-                description=tool.description or tool.name,
-                input_schema=tool.input_schema,
-                source=ToolSource.MCP,
-                provider_id=self.provider_id,
-                workspace_id=self.workspace_id,
-                risk=self.risk,
-                required_scopes=self.required_scopes,
-                timeout_seconds=self.timeout_seconds,
+        values = []
+        for tool in result.tools:
+            metadata = _remote_metadata(tool)
+            values.append(
+                ToolSpec(
+                    name=f"{self.provider_id}__{_safe_name(tool.name)}",
+                    native_name=tool.name,
+                    description=tool.description or tool.name,
+                    input_schema=tool.input_schema,
+                    source=ToolSource.MCP,
+                    provider_id=self.provider_id,
+                    workspace_id=self.workspace_id,
+                    risk=_declared_risk(metadata.get("risk"), self.risk),
+                    required_scopes=(
+                        self.required_scopes | _declared_scopes(metadata.get("required_scopes"))
+                    ),
+                    timeout_seconds=_declared_timeout(
+                        metadata.get("timeout_seconds"), self.timeout_seconds
+                    ),
+                    hints=_remote_hints(tool),
+                    extensions=_declared_extensions(metadata.get("extensions")),
+                )
             )
-            for tool in result.tools
-        ]
+        return values
 
     async def call_tool(
         self, native_name: str, arguments: dict[str, Any]

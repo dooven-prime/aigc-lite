@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aigc-lite"
-version = "0.3.0"
+version = "0.4.0"
 description = "A self-hosted AI workspace and Agent/MCP runtime with searchable execution memory."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,7 +26,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff==0.16.5"]
 postgres = ["psycopg[binary]>=3.2"]
 
 [project.scripts]
-aigc-lite = "app.main:run"
+aigc-lite = "app.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/dooven-prime/aigc-lite"
@@ -38,7 +38,7 @@ include = ["app*"]
 
 [tool.setuptools.package-data]
 app = [
-  "static/*",
+  "static/**/*",
   "alembic.ini",
   "alembic/*.py",
   "alembic/*.mako",
@@ -47,7 +47,7 @@ app = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "extensions/ros2-bridge/src"]
 
 [tool.ruff]
 line-length = 100

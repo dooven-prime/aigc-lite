@@ -1,10 +1,14 @@
 # aigc-lite
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/dooven-prime/aigc-lite)](https://m8ven.ai/mcp/dooven-prime/aigc-lite)
+
+> M8ven 徽章表示第三方对公开 MCP 源码的扫描状态，不构成本项目 Qualification Plane 的资格或授权结论。
+
 一个可自托管、以可搜索执行记忆为核心的 AI 工作台与 Agent/MCP 运行时。项目通过 OpenAI-compatible 上游调用模型，但不以重复建设通用 AI Gateway 为目标；重点是持久化对话、Agent Run、执行步骤、知识和后续工具产物，让运行过程可以查询、搜索和复用。
 
 ## 当前范围
 
-- FastAPI HTTP API 与 `/health` 健康检查
+- FastAPI HTTP API、`/health` liveness 与数据库/迁移/scheduler `/ready`
 - 同步聊天和 SSE 流式聊天
 - 环境变量配置，不在代码中保存密钥
 - 独立 master key、版本化密文与严格解密错误
@@ -20,6 +24,8 @@
 - `/ui` 聊天、知识库与执行记忆工作台，包含 Run Explorer
 - 跨领域 Protocol/Claim/Receipt/Review/Freeze 证据控制层，以及首个 Decision Lab
 - 可导入版本化 Claim Registry 的 Research Workspace，以及支持类型化关系、版本化 Verification Plan、Agent/计划任务验证、验证收据和逐级晋升门的 Claim Explorer
+- Qualification Plane：领域 Verifier Registry、冻结 ClaimRevision、证据闭包、确定性 Gate、可携带 Qualification Receipt、独立授权账本和 qualified-only retrieval
+- 可选的独立 ROS 2 Physical Capability Bridge：模拟器与 Nav2 backend 通过 MCP 投影，复用权限、预算、取消、Run/Step、Artifact 和 Receipt
 - 可作为 Python 包或独立服务运行
 
 企业私有业务、数据库连接器、第三方平台凭据和运行时数据不属于公开核心，将通过独立扩展接入。
@@ -29,8 +35,10 @@
 共享同一套 Run/Step、工具、产物和检索基础。
 
 版本变化见 [`CHANGELOG.md`](CHANGELOG.md)，安全部署边界与漏洞报告方式见
-[`SECURITY.md`](SECURITY.md)。当前 `v0.3.0` 的本地冻结范围和验证记录见
-[`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md)，初始 `v0.2.0` 基线保留在
+[`SECURITY.md`](SECURITY.md)，生产部署检查见 [`docs/PRODUCTION.md`](docs/PRODUCTION.md)，
+配置变量索引见 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。当前 `v0.4.0` 的
+冻结范围与未完成边界见 [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md)，已冻结的
+`v0.3.0` 验证记录见 [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md)，初始 `v0.2.0` 基线保留在
 [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md)。
 
 ## 快速开始
@@ -55,7 +63,8 @@ pip install -e ".[postgres]"
 cd frontend
 npm ci
 npm run dev       # http://127.0.0.1:5173/ui/
-npm run build     # 输出到 frontend/dist，由后端 /ui/ 提供
+npm run build     # 输出到 frontend/dist
+python ../scripts/sync_frontend.py  # 同步到 wheel/Docker 使用的 app/static
 ```
 
 编辑 `.env`，至少设置：
@@ -94,7 +103,8 @@ python -m app.main
 
 主要接口：
 
-- `GET /health`：服务健康检查
+- `GET /health`：不访问依赖的进程 liveness
+- `GET /ready`：数据库、Alembic head 与 scheduler readiness；未就绪返回 503
 - `GET|POST /api/sessions`：创建和列出会话
 - `GET /api/sessions/{session_id}`：读取当前租户会话及消息
 - `POST /api/chat`：同步 Agent 对话
@@ -116,6 +126,14 @@ python -m app.main
 - `POST /api/research-registry/verification-plans/{plan_id}/runs`：通过 Agent 立即执行有效 Plan，并闭合 Run/Step/Artifact/Receipt/Promotion Gate
 - `POST /api/research-registry/claims/{claim_id}/promotion-gates`：管理员执行下一阶段的失败关闭晋升评估
 - `POST /api/research-registry/import/frontier`：管理员上传、验证并冻结 Claim Registry
+- `GET /api/qualification/profiles`：列出代码注册、版本固定的领域资格 Profile
+- `GET /api/qualification/kernel-verifiers`：列出 Lean/Coq backend 的配置状态和非敏感执行边界
+- `POST /api/qualification/math-theorems`：冻结 theorem 候选；只完成存储准入，不授予资格或权限
+- `POST /api/qualification/claims/{claim_id}/kernel-verifications`：用服务端配置的 Lean/Coq 可执行文件验证冻结 proof，并写入 Run/Step/Artifact/Receipt/Attempt
+- `POST /api/qualification/claims/{claim_id}/evaluations`：按指定 Profile 运行确定性 Qualification Gate
+- `GET /api/qualification/receipts/{receipt_id}`：读取不可变、可携带的资格证书
+- `GET /api/qualification/search?q=...&profile=math.formal.v1`：只查询当前仍具该资格的 ClaimRevision
+- `POST /api/authorization-grants`：基于 current Qualification Receipt 签发窄 action/target/scope/budget/max_calls 授权
 - `GET|POST /api/schedules`：管理员创建或列出当前 workspace 的计划任务
 - `GET /api/schedules/{task_id}`：管理员读取计划任务详情
 - `POST /api/schedules/{task_id}/pause|resume|cancel`：管理员控制后续触发
@@ -136,6 +154,7 @@ python -m app.main
 
 ```bash
 curl http://127.0.0.1:8000/health
+curl --fail http://127.0.0.1:8000/ready
 curl -X POST http://127.0.0.1:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"prompt":"用三句话介绍人工智能"}'
@@ -214,7 +233,100 @@ Verification Plan 是不可变版本；创建同一 `plan_key` 的新版本会�
 合同；有效结果以及无效输出、上游失败或取消都会形成可查询的 execution。只要 Agent Run 已建立，
 Runner 还会写入结果/错误 Artifact、Receipt-bound Attempt 和失败关闭的下一阶段 Promotion Gate。
 自动 Gate 额外要求触发它的本次 Attempt 为 `passed`，不会借用历史通过记录为一次失败执行顺带
-晋升。Agent 执行永远记录为 `independent=false`，不会凭模型自述越过独立复核边界。
+晋升。Agent 执行永远不能自述独立性。Verification Attempt API 不接受 `independent` 或客户端填写的
+overlap assessment；principal、workspace、Run、model route、plan hash、checker/toolchain 和数据/环境
+摘要由服务端从已有对象绑定，independence 只是 lineage 上的派生投影。旧布尔值仍可读，但不能成为
+资格或权限依据。`registered -> release_ready` 只表示 workflow stage，不是证据强度。
+
+## Qualification Plane
+
+Qualification 不是 Artifact 属性，而是冻结关系：
+
+```text
+Q(ClaimRevision, QualificationProfile, EvidenceClosure, PolicyVersion)
+```
+
+系统中没有 `artifact.trusted=true` 或 `trusted_agent=true`。模型只能产生 candidate、Artifact、验证/复核
+proposal 和反例；只有确定性的 `QualificationGate` 能写 `ADMITTED / BLOCKED / UNRESOLVED / STALE /
+NOT_APPLICABLE` 评估，且只有 `ADMITTED` 才签发不可变 Qualification Receipt。Claim statement、scope、
+定义、负边界或依赖发生变化时 semantic hash 改变，旧证据继续作为历史记录存在，但不会自动继承。
+
+首个领域锁 `math.formal.v1` 要求 exact revision identity、formal proof Artifact、带 checker identity 与
+executable hash 的 kernel certificate、无 `sorry`/额外公理、current dependency closure，以及非模型的
+semantic-alignment review。资格与权力严格分账：发布或高风险执行仍需要独立、窄范围的
+`AuthorizationGrant(action, target, scope, budget, expiry, max_calls)`。原始候选进入 `/api/search`；
+知识使用面可走 `/api/qualification/search`，避免未资格化候选被下一轮 Agent 当成事实。
+Kernel attempt 还必须来自服务端持有的 `system:verifier:*` identity 且不能带 model route。真实
+Lean 4/Coq process backend 只接受 proof source、固定 declaration 和 backend id；可执行文件、argv、
+环境与 verifier identity 都由服务器配置，客户端不能上传 command 或用普通 JSON 冒充 certificate。
+Lean 使用 `--trust=0` 并读取 `#print axioms`，Coq 读取 `Print Assumptions`；非零退出、超时、缺失
+closure marker、`sorry`/`Admitted` 或任意额外公理都生成失败 Attempt，不能通过 Gate。
+即使 kernel 通过也只增加一条合格的 evidence edge，不直接写 Qualification verdict；语义对齐 review、
+dependency closure 和显式 `QualificationGate` 仍必须分别满足。
+
+```dotenv
+# 默认留空并失败关闭；生产环境建议固定到具体 toolchain 的绝对路径。
+AIGC_LITE_LEAN_EXECUTABLE=C:\Users\you\.elan\toolchains\stable\bin\lean.exe
+AIGC_LITE_COQ_EXECUTABLE=/usr/bin/coqc
+AIGC_LITE_KERNEL_VERIFY_TIMEOUT_SECONDS=30
+AIGC_LITE_KERNEL_VERIFY_MEMORY_MB=512
+```
+
+```json
+POST /api/qualification/claims/{claim_revision_id}/kernel-verifications
+{
+  "backend": "lean4",
+  "declaration_name": "add_zero_demo",
+  "source": "theorem add_zero_demo (n : Nat) : n + 0 = n := by exact Nat.add_zero n"
+}
+```
+
+当前 backend 使用无 shell、有限时间/输出的子进程和一次性工作目录，但这不是 OS 安全沙箱；Lean
+metaprogram 与 Coq plugin 仍可能接触宿主文件系统/网络。因此该入口只开放给 workspace admin，
+不应作为公开匿名 proof upload 服务。需要验证不可信任意代码时，应把同一 backend 放进独立容器/
+VM，并把镜像、库闭包和网络策略纳入后续 Qualification Profile。
+
+## Portable Assurance Bundle
+
+管理员可以把一个 Research Case 只读导出为确定性 ZIP：
+
+```text
+GET /api/research-registry/cases/{case_id}/assurance-bundle
+
+research-artifact/
+├── artifact.json
+├── claims.json
+├── provenance.json
+├── receipts.json
+├── evidence.json
+├── verification.json
+├── qualification.json
+├── reviews.json
+├── limitations.json
+├── manifest.json
+├── payloads/
+└── signatures/status.json
+```
+
+`manifest.json` 对每个 JSON 文档和 Artifact 原始 payload 保存 SHA-256 与字节长度，并对成员清单
+再形成 `bundle_digest`。相同数据库快照会导出相同字节；ZIP 时间戳固定，不把导出时间伪装成研究
+事件。当前版本明确标记 `unsigned`：哈希闭包可以发现导出后的改动，但不能冒充发布者签名。
+通用离线 verifier 只检查基础设施闭包，不重新裁决数学定理、实验设计或领域事实；这些锁必须由
+对应 profile 的领域验证器提供，包中会明确报告 `domain_semantics=not_evaluated_by_bundle_verifier`。
+
+包的校验完全离线，不启动数据库、模型、MCP 或网络：
+
+```bash
+aigc-lite verify research-artifact.zip
+aigc-lite verify research-artifact/ --require-authorized
+```
+
+命令输出 `identity / provenance / reproducibility / evidence_closure / verification /
+independence / epistemic_state / authority_state` 状态包，而不是总分。普通 `verify` 只以格式、引用与
+摘要闭包决定退出码；`--require-authorized` 要求包中存在仍绑定 current qualification 的有效
+AuthorizationGrant，workflow 的 `release_ready` 不再冒充 authority。验证器
+会重算 Artifact、Verification Plan、冻结 Execution Input 与 Promotion Gate 摘要；旧版只有
+`independent=true`、没有重叠依据的记录会显示为 `undetermined`，不会被升级成独立验证。
 
 HTTP 轮询必须在 `AIGC_LITE_HTTP_POLL_ALLOWED_HOSTS` 中逐个配置精确 host 或 `host:port`。它不接受
 自定义 header、请求体或 URL 凭据，不跟随重定向，也不读取或保存响应正文。带认证的服务应封装为
@@ -289,14 +401,19 @@ AIGC_LITE_TENANTS_JSON=[{"id":"team-a","name":"Team A","api_key":"team-a-secret"
 
 自定义工具可以放在应用启动代码中导入后注册。Agent 不直接读取全局工具字典，而是在每次 Run 开始时从 Tool Catalog 获取当前 workspace 和 scope 可见的快照。远程 MCP tool 以 `{provider_id}__{tool_name}` 暴露给模型，避免不同服务之间名称冲突。
 
-远程 Streamable HTTP MCP Server 通过环境变量装配。`header_env` 的值是环境变量名，不是密钥本身；对应环境变量在每次建立连接时读取。例如：
+部署者可以通过环境变量静态装配远程 Streamable HTTP MCP Server。`header_env` 的值是
+环境变量名，不是密钥本身；只有同时列入
+`AIGC_LITE_MCP_ENV_CREDENTIAL_ALLOWLIST` 的变量才可读取。例如：
 
 ```dotenv
 RESEARCH_MCP_AUTH=Bearer replace-with-real-token
+AIGC_LITE_MCP_ENV_CREDENTIAL_ALLOWLIST=RESEARCH_MCP_AUTH
 AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","workspace_id":"default","header_env":{"Authorization":"RESEARCH_MCP_AUTH"},"risk":"low"}]
 ```
 
 每个配置可选 `risk`（`low`、`medium`、`high`）和 `required_scopes`。`medium` 默认要求 `tools:write`，`high` 默认要求 `tools:high-risk`；管理员和显式配置的 tenant API key 拥有这两个内置 scope，普通成员及无认证 quick start 只发现低风险工具。自定义 scope 预留给后续 scoped API key。单个远程 Provider 发现失败不会影响本地工具或其他 Provider；已经发现的远程工具若调用断连，会生成稳定的 `tool_provider_unavailable` 失败结果和失败 Step。
+
+远程 tool 还可以通过 `_meta.aigc-lite` 声明更严格的单工具风险、scope、超时上限和通用扩展元数据。声明只能提升 Provider 的最低风险、追加 scope 或缩短超时，不能由远端自行降权。管理员额外 scope 必须由部署方通过 `AIGC_LITE_ADMIN_TOOL_SCOPES` 显式授予。
 
 登录后的 workspace 管理员也可以通过 `/api/mcp-servers` 持久化配置。请求中的认证 header 只能保存凭据引用，不能保存明文：
 
@@ -304,7 +421,9 @@ AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","
 {
   "provider_id": "research",
   "url": "https://mcp.example.com/mcp",
-  "header_credentials": {"Authorization": "env://RESEARCH_MCP_AUTH"},
+  "header_credentials": {
+    "Authorization": "encrypted-db://credential/00000000-0000-0000-0000-000000000000"
+  },
   "risk": "medium",
   "required_scopes": [],
   "timeout_seconds": 30,
@@ -312,7 +431,9 @@ AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","
 }
 ```
 
-除了默认的 `env://`，管理员可以创建 workspace 隔离的加密凭据：
+workspace 持久化配置只接受同一 workspace 中处于 active 状态的
+`encrypted-db://credential/UUID`，不接受任何 `env://NAME`。因此 workspace 管理员不能借助
+任意 MCP 地址读取服务进程环境。管理员先创建 workspace 隔离的加密凭据：
 
 ```json
 POST /api/credentials
@@ -334,6 +455,10 @@ POST /api/credentials
 
 运行时在每次建立连接时按当前 workspace 解析引用，不缓存明文。替换操作会写入新的
 `enc:v1` 密文并恢复可用状态；删除接口执行可审计的撤销，已撤销或跨 workspace 的引用统一表现为 `credential_not_configured`。
+
+workspace 模型配置遵循同一边界：自定义 HTTPS endpoint 必须原子绑定自己的 active
+`credential_reference`，不会继承 `AIGC_LITE_LLM_API_KEY`。平台级 LLM 环境变量只服务于
+未选择 workspace model config 的默认路由；自定义 client 禁止跟随 HTTP redirect。
 
 配置按 workspace 隔离，每次 Agent Run 发现工具时重新读取，因此禁用、凭据轮换和配置更新不要求重启。凭据值只在建立远程连接时解析且不缓存。`timeout_seconds` 同时限制发现/调用所使用的 HTTP client 和单次工具调用。
 
@@ -383,6 +508,18 @@ Run/Step metadata 会记录 `execution_mode` 和 `cancellation_mode`：异步是
 
 每次入站 `tools/call` 都创建独立 Run 和 Tool Step，MCP 响应的 `_meta.aigc-lite.run_id` 可用于查询执行详情。参数和结果使用与 Agent 相同的账本脱敏规则；客户端仍获得工具原始结果。出站 MCP 请求会附带内部 hop 标记，收到 hop 标记的 aigc-lite 只投影本地工具，避免两个 Catalog 互相代理或配置指回自身时形成递归发现。正式 `/mcp` 的协议版本由官方 SDK 协商，当前 SDK v2 回归测试固定为 `2026-07-28`；`AIGC_LITE_LEGACY_MCP_PROTOCOL_VERSION` 仅影响手写的 `/mcp-legacy`，后者只用于本地调试兼容。
 
+### ROS 2 Physical Capability Bridge
+
+`extensions/ros2-bridge` 是独立发行包和进程，核心不导入 ROS 2。它先提供
+`robot_get_state`、`robot_inspect`、`robot_navigate_to` 与 `robot_cancel_action`，通过现有远程 MCP
+Provider 自动进入 Tool Catalog、Run/Step、结构化 Artifact 和 Citation。导航要求幂等键，收据明确
+区分 simulation/hardware、成功、失败、取消、状态不确定和停止是否确认。没有 ROS 的环境可用确定性
+SimulatorBackend 完整验证；安装并 source ROS 2/Nav2 后再切换 Nav2Backend。安装、配置、验证边界和
+安全要求见 [`extensions/ros2-bridge/README.md`](extensions/ros2-bridge/README.md)。
+
+Agent/MCP 的取消不是急停。真实机器人必须把 e-stop、安全 PLC/控制器、碰撞保护、速度限制和 watchdog
+保留在独立的物理安全路径中，不能依赖模型、网络、Python event loop 或 Tool Catalog。
+
 同步 Agent 会把本地和远程 MCP 的每次模型调用、工具调用分别记录为 Step，并记录
 `source`、`provider_id`、原始工具名与风险级别。工具参数和结构化结果中常见的
 `api_key`、`token`、`password`、`secret` 等嵌套字段，以及常见 AWS/GCS 预签名 URL 参数和 Bearer token，在进入执行账本或审计记录前会统一脱敏；模型实际执行仍接收原始工具结果。任意纯文本中的非结构化秘密仍无法可靠识别，因此涉及敏感数据的工具应返回 JSON 对象。流式响应通过 `X-Run-Id` 和 `X-Session-Id` header 返回追踪身份。
@@ -393,7 +530,7 @@ Run/Step metadata 会记录 `execution_mode` 和 `cancellation_mode`：异步是
 
 ```bash
 pytest
-ruff check app tests
+ruff check app tests extensions/ros2-bridge/src
 ```
 
 当前知识检索使用 SQLite 中保存的分块哈希向量，Repository 可切换 PostgreSQL；后续可把

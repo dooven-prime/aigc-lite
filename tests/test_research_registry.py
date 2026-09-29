@@ -1,4 +1,6 @@
+import io
 import json
+import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +9,7 @@ from app import database, main
 from app.core.artifacts import ArtifactDraft, ArtifactKind
 from app.core.contracts import RequestContext
 from app.core.errors import InvalidEvidenceError
+from app.core.qualification import ValidationModality
 from app.core.research import (
     ClaimPromotionStage,
     ClaimRelationDraft,
@@ -260,25 +263,54 @@ def test_claim_relations_verification_and_fail_closed_promotion(tmp_path) -> Non
         context, closed["id"], ClaimPromotionStage.REVIEW_READY
     )
     assert review_gate["evaluation"]["blockers"] == [
-        "declared_independent_passed_attempt_present"
+        "qualified_independence_passed_attempt_present"
     ]
-    service.record_verification_attempt(
+    ignored_declaration = service.record_verification_attempt(
         context,
         closed["id"],
         VerificationAttemptDraft(
             kind=VerificationKind.REVIEW,
             outcome=VerificationOutcome.PASSED,
-            method="Independent artifact and receipt review.",
-            scope="The declared fixture, method, and output artifact.",
+            method="A client attempts to declare its own independence.",
+            scope="Fixture only.",
             input_digest="3" * 64,
             output_digest="4" * 64,
             independent=True,
             artifact_ids=(artifact["id"],),
         ),
     )
-    reviewed = service.evaluate_promotion(
-        context, closed["id"], ClaimPromotionStage.REVIEW_READY
+    assert ignored_declaration["independent"] is False
+    assert ignored_declaration["independence"]["derived"] is True
+    kernel_certificate = ArtifactService(repository_provider=lambda: repository).create_artifact(
+        context,
+        ArtifactDraft(
+            name="orthogonal-checker.json",
+            kind=ArtifactKind.JSON,
+            media_type="application/json",
+            content_text=json.dumps({"checker": {"executable_hash": "a" * 64}}, sort_keys=True),
+            metadata={"role": "kernel_certificate"},
+        ),
     )
+    verifier_context = RequestContext(
+        request_id="orthogonal-checker",
+        workspace_id=context.workspace_id,
+        principal_id="system:verifier:fixture-kernel",
+    )
+    service.record_verification_attempt(
+        verifier_context,
+        closed["id"],
+        VerificationAttemptDraft(
+            kind=VerificationKind.REVIEW,
+            outcome=VerificationOutcome.PASSED,
+            validation_modality=ValidationModality.KERNEL_CHECK,
+            method="Replay with an orthogonal non-model checker.",
+            scope="The exact frozen fixture.",
+            input_digest="5" * 64,
+            output_digest=kernel_certificate["content_hash"],
+            artifact_ids=(kernel_certificate["id"],),
+        ),
+    )
+    reviewed = service.evaluate_promotion(context, closed["id"], ClaimPromotionStage.REVIEW_READY)
     assert reviewed["evaluation"]["decision"] == "passed"
     assert reviewed["claim"]["promotion_stage"] == "review_ready"
 
@@ -320,7 +352,7 @@ def test_claim_relations_verification_and_fail_closed_promotion(tmp_path) -> Non
     assert released["evaluation"]["decision"] == "passed"
     assert released["claim"]["promotion_stage"] == "release_ready"
     detail = service.get_claim(context, closed["id"])
-    assert len(detail["verification_attempts"]) == 2
+    assert len(detail["verification_attempts"]) == 3
     assert len(detail["promotion_evaluations"]) == 6
     assert detail["relations"][0]["target_claim_key"] == "CLM-BLOCKED"
 
@@ -363,9 +395,36 @@ def test_research_registry_http_import_is_workspace_scoped(tmp_path, monkeypatch
             assert imported.json()["statistics"]["claims"] == 2
             assert listed.status_code == 200
             assert listed.json()["case"]["name"] == "Frontier API"
+            exported = client.get(
+                f"/api/research-registry/cases/{imported.json()['case']['id']}/assurance-bundle"
+            )
+            assert exported.status_code == 200
+            assert exported.headers["content-type"] == "application/zip"
+            assert len(exported.headers["x-assurance-bundle-digest"]) == 64
+            with zipfile.ZipFile(io.BytesIO(exported.content)) as bundle:
+                assert {
+                    "manifest.json",
+                    "claims.json",
+                    "verification.json",
+                    "signatures/status.json",
+                } <= set(bundle.namelist())
 
             claim_id = listed.json()["claims"][0]["id"]
             assert client.get(f"/api/research-registry/claims/{claim_id}").status_code == 200
+            rejected_independence = client.post(
+                f"/api/research-registry/claims/{claim_id}/verification-attempts",
+                json={
+                    "kind": "review",
+                    "outcome": "passed",
+                    "validation_modality": "expert_review",
+                    "method": "Client-declared independence must be rejected.",
+                    "scope": "Transport contract only.",
+                    "input_digest": "1" * 64,
+                    "output_digest": "2" * 64,
+                    "independent": True,
+                },
+            )
+            assert rejected_independence.status_code == 422
 
             plan_response = client.post(
                 f"/api/research-registry/claims/{claim_id}/verification-plans",

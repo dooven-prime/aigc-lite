@@ -9,13 +9,20 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
+from mcp.types import (
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+    ToolAnnotations,
+)
 
 from . import __version__
 from .config import settings
-from .core.contracts import RequestContext
+from .core.contracts import RequestContext, ToolHints
+from .redaction import redact
 from .services.tools import ToolService
-from .tools import invoke, schemas
+from .tools import invoke, registration, schemas
 
 try:
     from mcp.server.mcpserver import MCPServer
@@ -45,14 +52,29 @@ def handle_rpc(request: dict[str, Any]) -> dict[str, Any]:
     elif method == "tools/list":
         result = {
             "tools": [
-                {"name": item["function"]["name"], "description": item["function"]["description"],
-                 "inputSchema": item["function"]["parameters"]}
+                {
+                    "name": item["function"]["name"],
+                    "description": item["function"]["description"],
+                    "inputSchema": item["function"]["parameters"],
+                    "annotations": _legacy_annotations(item["function"]["name"]),
+                }
                 for item in schemas()
             ]
         }
     else:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "Method not found"}}
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _legacy_annotations(name: str) -> dict[str, bool]:
+    registered = registration(name)
+    hints = registered[1]["hints"] if registered is not None else ToolHints()
+    return {
+        "readOnlyHint": hints.read_only,
+        "destructiveHint": hints.destructive,
+        "idempotentHint": hints.idempotent,
+        "openWorldHint": hints.open_world,
+    }
 
 
 class CatalogMCPServer(MCPServer if MCPServer is not None else object):
@@ -80,11 +102,24 @@ class CatalogMCPServer(MCPServer if MCPServer is not None else object):
                     name=spec.name,
                     description=spec.description,
                     inputSchema=spec.input_schema,
+                    annotations=ToolAnnotations(
+                        readOnlyHint=spec.hints.read_only,
+                        destructiveHint=spec.hints.destructive,
+                        idempotentHint=spec.hints.idempotent,
+                        openWorldHint=spec.hints.open_world,
+                    ),
                     _meta={
                         "aigc-lite": {
                             "source": spec.source.value,
                             "provider_id": spec.provider_id,
                             "risk": spec.risk.value,
+                            "required_scopes": sorted(spec.required_scopes),
+                            "timeout_seconds": spec.timeout_seconds,
+                            **(
+                                {"extensions": redact(spec.extensions)}
+                                if spec.extensions
+                                else {}
+                            ),
                             **(
                                 {
                                     "execution_mode": spec.execution_mode.value,

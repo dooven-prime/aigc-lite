@@ -22,6 +22,7 @@ class ErrorCode(StrEnum):
     TOOL_EXECUTION_FAILED = "tool_execution_failed"
     TOOL_PROVIDER_UNAVAILABLE = "tool_provider_unavailable"
     TOOL_PROVIDER_CONFLICT = "tool_provider_conflict"
+    TOOL_AUTHORIZATION_REQUIRED = "tool_authorization_required"
     TOOL_TIMEOUT = "tool_timeout"
     CREDENTIAL_NOT_CONFIGURED = "credential_not_configured"
     CREDENTIAL_KEY_NOT_CONFIGURED = "credential_key_not_configured"
@@ -35,7 +36,12 @@ class ErrorCode(StrEnum):
     SCHEDULE_NOT_ACTIVE = "schedule_not_active"
     INVALID_ARTIFACT = "invalid_artifact"
     INVALID_EVIDENCE = "invalid_evidence"
+    INVALID_ASSURANCE_BUNDLE = "invalid_assurance_bundle"
     INVALID_VERIFICATION_RESULT = "invalid_verification_result"
+    INVALID_KERNEL_VERIFICATION = "invalid_kernel_verification"
+    KERNEL_VERIFIER_NOT_CONFIGURED = "kernel_verifier_not_configured"
+    KERNEL_VERIFICATION_FAILED = "kernel_verification_failed"
+    KERNEL_VERIFIER_TIMEOUT = "kernel_verifier_timeout"
     INTERNAL_ERROR = "internal_error"
 
 
@@ -200,6 +206,15 @@ class InvalidEvidenceError(ApplicationError):
         super().__init__(message, metadata={"field": field})
 
 
+class InvalidAssuranceBundleError(ApplicationError):
+    """A portable bundle violates its schema, limits, or hash closure."""
+
+    code = ErrorCode.INVALID_ASSURANCE_BUNDLE
+
+    def __init__(self, message: str, *, field: str = "bundle"):
+        super().__init__(message, metadata={"field": field})
+
+
 class InvalidVerificationResultError(ApplicationError):
     """An Agent response failed the frozen verification result contract."""
 
@@ -207,3 +222,24 @@ class InvalidVerificationResultError(ApplicationError):
 
     def __init__(self, message: str):
         super().__init__(message, metadata={"contract": "research.verification-result.v1"})
+
+
+class InvalidKernelVerificationError(ApplicationError):
+    """A proof request violates the bounded kernel execution contract."""
+
+    code = ErrorCode.INVALID_KERNEL_VERIFICATION
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message, metadata={"field": field})
+
+
+class KernelVerifierNotConfiguredError(ApplicationError):
+    """The requested server-owned proof checker is unavailable."""
+
+    code = ErrorCode.KERNEL_VERIFIER_NOT_CONFIGURED
+
+    def __init__(self, backend: str):
+        super().__init__(
+            "Kernel verifier backend is not configured",
+            metadata={"backend": backend},
+        )

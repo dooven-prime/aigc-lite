@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+from ..adapters.credentials import EncryptedCredentialProvider
 from ..agent import build_messages, run_agent
 from ..audit import usage_from_response
 from ..config import settings
@@ -24,6 +25,7 @@ from ..core.errors import (
     AgentWallTimeLimitError,
     ApplicationError,
     ErrorCode,
+    ProviderNotConfiguredError,
     ResourceNotFoundError,
     RunNotActiveError,
 )
@@ -108,8 +110,10 @@ class GatewayService:
         model_config = repository.get_model_config(
             context.workspace_id, command.requested_model
         )
-        provider: dict[str, Any] = model_config or {}
-        model_name = command.requested_model or provider.get("model")
+        provider = self._runtime_model_provider(
+            repository, context.workspace_id, model_config
+        )
+        model_name = command.requested_model or (model_config or {}).get("model")
         selected_model = model_name or settings.llm_model
         run = repository.create_run(
             context.workspace_id,
@@ -144,7 +148,7 @@ class GatewayService:
                 )
 
         def record_usage(usage: dict) -> None:
-            pricing = provider or {
+            pricing = model_config or {
                 "input_price": settings.default_input_price,
                 "output_price": settings.default_output_price,
             }
@@ -273,8 +277,11 @@ class GatewayService:
         repository.add_message(context.workspace_id, session["id"], "user", command.prompt)
         model_config = repository.get_model_config(
             context.workspace_id, command.requested_model
-        ) or {}
-        model_name = command.requested_model or model_config.get("model")
+        )
+        provider = self._runtime_model_provider(
+            repository, context.workspace_id, model_config
+        )
+        model_name = command.requested_model or (model_config or {}).get("model")
         selected_model = model_name or settings.llm_model
         run = repository.create_run(
             context.workspace_id,
@@ -305,7 +312,7 @@ class GatewayService:
                 try:
                     async with asyncio.timeout(settings.max_agent_run_seconds):
                         async for chunk in self._stream_runner(
-                            messages, model_name, model_config, record_usage
+                            messages, model_name, provider, record_usage
                         ):
                             collected.append(chunk)
                             yield chunk
@@ -406,6 +413,26 @@ class GatewayService:
         return ChatStreamResult(
             session_id=session["id"], run_id=run["id"], chunks=chunks()
         )
+
+    def _runtime_model_provider(
+        self,
+        repository: Repository,
+        workspace_id: str,
+        model_config: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Resolve exactly the credential bound to a workspace model config."""
+
+        if model_config is None:
+            return None
+        reference = model_config.get("credential_reference")
+        if not isinstance(reference, str) or not reference:
+            raise ProviderNotConfiguredError(
+                "Selected workspace model has no bound credential"
+            )
+        api_key = EncryptedCredentialProvider(
+            workspace_id, lambda: repository
+        ).resolve(reference)
+        return {**model_config, "api_key": api_key}
 
     def cancel_run(self, context: RequestContext, run_id: str) -> None:
         """Request cancellation of an active run owned by this workspace."""

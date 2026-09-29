@@ -4,11 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from ...adapters.credentials import (
-    CompositeCredentialProvider,
-    EncryptedCredentialProvider,
-    EnvCredentialProvider,
-)
+from ...adapters.credentials import EncryptedCredentialProvider
 from ...core.contracts import RequestContext, ToolRisk
 from ...database import get_repository
 from ...ports.credentials import CredentialProvider
@@ -26,9 +22,8 @@ def provider_from_record(
 ) -> MCPToolProvider:
     """Build the runtime provider used by discovery, calls, and admin probes."""
 
-    resolved_provider = credential_provider or CompositeCredentialProvider(
-        environment=EnvCredentialProvider(),
-        encrypted_database=EncryptedCredentialProvider(workspace_id),
+    resolved_provider = credential_provider or EncryptedCredentialProvider(
+        workspace_id
     )
     return MCPToolProvider(
         record["provider_id"],
@@ -57,11 +52,8 @@ class RepositoryMCPProviderSource:
 
     def list_providers(self, context: RequestContext) -> list[ToolProvider]:
         records = self._repository_provider().list_mcp_servers(context.workspace_id)
-        credential_provider = self._credential_provider or CompositeCredentialProvider(
-            environment=EnvCredentialProvider(),
-            encrypted_database=EncryptedCredentialProvider(
-                context.workspace_id, self._repository_provider
-            ),
+        credential_provider = self._credential_provider or EncryptedCredentialProvider(
+            context.workspace_id, self._repository_provider
         )
         return [
             provider_from_record(

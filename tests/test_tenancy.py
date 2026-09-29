@@ -30,12 +30,25 @@ def test_configured_tenant_key_receives_tool_admin_scopes(monkeypatch) -> None:
     values = [{"id": "a", "name": "Alpha", "api_key": "a-secret"}]
     monkeypatch.setattr(tenancy.settings, "api_key", "")
     monkeypatch.setattr(tenancy.settings, "tenants_json", json.dumps(values))
+    monkeypatch.setattr(tenancy.settings, "admin_tool_scopes", "")
     monkeypatch.setattr(tenancy, "check_rate_limit", lambda _tenant_id: None)
     request = Request({"type": "http", "headers": []})
 
     tenant = asyncio.run(current_tenant(request, "Bearer a-secret"))
 
     assert tenant.id == "a"
-    assert request.state.scopes == frozenset(
-        {"tools:write", "tools:high-risk"}
+    assert request.state.scopes == frozenset({"tools:write", "tools:high-risk"})
+
+
+def test_admin_extra_tool_scopes_require_explicit_configuration(monkeypatch) -> None:
+    from app import tenancy
+
+    monkeypatch.setattr(
+        tenancy.settings,
+        "admin_tool_scopes",
+        "robot:motion, robot:control",
+    )
+
+    assert tenancy._role_scopes("admin") == frozenset(
+        {"tools:write", "tools:high-risk", "robot:motion", "robot:control"}
     )

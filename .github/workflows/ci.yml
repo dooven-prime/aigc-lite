@@ -16,9 +16,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
+      - run: pip install -e "./extensions/ros2-bridge"
       - run: pip install pip-audit
       - run: python -m pip_audit --local --skip-editable
-      - run: ruff check app tests
+      - run: ruff check app tests extensions/ros2-bridge/src
       - run: pytest
   frontend:
     runs-on: ubuntu-latest
@@ -32,6 +33,79 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run build
+      - run: python ../scripts/sync_frontend.py
+      - run: git -C .. diff --exit-code -- app/static
+
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip wheel . --no-deps --wheel-dir wheelhouse
+      - run: python -m venv /tmp/aigc-lite-wheel
+      - run: /tmp/aigc-lite-wheel/bin/pip install wheelhouse/*.whl
+      - run: cd /tmp && /tmp/aigc-lite-wheel/bin/python "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py"
+      - run: python -m pip wheel ./extensions/ros2-bridge --no-deps --wheel-dir ros2-wheelhouse
+      - run: python -m venv /tmp/aigc-lite-ros2-wheel
+      - run: /tmp/aigc-lite-ros2-wheel/bin/pip install ros2-wheelhouse/*.whl
+      - run: cd /tmp && /tmp/aigc-lite-ros2-wheel/bin/python "$GITHUB_WORKSPACE/scripts/smoke_ros2_wheel.py"
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: aigc_lite_test
+          POSTGRES_USER: aigc_lite
+          POSTGRES_PASSWORD: contract-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aigc_lite -d aigc_lite_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AIGC_LITE_TEST_POSTGRES_URL: postgresql+psycopg://aigc_lite:contract-password@127.0.0.1:5432/aigc_lite_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,postgres]"
+      - run: pytest tests/test_postgres_contract.py -q
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: docker build -t aigc-lite:ci .
+      - name: Start hardened container and smoke HTTP/UI
+        run: |
+          AUTH_SECRET=$(python -c 'import secrets; print(secrets.token_urlsafe(48))')
+          MASTER_KEY=$(python -c 'import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
+          docker run -d --name aigc-lite-ci -p 127.0.0.1:8013:8000 \
+            -e AIGC_LITE_ALLOW_SIGNUP=false \
+            -e AIGC_LITE_AUTH_SECRET="$AUTH_SECRET" \
+            -e AIGC_LITE_MASTER_KEY="$MASTER_KEY" \
+            -e AIGC_LITE_ADMIN_EMAIL=ci-admin@example.test \
+            -e AIGC_LITE_ADMIN_PASSWORD=ci-bootstrap-password \
+            aigc-lite:ci
+          trap 'docker logs aigc-lite-ci; docker rm -f aigc-lite-ci' EXIT
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:8013/ready && break
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8013/ui/ | grep 'react-v0.4'

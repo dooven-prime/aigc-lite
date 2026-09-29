@@ -14,6 +14,7 @@ def test_current_http_surface_remains_available() -> None:
     paths = set(main.app.openapi()["paths"])
     assert {
         "/health",
+        "/ready",
         "/api/auth/register",
         "/api/auth/login",
         "/api/auth/me",

@@ -1,6 +1,14 @@
 """Transport-neutral contracts and errors owned by the application core."""
 
 from .artifacts import ArtifactDraft, ArtifactKind, CitationDraft, CitationSourceKind
+from .assurance import (
+    ASSURANCE_BUNDLE_VERSION,
+    INDEPENDENCE_CONTRACT_VERSION,
+    ConflictAssessment,
+    IndependenceBasis,
+    OverlapAssessment,
+    VerificationIndependence,
+)
 from .contracts import (
     AgentStepRecord,
     ChatCommand,
@@ -21,7 +29,10 @@ from .errors import (
     ApplicationError,
     CredentialNotConfiguredError,
     ErrorCode,
+    InvalidAssuranceBundleError,
+    InvalidKernelVerificationError,
     InvalidVerificationResultError,
+    KernelVerifierNotConfiguredError,
 )
 from .evidence import (
     ClaimDraft,
@@ -33,6 +44,26 @@ from .evidence import (
     ReviewDraft,
     ReviewerKind,
     ReviewStatus,
+)
+from .kernel_verification import (
+    KERNEL_EXECUTION_CONTRACT_VERSION,
+    KernelBackendKind,
+    KernelExecutionResult,
+    KernelExecutionStatus,
+    KernelVerificationDraft,
+)
+from .qualification import (
+    AuthorizationGrantDraft,
+    CurrentUseState,
+    EvidenceAxisState,
+    EvidenceClosure,
+    EvidenceEdgeType,
+    MathTheoremCandidateDraft,
+    QualificationDecision,
+    QualificationProfile,
+    QualificationVerdict,
+    ValidationModality,
+    VerifierLineage,
 )
 from .research import (
     ClaimClosureStatus,
@@ -62,6 +93,12 @@ from .scheduling import (
 )
 
 __all__ = [
+    "ASSURANCE_BUNDLE_VERSION",
+    "INDEPENDENCE_CONTRACT_VERSION",
+    "ConflictAssessment",
+    "IndependenceBasis",
+    "OverlapAssessment",
+    "VerificationIndependence",
     "ApplicationError",
     "AgentStepRecord",
     "ArtifactDraft",
@@ -73,7 +110,15 @@ __all__ = [
     "CitationDraft",
     "CitationSourceKind",
     "ErrorCode",
+    "InvalidAssuranceBundleError",
+    "InvalidKernelVerificationError",
     "InvalidVerificationResultError",
+    "KernelVerifierNotConfiguredError",
+    "KERNEL_EXECUTION_CONTRACT_VERSION",
+    "KernelBackendKind",
+    "KernelExecutionResult",
+    "KernelExecutionStatus",
+    "KernelVerificationDraft",
     "ClaimDraft",
     "EvidenceResolution",
     "ExecutionReceiptDraft",
@@ -100,6 +145,17 @@ __all__ = [
     "VerificationOutcome",
     "VerificationPlanDraft",
     "VerificationPlanStatus",
+    "AuthorizationGrantDraft",
+    "CurrentUseState",
+    "EvidenceAxisState",
+    "EvidenceClosure",
+    "EvidenceEdgeType",
+    "MathTheoremCandidateDraft",
+    "QualificationDecision",
+    "QualificationProfile",
+    "QualificationVerdict",
+    "ValidationModality",
+    "VerifierLineage",
     "RequestContext",
     "ScheduledTask",
     "ScheduleKind",

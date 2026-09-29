@@ -5,7 +5,66 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
-No unreleased changes.
+## 0.4.0 - 2026-09-29
+
+- Closed two credential-confusion boundaries: workspace MCP records now accept
+  only same-workspace encrypted credential references, while deployer-owned
+  static `env://` references require an explicit environment-variable
+  allowlist; workspace model endpoints now require their own encrypted
+  credential and never inherit the platform LLM key.
+- Added fail-closed non-loopback startup checks, a loopback-only default
+  Compose port, and hardened bootstrap requirements for public binds.
+- Made the React application the canonical packaged UI, added wheel and Docker
+  UI smoke tests, exact frontend direct dependency versions, and reproducible
+  frontend-to-package synchronization.
+- Added live PostgreSQL migration/repository contract coverage plus core wheel,
+  ROS 2 simulator wheel, and container startup jobs to CI.
+- Added a fail-closed `/ready` projection for database connectivity, exact
+  Alembic head, and scheduler loop state; container smoke now gates on it while
+  `/health` remains dependency-free liveness.
+- Started the post-closure architecture split by moving the credential/model/MCP
+  configuration surface into an injected FastAPI router and the matching model
+  configuration UI into its own view module.
+- Added real Lean 4 and Coq KernelVerifier process backends. Server-owned
+  executable selection, bounded output, wall-clock termination, cancellation,
+  executable/toolchain identity, `#print axioms`/`Print Assumptions` closure,
+  and fail-closed placeholder detection now produce linked Run, Step, proof and
+  certificate Artifacts, Receipt, and server-derived Verification Attempt.
+  The certificate explicitly discloses that the bounded host process is not an
+  OS network/filesystem sandbox.
+- Added the Qualification Plane with a versioned Domain Verifier Registry and
+  the first `math.formal.v1` theorem profile. Exact ClaimRevision semantic
+  hashes, Merkle-like evidence closures, deterministic criterion receipts,
+  immutable Qualification Receipts, CurrentUse bindings, and separate narrow
+  Authorization Grants prevent storage or workflow admission from becoming a
+  trust/authority flag.
+- Verification independence is now derived from server-bound verifier lineage
+  rather than accepted from request booleans. Added qualified-only search and
+  qualification/authorization closure to portable Assurance Bundles.
+
+- Added deterministic, read-only Research Case Assurance Bundle export with
+  content-addressed Artifact payloads, a closed member manifest, explicit
+  limitations and unsigned-signature status, plus `aigc-lite verify` for
+  bounded directory/ZIP verification without a database or network.
+- Replaced boolean-only verification independence as a promotion authority
+  with a structured overlap disclosure and explicit qualification basis.
+  Legacy `independent=true` rows remain visible but fail closed. Verification
+  executions and promotion gates now retain their frozen input snapshots so
+  offline verifiers can recompute historical digests after Claim state moves.
+- Started the `0.4.0` Physical Capability Bridge as a separately installable
+  `aigc-lite-ros2` package rather than adding ROS/DDS dependencies to core.
+- Added bounded `get_state`, `inspect`, `navigate_to`, and `cancel_action` MCP
+  capabilities with high-risk motion scopes, idempotency conflict detection,
+  cancellation propagation, bounded feedback, simulation/hardware identity,
+  and versioned physical action/observation receipts.
+- Added a deterministic simulator for CI and failure/indeterminate demos plus a
+  lazy ROS 2/Nav2 adapter using NavigateToPose Action cancellation and TF2 pose
+  observations. Live ROS graph and hardware validation remain external.
+- Added safe remote MCP policy metadata: tools can only elevate configured
+  risk, add required scopes, or shorten provider timeouts; bounded extension
+  metadata is retained in Tool Steps and inbound MCP discovery.
+- Added explicitly configured administrator tool scopes so physical motion
+  permissions remain disabled by default.
 
 ## 0.3.0 - 2026-09-28
 - Added a workspace-isolated encrypted Credential Store with write-only API,

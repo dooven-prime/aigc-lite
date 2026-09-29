@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
-from uuid import UUID
 
+from ...core.credentials import encrypted_credential_id
 from ...core.errors import CredentialNotConfiguredError
 from ...database import get_repository
 from ...repository import Repository
 from ...secrets import decrypt
 
 RepositoryProvider = Callable[[], Repository]
-_REFERENCE = re.compile(r"^encrypted-db://credential/([0-9a-fA-F-]{36})$")
-
-
 class EncryptedCredentialProvider:
     """Resolve an encrypted reference inside exactly one workspace."""
 
@@ -27,11 +23,8 @@ class EncryptedCredentialProvider:
         self._repository_provider = repository_provider
 
     def resolve(self, reference: str) -> str:
-        match = _REFERENCE.fullmatch(reference)
-        if match is None:
-            raise CredentialNotConfiguredError("Unsupported credential reference")
         try:
-            credential_id = str(UUID(match.group(1)))
+            credential_id = encrypted_credential_id(reference)
         except ValueError as exc:
             raise CredentialNotConfiguredError(
                 "Unsupported credential reference"

@@ -23,6 +23,7 @@ from ..core.evidence import (
     ReviewerKind,
     ReviewStatus,
 )
+from ..core.qualification import ValidationModality
 from ..core.research import (
     ClaimClosureStatus,
     ClaimPromotionStage,
@@ -50,6 +51,7 @@ from ..redaction import redact, redact_record_text, redact_text
 from ..repository import Repository
 from .artifacts import ArtifactService
 from .evidence import EvidenceService
+from .qualification import QualificationService
 
 RepositoryProvider = Callable[[], Repository]
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -370,23 +372,17 @@ class ResearchRegistryService:
             research_case_id=claim["research_case_id"],
             claim_id=claim_id,
         )
-        claim["verification_attempts"] = (
-            repository.list_research_verification_attempts(
-                context.workspace_id, claim_id
-            )
+        claim["verification_attempts"] = repository.list_research_verification_attempts(
+            context.workspace_id, claim_id
         )
         claim["verification_plans"] = repository.list_research_verification_plans(
             context.workspace_id, claim_id
         )
-        claim["verification_executions"] = (
-            repository.list_research_verification_executions(
-                context.workspace_id, claim_id
-            )
+        claim["verification_executions"] = repository.list_research_verification_executions(
+            context.workspace_id, claim_id
         )
-        claim["promotion_evaluations"] = (
-            repository.list_research_promotion_evaluations(
-                context.workspace_id, claim_id
-            )
+        claim["promotion_evaluations"] = repository.list_research_promotion_evaluations(
+            context.workspace_id, claim_id
         )
         return claim
 
@@ -500,6 +496,40 @@ class ResearchRegistryService:
             raise InvalidEvidenceError(
                 "artifact_ids", "artifact_ids must contain at most 100 entries"
             )
+        lineage = QualificationService.derive_verifier_lineage(
+            repository,
+            context,
+            run_id=draft.run_id,
+            plan_id=draft.plan_id,
+            modality=draft.validation_modality,
+            artifact_ids=draft.artifact_ids,
+        )
+        if draft.plan_id is not None:
+            plan = repository.get_research_verification_plan(context.workspace_id, draft.plan_id)
+            if plan is None or plan["claim_revision_id"] != claim_id:
+                raise InvalidEvidenceError(
+                    "plan_id", "The verification plan is not bound to this ClaimRevision"
+                )
+        bases = []
+        limitations = []
+        if (
+            draft.validation_modality is ValidationModality.KERNEL_CHECK
+            and lineage.toolchain_hash
+            and str(lineage.principal_id or "").startswith("system:verifier:")
+            and lineage.model_route is None
+        ):
+            bases.append("orthogonal_non_llm_checker")
+        if lineage.model_route:
+            limitations.append("model-mediated verification is not independent by itself")
+        if not bases:
+            limitations.append("no orthogonal independence basis was derived")
+        independence_value = {
+            "contract_version": "verification.independence-derived.v1",
+            "derived": True,
+            "basis": bases,
+            "limitations": limitations,
+        }
+        qualifies_as_independent = "orthogonal_non_llm_checker" in bases
         try:
             receipt = self._evidence.create_receipt(
                 context,
@@ -514,8 +544,10 @@ class ResearchRegistryService:
                     metadata={
                         **redact(draft.metadata),
                         "claim_revision_id": claim_id,
-                        "independent": draft.independent,
-                        "independence_self_attested": draft.independent,
+                        "independent": qualifies_as_independent,
+                        "independence": independence_value,
+                        "verifier_lineage": lineage.as_dict(),
+                        "validation_modality": draft.validation_modality.value,
                         "scope": scope,
                     },
                 ),
@@ -538,7 +570,10 @@ class ResearchRegistryService:
                 "outcome": draft.outcome.value,
                 "method": method,
                 "scope": scope,
-                "independent": draft.independent,
+                "independent": qualifies_as_independent,
+                "independence": independence_value,
+                "validation_modality": draft.validation_modality.value,
+                "verifier_lineage": lineage.as_dict(),
                 "input_digest": draft.input_digest,
                 "output_digest": draft.output_digest,
                 "artifact_ids": list(draft.artifact_ids),
@@ -617,11 +652,7 @@ class ResearchRegistryService:
             required_attempt_id,
         )
         blockers = [item["code"] for item in criteria if not item["passed"]]
-        decision = (
-            PromotionGateDecision.BLOCKED
-            if blockers
-            else PromotionGateDecision.PASSED
-        )
+        decision = PromotionGateDecision.BLOCKED if blockers else PromotionGateDecision.PASSED
         input_snapshot = {
             "policy_version": PROMOTION_POLICY_VERSION,
             "claim": {
@@ -646,6 +677,7 @@ class ResearchRegistryService:
                         "kind",
                         "outcome",
                         "independent",
+                        "independence",
                         "input_digest",
                         "output_digest",
                         "artifact_ids",
@@ -691,6 +723,7 @@ class ResearchRegistryService:
                     "input_digest": input_digest,
                     "evaluation_digest": evaluation_digest,
                     "criteria": criteria,
+                    "input_snapshot": input_snapshot,
                     "blockers": blockers,
                     "attempt_ids": [item["id"] for item in attempts],
                     "relation_ids": [item["id"] for item in relevant_relations],
@@ -780,10 +813,14 @@ class ResearchRegistryService:
                 }
             )
         if target_stage is ClaimPromotionStage.REVIEW_READY:
-            independent = [item for item in passed_attempts if item["independent"]]
+            independent = [
+                item
+                for item in passed_attempts
+                if ResearchRegistryService._qualified_independence(item)
+            ]
             criteria.append(
                 {
-                    "code": "declared_independent_passed_attempt_present",
+                    "code": "qualified_independence_passed_attempt_present",
                     "passed": bool(independent),
                     "observed": len(independent),
                 }
@@ -792,11 +829,12 @@ class ResearchRegistryService:
             artifact_bound = [
                 item
                 for item in passed_attempts
-                if item["independent"] and item.get("artifact_ids")
+                if ResearchRegistryService._qualified_independence(item)
+                and item.get("artifact_ids")
             ]
             criteria.append(
                 {
-                    "code": "artifact_bound_declared_independent_attempt_present",
+                    "code": "artifact_bound_qualified_independence_attempt_present",
                     "passed": bool(artifact_bound),
                     "observed": len(artifact_bound),
                 }
@@ -850,6 +888,14 @@ class ResearchRegistryService:
                 }
             )
         return criteria
+
+    @staticmethod
+    def _qualified_independence(attempt: dict) -> bool:
+        """Use only the server-derived compatibility projection."""
+
+        return bool(attempt.get("independent")) and bool(
+            (attempt.get("independence") or {}).get("derived")
+        )
 
     def _normalize_frontier(self, payload: dict) -> dict:
         registry_id = self._text("registry_id", payload.get("registry_id"), 200)
@@ -985,11 +1031,7 @@ class ResearchRegistryService:
                 blockers.append("source_refs_missing")
             if revision_status != "current":
                 blockers.append(f"revision_status:{revision_status}")
-            closure_status = (
-                ClaimClosureStatus.BLOCKED
-                if blockers
-                else ClaimClosureStatus.CLOSED
-            )
+            closure_status = ClaimClosureStatus.BLOCKED if blockers else ClaimClosureStatus.CLOSED
             claims.append(
                 ClaimRevisionDraft(
                     claim_key=claim_key,
@@ -1117,12 +1159,9 @@ class ResearchRegistryService:
         claim_types = Counter(item["claim_type"] for item in claims)
         closures = Counter(item["closure_status"] for item in claims)
         uncertainties = Counter(
-            item.get("status_axes", {}).get("uncertainty", "unknown")
-            for item in claims
+            item.get("status_axes", {}).get("uncertainty", "unknown") for item in claims
         )
-        causal = Counter(
-            item.get("status_axes", {}).get("causal", "unknown") for item in claims
-        )
+        causal = Counter(item.get("status_axes", {}).get("causal", "unknown") for item in claims)
         promotions = Counter(
             item.get("promotion_stage", ClaimPromotionStage.REGISTERED.value)
             for item in claims

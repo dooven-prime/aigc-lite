@@ -1,6 +1,6 @@
 # aigc-lite 产品与架构设计
 
-状态：Draft，面向 `0.3` 重构周期。
+状态：Draft，`0.4.0` 已冻结，下一阶段进入认证生命周期、依赖供应链和领域拆分。
 
 ## 1. 产品定义
 
@@ -55,8 +55,8 @@ Server、审计、用量和 Web UI。现有测试、Ruff 和前端构建均可�
    治理等待独立的 platform-admin 身份与 scope，不复用 workspace 角色；
 6. 已拆分登录签名密钥与凭据 master key，并使用版本化认证密文；后续仍需增加
    master key 轮换和批量重加密流程；
-7. Schema 通过应用启动时执行 DDL，没有版本化迁移，也没有 SQLite/PostgreSQL
-   一致性测试；
+7. Schema 已由 13 个 Alembic revision 管理，应用启动时升级到 head；SQLite 回归与
+   PostgreSQL 17 的真实迁移/repository contract 均进入 CI；
 8. Run/Step 已有首个同步聊天切片，但工具调用、流式事件、Artifact 和 Citation
    尚未接入执行账本；
 9. `main.py` 同时承担装配、协议模型、认证中间件、路由和业务编排，继续增加功能
@@ -187,7 +187,8 @@ ModelRoute
 配置保存 reference，不保存或传播 secret value：
 
 ```text
-CredentialRef: env://OPENAI_API_KEY
+DeploymentCredentialRef: env://OPENAI_API_KEY
+WorkspaceCredentialRef: encrypted-db://credential/UUID
 CredentialRef: encrypted-db://provider/<provider-id>
 ```
 
@@ -195,7 +196,8 @@ CredentialRef: encrypted-db://provider/<provider-id>
 
 - consumer 在每次上游操作边界解析一次，不跨操作缓存 secret；
 - API 只返回 `configured/source/writable`，永不返回值；
-- 环境变量 Provider 是默认核心能力；
+- 环境变量 Provider 只服务部署者静态配置，并要求显式变量 allowlist；workspace
+  持久化配置只能引用同 workspace 的 encrypted-db credential；
 - encrypted-db Provider 使用独立 `AIGC_LITE_MASTER_KEY`，不得从登录签名密钥派生；
 - 生产模式发现默认密钥、空 master key 或无法解密的记录时启动失败；
 - 日志、异常、审计 metadata 和 trace attributes 统一经过脱敏器。
@@ -330,6 +332,82 @@ Protocol -> Claim -> ExecutionReceipt -> Review -> FreezeManifest
 `manual_review`，概率或 argmax 不会直接触发工具和外部写操作。主机文件路径不进入 API，管理员
 通过上传显式提供 bundle，避免任意文件读取和本地路径泄漏。
 
+### 4.10 Qualification Plane
+
+Qualification 只回答“一个低成本生成物凭什么取得某种可使用资格”，不定义全局 trust flag：
+
+```text
+Q(ClaimRevision, QualificationProfile, EvidenceClosure, PolicyVersion)
+```
+
+系统分成 Semantic、Evidence、Authority 三本账和一个确定性 Gate。Verification 永远绑定 exact
+`revision_id + semantic_hash`；Artifact、Run、Attempt、Receipt 和 dependency binding 形成可哈希的
+Evidence DAG；`QualificationGate` 只读冻结输入并输出 `ADMITTED / BLOCKED / UNRESOLVED / STALE /
+NOT_APPLICABLE`。模型输出无权直接修改 claim semantics、qualification verdict、current binding 或
+authorization。
+
+`registered -> evidence_ready -> review_ready -> release_ready` 保留为 workflow stage，不作为证据强度。
+证据强度使用多轴向量：statement identity、artifact integrity、local correctness、semantic alignment、
+replayability、independent validation、external reality、disconfirmation。生命周期与证据强度继续分开。
+
+`DomainVerifierRegistry` 以不可重复的 profile id 注册代码内 verifier。首个 `math.formal.v1` 要求 formal
+proof、内容绑定的 kernel certificate、无 placeholder/额外公理、current dependency closure 和非模型
+semantic-alignment review。Profile snapshot/hash、policy hash、逐 criterion receipt 与 Evidence Vector
+随每次 Evaluation 冻结；只有 ADMITTED 产生 portable Qualification Receipt。
+Kernel modality 只接受服务端持有的 `system:verifier:*` identity 且拒绝 model route。Lean 4/Coq
+kernel process adapter 已接入：服务端选择固定 executable/argv/environment，在一次性工作目录执行
+冻结 proof，硬超时/取消并限制输出，记录 executable/toolchain hash、版本、退出码、axiom closure 和
+不夸大的 isolation disclosure，再生成 certificate、Run/Step、Artifact、Receipt 与 Attempt。Lean
+通过 `--trust=0` + `#print axioms`，Coq 通过 `Print Assumptions` 失败关闭 placeholder 和额外公理。
+客户端不能提交命令或 verifier identity，普通管理员上传 JSON 不能把自己提升为 kernel verifier。
+
+当前 `bounded_process` 不是 OS 安全沙箱，certificate 明确声明 network/host filesystem 未隔离；它适合
+管理员配置、受信 toolchain 的单文件 proof replay。公开接收任意 Lean metaprogram、Coq plugin 或项目
+依赖前，必须增加 container/VM runner、只读 toolchain、禁网、资源 cgroup/job 和可携带 dependency
+closure profile；临时目录不能被描述成这类保证。
+
+Verifier independence 不接受客户端 bool。服务端从 principal/workspace/Run/model route/plan/checker、
+toolchain/environment/data snapshot 绑定 `VerifierLineage`，再派生 orthogonal checker 等关系。多个同源
+Agent 的一致意见不会自动获得独立性。
+
+`qualified != authorized`。CurrentUseBinding 决定哪个历史 Qualification Receipt 当前可用于某个 retrieval
+scope；任何外部发布或高风险 Tool 还需要单独的 AuthorizationGrant，限定 actor/action/target/scope/
+budget/expiry/max_calls。统一搜索保留候选面，qualified-only search 是独立查询面。Assurance Bundle
+携带 Evaluation、Receipt、CurrentUseBinding 和 Grant，离线验证不再把 `release_ready` 当成 authority。
+
+### 4.11 Physical Capability Bridge
+
+物理运行时不进入核心依赖，而是作为独立 MCP Provider 进程：
+
+```text
+aigc-lite Agent / Scheduler
+        |
+        v
+Tool Catalog -- permission / budget / cancellation / Run-Step-Artifact
+        |
+        v
+aigc-lite-ros2 MCP bridge
+        |
+        +-- SimulatorBackend
+        +-- Nav2Backend -> ROS 2 Action + TF2 -> controller / robot
+```
+
+核心只增加通用 Tool 扩展元数据 seam。远程 tool 可以提高单工具风险、追加 scope、缩短 Provider
+超时并声明 capability metadata，但不能降低宿主配置的最低策略。ROS/DDS、消息类型、executor 与
+硬件驱动全部留在 `extensions/ros2-bridge`。
+
+第一条能力面只包含状态读取、检查、Nav2 导航和 Action 取消，不提供任意 Topic/Service/Action、
+参数、launch 或 shell。动作输入必须带幂等键；同键不同意图失败关闭。`robot.action-receipt.v1`
+保存环境身份、动作身份、前后观察、有限反馈、终态和停止确认。`indeterminate` 是一等终态：连接
+断开、取消超时或无法确认停止时不得折叠为 failed/cancelled，更不能继续假定机器人静止。
+
+Tool Catalog 的取消只负责把请求传播到 ROS Action。e-stop、安全控制器、watchdog、碰撞保护、
+速度/加速度限制和区域约束必须在 Agent/MCP 链路之外。motion tool 同时要求 `high` risk 和显式
+`robot:motion`/`robot:control` scope；这些额外 scope 默认不授予管理员，部署方必须显式配置。
+通用计划任务 `tool.call` 继续使用无 scope 的 scheduler identity，因此不能触发物理动作。若以后需要
+自主计划运动，应注册独立、窄权限的 TaskRunner target，并补充 robot lease、状态前置条件、恢复与
+人工接管策略，不能给通用 scheduler 注入 motion scope。
+
 ## 5. HTTP 表面
 
 ### 数据面
@@ -429,23 +507,36 @@ POST /api/v1/agent-runs/{run_id}/cancel
 验收：同一个 Agent run 可通过同步结果或事件流观察；本地/MCP 工具遵守同一权限和预算；
 禁用工具不会出现在模型或 MCP 的发现结果中。
 
-### M3：`0.5` Artifact 与特色工作流
+### M3：`0.4` Physical Capability Bridge
+
+- ROS 2 作为独立 MCP Provider，不污染核心依赖和领域对象；
+- 先完成 Nav2 Action、TF2 observation、取消传播、幂等键与 physical receipt；
+- SimulatorBackend 覆盖成功、失败、取消和 indeterminate，成为无 ROS CI 路径；
+- simulation/hardware 身份必须显式，物理安全与 Agent 授权分层；
+- 真实 ROS graph、Gazebo 和硬件验收单独运行，不能由模拟器测试代替。
+
+验收：同一 `navigate_to` 调用通过 Tool Catalog 产生 Run、Tool Step 和结构化 Artifact；没有 motion
+scope 时不可发现动作；取消能到达 backend；不能确认停止时保存为 `indeterminate`；核心包在没有
+ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
+
+### M4：`0.5` Artifact 与特色工作流
 
 - Artifact、Citation、Decision/Memory 的版本和来源闭环；
 - 以多模型研究/讨论/共识作为首个上层工作流；
 - 结果可回到 workspace search，并能追溯对应 Run、模型和工具；
 - 工作流保持可选，不把多 Agent 调度变成核心强依赖。
 
-### M4：可运营自托管版
+### M5：可运营自托管版
 
 - platform/workspace 角色闭环；
 - Alembic migration 与 PostgreSQL contract CI；
 - 配额、持久化限流、审计查询和使用量维度；
 - credential reference 管理与 master key 轮换流程；
-- health/readiness、结构化日志、OpenTelemetry 可选输出；
+- 已完成 dependency-free `/health` 与数据库/迁移/scheduler `/ready`；后续补结构化日志和
+  OpenTelemetry 可选输出；
 - 备份恢复和版本升级文档。
 
-### M5：扩展生态
+### M6：扩展生态
 
 - 将 knowledge/embedding/vector store 改成独立 capability seam；
 - 定义 Python entry point 插件发现和 manifest；
@@ -462,8 +553,9 @@ POST /api/v1/agent-runs/{run_id}/cancel
 4. 已完成：streaming chat 进入同一 Run 生命周期，完成、失败和取消可追踪；
 5. 已完成：抽取 Tool Catalog；本地与远程 MCP tool 共享发现、workspace/risk/scope
    权限、结果上限、脱敏和 Tool Step；Provider 发现与调用失败使用稳定安全投影；
-6. 已完成：环境变量与 workspace 持久化 MCP server 配置、`env://` Credential
-   Provider、动态配置刷新、单工具 timeout、入站 MCP 的 workspace Catalog 投影、
+6. 已完成：部署者静态 MCP server 配置与显式 allowlist 的 `env://` Credential
+   Provider、只接受同 workspace `encrypted-db://` 引用的持久化 MCP 配置、动态配置刷新、
+   单工具 timeout、入站 MCP 的 workspace Catalog 投影、
    独立版本化 master key、统一账本/审计脱敏、Alembic migration、带稳定错误码的
    MCP 探测状态，以及 write-only `encrypted-db://credential/UUID` Credential Provider；
    Agent 模型轮次、工具次数和墙钟预算，稳定 `limit_reached` 状态，以及模型/MCP 等待链的
@@ -504,6 +596,34 @@ POST /api/v1/agent-runs/{run_id}/cancel
     plan/run/attempt/artifact/evaluation 的稳定关联和输入输出摘要。无效模型输出、上游失败与取消
     均失败关闭并保留终态；自动 Gate 要求触发它的本次 Attempt 自身通过，不能借历史通过记录
     为失败执行顺带晋升。Agent 结果固定为非独立验证，不能自动满足独立 review criterion。
+14. 进行中：增加独立 `aigc-lite-ros2` Physical Capability Bridge。当前已完成通用 MCP tool 策略
+    元数据、显式管理员额外 scope、SimulatorBackend、Nav2/TF2 懒加载 adapter、状态/检查/导航/取消
+    capability、动作幂等和 `robot.action-receipt.v1`。无 ROS CI 验证 simulator、MCP 投影、权限、
+    取消、失败和 indeterminate；真实 Nav2/Gazebo/DDS 与硬件仍需单独集成环境验收。
+15. 已完成：增加 `assurance.bundle.v1` 可移植可信工件包。Research Case 可只读导出为确定性 ZIP，
+    将 Artifact 原始 payload、Claim/Relation、来源、Run/Step、Receipt、Citation、Verification
+    Plan/Execution/Attempt、Review、Promotion Gate 和限制声明纳入 manifest 哈希闭包；离线 CLI 在
+    不连接数据库、网络或模型的条件下校验成员、引用和可重算摘要，并输出多轴 Assurance 状态而非
+    总分。Verification Independence 同时从布尔值升级为重叠关系和依据结构；旧布尔声明不被推断
+    为独立，Agent 自查仍不能跨过 review gate。Execution 与 Gate 保存冻结输入快照，避免 Claim
+    后续晋升导致历史摘要不可重算。签名目录当前明确为 unsigned，后续可添加签名算法而不改变
+    核心成员格式。
+16. 已完成：增加 Qualification Plane 与 `math.formal.v1`。Qualification 是 exact ClaimRevision、
+    Profile、EvidenceClosure 和 PolicyVersion 的关系，不是 Artifact/Agent 的布尔属性；验证 lineage
+    由服务器从已有 Run/Plan/Artifact 绑定，确定性 Gate 独占 verdict，ADMITTED 才生成 portable
+    receipt。CurrentUse 与 AuthorizationGrant 分账，qualified-only retrieval 隔离候选知识；Assurance
+    Bundle 同步携带 qualification/authorization closure。
+17. 已完成：接入真实 Lean 4/Coq KernelVerifier Backend。命令与 checker identity 由服务端持有；
+    proof replay 受墙钟/输出限制并支持硬取消，axiom/placeholder closure 失败关闭，执行自动形成
+    Run、Step、proof/certificate Artifact、Receipt 与 server-derived VerificationAttempt。当前明确是
+    bounded host process，不冒充容器级不可信代码沙箱。
+18. 已完成：建立 `0.4.0` 发布候选的凭据和部署边界。workspace 自定义模型 endpoint
+    必须原子绑定自己的 encrypted credential，绝不继承平台 LLM key；非 loopback 启动要求
+    关闭 signup、替换 auth/master secret 并存在认证主体。React build 成为 wheel/Docker 唯一 UI，
+    CI 增加 core/ROS2 clean-install wheel、PostgreSQL 17 contract 与 hardened Docker smoke。
+19. 进行中：按领域拆分 transport、repository 与 UI view。第一刀把 credential/model/MCP
+    配置 API 移入显式依赖注入的 `api.configuration` router，并把 Models UI 移出 `App.tsx`；
+    后续 repository 拆分保持现有 `Repository` contract，不在发布加固提交中同时改写存储语义。
 
 每个切片都必须产生可查询的真实纵向行为，不为了目录完整度创建没有 consumer 的抽象。
 
@@ -519,4 +639,4 @@ POST /api/v1/agent-runs/{run_id}/cancel
 - Artifact：结果本体与 Citation 来源分离，并可从 Run/Step 双向追溯；
 - Transport：HTTP、MCP、UI 共享 application service；
 - 存储：显式 migration，同一 repository contract 覆盖 SQLite/PostgreSQL；
-- 扩展：先代码内 seam，第二个真实实现出现后再拆包。
+- 扩展：通用 capability 先代码内 seam；ROS 2 因平台依赖和物理安全边界从第一天保持独立进程与发行包。

@@ -18,6 +18,7 @@ from app.core.research import (
 )
 from app.repository import SQLiteRepository
 from app.services.artifacts import ArtifactService
+from app.services.assurance import AssuranceBundleService, AssuranceBundleVerifier
 from app.services.evidence import EvidenceService
 from app.services.research_registry import ResearchRegistryService
 from app.services.task_runner import TaskRunner
@@ -192,13 +193,38 @@ def test_verification_runner_versions_plan_and_closes_evidence_chain(tmp_path) -
     assert result["attempt"]["independent"] is False
     assert result["promotion"]["evaluation"]["decision"] == "passed"
     assert result["promotion"]["claim"]["promotion_stage"] == "evidence_ready"
-    assert repository.get_artifact("workspace-a", result["artifact"]["id"])[
-        "content_hash"
-    ] == result["execution"]["output_digest"]
+    assert (
+        repository.get_artifact("workspace-a", result["artifact"]["id"])["content_hash"]
+        == result["execution"]["output_digest"]
+    )
 
     detail = research.get_claim(context, claim["id"])
     assert [item["version"] for item in detail["verification_plans"]] == [2, 1]
     assert detail["verification_executions"][0]["status"] == "succeeded"
+
+    archive, _manifest = AssuranceBundleService(lambda: repository).export_zip(
+        context, claim["research_case_id"]
+    )
+    bundle_path = tmp_path / "verified-assurance.zip"
+    bundle_path.write_bytes(archive)
+    report = AssuranceBundleVerifier().verify(bundle_path)
+    assert report["valid"] is True
+    assert (
+        next(
+            item
+            for item in report["checks"]
+            if item["code"] == f"attempt_input_digest:{result['attempt']['id']}"
+        )["status"]
+        == "passed"
+    )
+    assert (
+        next(
+            item
+            for item in report["checks"]
+            if item["code"] == f"promotion_digest:{result['promotion']['evaluation']['id']}"
+        )["status"]
+        == "passed"
+    )
 
 
 def test_invalid_agent_result_is_retained_as_error_receipt_and_blocked_gate(
