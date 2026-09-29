@@ -624,8 +624,10 @@ ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
 19. 进行中：按领域拆分 transport、repository 与 UI view。已把 credential/model/MCP 配置
     API 移入 `api.configuration`，把 Research Registry、Decision Lab、Qualification Plane、
     Kernel Verification、Authorization Grant 与 Assurance Bundle HTTP 面移入显式依赖注入的
-    `api.research` router，并把 Models UI 移出 `App.tsx`；后续 repository 拆分保持现有
-    `Repository` contract，不在同一切片同时改写存储语义。
+    `api.research` router，并把 Models UI 移出 `App.tsx`。Research 与 Qualification
+    repository 已各自形成显式 Port 和 SQLite/PostgreSQL domain mixin，顶层 `Repository`、
+    `SQLiteRepository` 与 `PostgresRepository` 保留为兼容 facade；后续继续拆分其他领域时，
+    不在同一切片同时改写存储语义。
 
 每个切片都必须产生可查询的真实纵向行为，不为了目录完整度创建没有 consumer 的抽象。
 

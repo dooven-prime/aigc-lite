@@ -8,6 +8,9 @@ from starlette.routing import Route
 
 from app import database, main, tenancy
 from app.core.contracts import ChatResult
+from app.ports.qualification_repository import QualificationRepository
+from app.ports.research_repository import ResearchRepository
+from app.repository import PostgresRepository, Repository, SQLiteRepository
 
 
 def test_current_http_surface_remains_available() -> None:
@@ -66,6 +69,26 @@ def test_research_control_plane_is_owned_by_domain_router() -> None:
             "/api/authorization-grants",
         }
     } == {"app.api.research"}
+
+
+def test_research_repository_domains_are_composed_into_compatibility_facade() -> None:
+    assert ResearchRepository in Repository.__mro__
+    assert QualificationRepository in Repository.__mro__
+    domains = (
+        (ResearchRepository, "app.repositories.research"),
+        (QualificationRepository, "app.repositories.qualification"),
+    )
+    for port, module in domains:
+        methods = {
+            name
+            for name, value in port.__dict__.items()
+            if not name.startswith("_") and callable(value)
+        }
+        assert methods
+        for implementation in (SQLiteRepository, PostgresRepository):
+            assert {
+                getattr(implementation, method).__module__ for method in methods
+            } == {module}
 
 
 def test_sessions_and_documents_are_isolated_across_tenant_api_keys(

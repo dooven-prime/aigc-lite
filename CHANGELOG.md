@@ -9,6 +9,10 @@ roadmap items remain in `docs/DESIGN.md`.
   Lab, Qualification Plane, kernel verification, authorization grant, and
   Assurance Bundle HTTP contracts into an explicitly injected `api.research`
   router without changing their persisted evidence or authority semantics.
+- Split the relational repository into explicit Research and Qualification
+  ports plus SQLite/PostgreSQL domain mixins. The existing `Repository`,
+  `SQLiteRepository`, and `PostgresRepository` names remain compatibility
+  facades, so application services keep the same transactional behavior.
 
 ## 0.4.1 - 2026-09-29
 
