@@ -56,7 +56,7 @@ class RobotMCPServer(MCPServer):
                         idempotentHint=spec.idempotent,
                         openWorldHint=True,
                     ),
-                    _meta=spec.metadata,
+                    _meta=spec.metadata_for(self._bridge_settings.robot_id),
                 )
                 for spec in CAPABILITIES
             ],

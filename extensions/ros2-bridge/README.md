@@ -78,6 +78,14 @@ only increase risk, add scopes, or shorten the configured timeout. Without the
 explicit admin scopes above, administrators can inspect state but cannot
 discover the motion tools.
 
+Scopes only make a physical tool discoverable. Before dispatch, the main
+runtime also atomically consumes a current `AuthorizationGrant` whose actor is
+the authenticated principal, whose action is the native tool name (for example
+`robot_navigate_to`), and whose target is
+`provider:<workspace MCP provider id>/robot:<AIGC_LITE_ROS2_ROBOT_ID>`.
+Expired, exhausted, stale-receipt, or missing grants fail closed without calling
+the bridge. The consumed grant identity is written into Tool Step metadata.
+
 The generic scheduled `tool.call` target intentionally runs without elevated
 scopes, so it cannot schedule robot motion. A future autonomous physical task
 must be a dedicated narrow `TaskRunner` target with its own authorization,

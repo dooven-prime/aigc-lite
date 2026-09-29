@@ -168,32 +168,58 @@ def test_bridge_projects_policy_through_remote_mcp_catalog() -> None:
             timeout_seconds=180,
             transport_factory=transport,
         )
-        catalog = ToolCatalog([provider])
+        consumed = []
+
+        def authorize(context, spec):
+            consumed.append((context.principal_id, spec.native_name))
+            return {
+                "id": "grant-robot-1",
+                "qualification_receipt_id": "receipt-robot-1",
+                "calls_used": 1,
+                "max_calls": 1,
+            }
+
+        denied_catalog = ToolCatalog([provider])
+        catalog = ToolCatalog([provider], authorization_gate=authorize)
         async with server.session_manager.run():
             ordinary = await catalog.open(
                 RequestContext(request_id="r1", workspace_id="workspace-a")
+            )
+            denied_session = await denied_catalog.open(
+                RequestContext(
+                    request_id="r-denied",
+                    workspace_id="workspace-a",
+                    principal_id="robot-operator-a",
+                    scopes=frozenset({"tools:high-risk", "robot:motion"}),
+                )
             )
             elevated = await catalog.open(
                 RequestContext(
                     request_id="r2",
                     workspace_id="workspace-a",
+                    principal_id="robot-operator-a",
                     scopes=frozenset({"tools:high-risk", "robot:motion"}),
                 )
             )
+            arguments = json.dumps(
+                {
+                    "idempotency_key": "mcp-navigation-001",
+                    "x": 2,
+                    "y": 3,
+                    "yaw": 0,
+                }
+            )
+            denied = await denied_session.invoke(
+                "robot__robot_navigate_to",
+                arguments,
+            )
             result = await elevated.invoke(
                 "robot__robot_navigate_to",
-                json.dumps(
-                    {
-                        "idempotency_key": "mcp-navigation-001",
-                        "x": 2,
-                        "y": 3,
-                        "yaw": 0,
-                    }
-                ),
+                arguments,
             )
-        return ordinary, elevated, result
+        return ordinary, elevated, denied, result, consumed
 
-    ordinary, elevated, result = asyncio.run(run())
+    ordinary, elevated, denied, result, consumed = asyncio.run(run())
     ordinary_names = {item.name for item in ordinary.specs}
     assert ordinary_names == {"robot__robot_get_state", "robot__robot_inspect"}
     navigate = next(item for item in elevated.specs if item.name == "robot__robot_navigate_to")
@@ -201,8 +227,22 @@ def test_bridge_projects_policy_through_remote_mcp_catalog() -> None:
     assert navigate.required_scopes == frozenset({"robot:motion"})
     assert navigate.timeout_seconds == 150
     assert navigate.extensions["capability"]["effect_class"] == "physical_motion"
+    assert navigate.extensions["authority_requirement"] == {
+        "required": True,
+        "action": "robot_navigate_to",
+        "target": "robot:sim-mcp",
+    }
     assert "robot__robot_cancel_action" not in {item.name for item in elevated.specs}
+    assert denied.failed
+    assert json.loads(denied.content) == {"error": "tool_authorization_required"}
     assert not result.failed
+    assert consumed == [("robot-operator-a", "robot_navigate_to")]
+    assert result.metadata["authorization"]["grant_id"] == "grant-robot-1"
+    assert result.metadata["authorization"]["status"] == "consumed"
+    assert (
+        result.metadata["authorization"]["target"]
+        == "provider:robot/robot:sim-mcp"
+    )
     assert json.loads(result.content)["status"] == "succeeded"
     assert result.metadata["extensions"]["capability"]["physical_risk"] == "high"
     assert result.artifacts[0].metadata["mcp_content_type"] == "structured_content"

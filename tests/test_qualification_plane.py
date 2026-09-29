@@ -2,8 +2,11 @@ import io
 import json
 import zipfile
 
+import pytest
+
 from app.core.artifacts import ArtifactDraft, ArtifactKind
-from app.core.contracts import RequestContext
+from app.core.contracts import RequestContext, ToolHints, ToolRisk, ToolSource, ToolSpec
+from app.core.errors import InvalidEvidenceError
 from app.core.kernel_verification import KERNEL_EXECUTION_CONTRACT_VERSION
 from app.core.qualification import (
     AuthorizationGrantDraft,
@@ -21,6 +24,7 @@ from app.profiles.math_theorem import KERNEL_CERTIFICATE_VERSION, PROFILE_ID
 from app.repository import SQLiteRepository
 from app.services.artifacts import ArtifactService
 from app.services.assurance import AssuranceBundleService, AssuranceBundleVerifier
+from app.services.authorization import ToolAuthorizationGate
 from app.services.evidence import EvidenceService
 from app.services.qualification import QualificationService
 from app.services.research_registry import ResearchRegistryService
@@ -139,6 +143,33 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
         workspace_id=context.workspace_id,
         principal_id="system:verifier:lean-kernel",
     )
+    invalid_certificate = artifacts.create_artifact(
+        context,
+        ArtifactDraft(
+            name="sum-even.invalid-kernel-certificate.json",
+            kind=ArtifactKind.JSON,
+            media_type="application/json",
+            content_text=json.dumps(
+                {**certificate_payload, "axioms": ["Classical.choice"]},
+                sort_keys=True,
+            ),
+            metadata={"role": "kernel_certificate"},
+        ),
+    )
+    research.record_verification_attempt(
+        kernel_context,
+        claim["id"],
+        VerificationAttemptDraft(
+            kind=VerificationKind.CALCULATION,
+            outcome=VerificationOutcome.PASSED,
+            validation_modality=ValidationModality.KERNEL_CHECK,
+            method="Replay an older proof that imports an undeclared axiom.",
+            scope="Negative certificate selection fixture.",
+            input_digest=claim["semantic_hash"],
+            output_digest=invalid_certificate["content_hash"],
+            artifact_ids=(proof["id"], invalid_certificate["id"]),
+        ),
+    )
     kernel_attempt = research.record_verification_attempt(
         kernel_context,
         claim["id"],
@@ -217,6 +248,90 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
     assert offline["valid"] is True
     assert offline["assurance"]["epistemic_state"]["status"] == "supported"
     assert offline["assurance"]["authority_state"]["status"] == "authorized"
+
+    consumed = repository.consume_authorization_grant(
+        context.workspace_id,
+        "runtime:math-publisher",
+        "publish",
+        "knowledge/math",
+        "2026-09-29T00:00:00+00:00",
+    )
+    assert consumed is not None
+    assert consumed["id"] == grant["id"]
+    assert consumed["calls_used"] == 1
+    assert (
+        repository.consume_authorization_grant(
+            context.workspace_id,
+            "runtime:math-publisher",
+            "publish",
+            "knowledge/math",
+            "2026-09-29T00:00:01+00:00",
+        )
+        is None
+    )
+
+    superseding = qualification.evaluate(context, claim["id"], PROFILE_ID)
+    current_receipt = superseding["qualification_receipt"]
+    assert current_receipt["id"] != receipt["id"]
+    with pytest.raises(InvalidEvidenceError, match="current binding"):
+        qualification.create_authorization(
+            context,
+            "runtime:math-publisher",
+            AuthorizationGrantDraft(
+                qualification_receipt_id=receipt["id"],
+                action="publish",
+                target="knowledge/math",
+                scope={"claim_revision_id": claim["id"]},
+            ),
+        )
+    qualification.create_authorization(
+        context,
+        "runtime:math-publisher",
+        AuthorizationGrantDraft(
+            qualification_receipt_id=current_receipt["id"],
+            action="publish-current",
+            target="knowledge/math",
+            scope={"claim_revision_id": claim["id"]},
+        ),
+    )
+    physical_grant = qualification.create_authorization(
+        context,
+        context.principal_id,
+        AuthorizationGrantDraft(
+            qualification_receipt_id=current_receipt["id"],
+            action="robot_navigate_to",
+            target="provider:robot/robot:sim-mcp",
+            scope={"claim_revision_id": claim["id"]},
+        ),
+    )
+    consumed_physical = ToolAuthorizationGate(lambda: repository).authorize_and_consume(
+        context,
+        ToolSpec(
+            name="robot__robot_navigate_to",
+            native_name="robot_navigate_to",
+            description="Navigate.",
+            input_schema={"type": "object"},
+            source=ToolSource.MCP,
+            provider_id="robot",
+            risk=ToolRisk.HIGH,
+            required_scopes=frozenset({"robot:motion"}),
+            hints=ToolHints(read_only=False),
+            extensions={
+                "capability": {
+                    "execution_class": "physical",
+                    "effect_class": "physical_motion",
+                },
+                "authority_requirement": {
+                    "required": True,
+                    "action": "robot_navigate_to",
+                    "target": "robot:sim-mcp",
+                },
+            },
+        ),
+    )
+    assert consumed_physical is not None
+    assert consumed_physical["id"] == physical_grant["id"]
+    assert consumed_physical["calls_used"] == 1
     with repository._connect() as connection:
         connection.execute(
             "UPDATE research_claim_revisions SET scope = ? WHERE tenant_id = ? AND id = ?",
@@ -236,9 +351,10 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
     )
     with zipfile.ZipFile(io.BytesIO(stale_archive)) as bundle:
         qualification_document = json.loads(bundle.read("qualification.json"))
-    assert [item["id"] for item in qualification_document["receipts"]] == [
-        receipt["id"]
-    ]
+    assert {item["id"] for item in qualification_document["receipts"]} == {
+        receipt["id"],
+        current_receipt["id"],
+    }
     stale_path = tmp_path / "stale-assurance.zip"
     stale_path.write_bytes(stale_archive)
     stale_offline = AssuranceBundleVerifier().verify(stale_path)
@@ -270,3 +386,162 @@ def test_semantic_change_invalidates_prior_hash_instead_of_inheriting(tmp_path) 
     assert result["evaluation"]["verdict"] == QualificationVerdict.STALE
     assert result["evaluation"]["blockers"] == ["statement_drift"]
     assert result["qualification_receipt"] is None
+
+
+def test_duplicate_dependencies_are_normalized_before_evidence_edges(tmp_path) -> None:
+    _repository, _artifacts, _research, qualification = _services(tmp_path)
+    context = RequestContext("dependency-dedup", "workspace-a", "reviewer-a")
+    dependency = qualification.register_math_theorem(
+        context,
+        MathTheoremCandidateDraft(
+            claim_key="THM-DEPENDENCY",
+            name="Dependency",
+            statement="P.",
+            scope="Fixture.",
+        ),
+    )["claim"]
+    dependent = qualification.register_math_theorem(
+        context,
+        MathTheoremCandidateDraft(
+            claim_key="THM-DEPENDENT",
+            name="Dependent",
+            statement="P implies Q.",
+            scope="Fixture.",
+            dependency_claim_ids=(dependency["id"], dependency["id"]),
+        ),
+    )["claim"]
+
+    assert dependent["dependency_claim_ids"] == [dependency["id"]]
+    evaluated = qualification.evaluate(context, dependent["id"], PROFILE_ID)
+    dependency_nodes = [
+        item
+        for item in evaluated["evaluation"]["evidence_closure"]["nodes"]
+        if item["node_type"] == "dependency_binding"
+    ]
+    assert [item["node_id"] for item in dependency_nodes] == [dependency["id"]]
+
+
+def test_refresh_binding_propagates_transitive_dependency_staleness() -> None:
+    def claim(claim_id: str) -> dict:
+        value = {
+            "id": claim_id,
+            "claim_key": claim_id,
+            "revision_number": 1,
+            "claim_type": "mathematical_theorem",
+            "statement": claim_id,
+            "scope": "Fixture.",
+            "definitions": [],
+            "negative_boundaries": [],
+            "dependency_claim_ids": [],
+            "parent_revision_id": None,
+        }
+        return {**value, "semantic_hash": claim_semantic_hash(value)}
+
+    claims = {claim_id: claim(claim_id) for claim_id in ("A", "B", "C")}
+    receipts = {
+        "receipt-A": {
+            "id": "receipt-A",
+            "claim_revision_id": "A",
+            "claim_semantic_hash": claims["A"]["semantic_hash"],
+            "profile_id": PROFILE_ID,
+            "evaluation_id": "evaluation-A",
+        },
+        "receipt-B": {
+            "id": "receipt-B",
+            "claim_revision_id": "B",
+            "claim_semantic_hash": claims["B"]["semantic_hash"],
+            "profile_id": PROFILE_ID,
+            "evaluation_id": "evaluation-B",
+        },
+        "receipt-C2": {
+            "id": "receipt-C2",
+            "claim_revision_id": "C",
+            "claim_semantic_hash": claims["C"]["semantic_hash"],
+            "profile_id": PROFILE_ID,
+            "evaluation_id": "evaluation-C2",
+        },
+    }
+    bindings = {
+        claim_id: {
+            "id": f"binding-{claim_id}",
+            "tenant_id": "workspace-a",
+            "claim_revision_id": claim_id,
+            "profile_id": PROFILE_ID,
+            "use_scope": "knowledge",
+            "qualification_receipt_id": receipt_id,
+            "state": "current",
+            "stale_reason": None,
+        }
+        for claim_id, receipt_id in {
+            "A": "receipt-A",
+            "B": "receipt-B",
+            "C": "receipt-C2",
+        }.items()
+    }
+    evaluations = {
+        "A": {
+            "id": "evaluation-A",
+            "evidence_closure": {
+                "nodes": [
+                    {
+                        "node_type": "dependency_binding",
+                        "node_id": "B",
+                        "payload": {"qualification_receipt_id": "receipt-B"},
+                    }
+                ]
+            },
+        },
+        "B": {
+            "id": "evaluation-B",
+            "evidence_closure": {
+                "nodes": [
+                    {
+                        "node_type": "dependency_binding",
+                        "node_id": "C",
+                        "payload": {"qualification_receipt_id": "receipt-C1"},
+                    }
+                ]
+            },
+        },
+        "C": {"id": "evaluation-C2", "evidence_closure": {"nodes": []}},
+    }
+
+    class DependencyRepository:
+        def get_qualification_receipt(self, tenant_id, receipt_id):
+            assert tenant_id == "workspace-a"
+            return receipts.get(receipt_id)
+
+        def get_research_claim(self, tenant_id, claim_id):
+            assert tenant_id == "workspace-a"
+            return claims.get(claim_id)
+
+        def list_qualification_evaluations(self, tenant_id, claim_id, profile_id):
+            assert tenant_id == "workspace-a"
+            assert profile_id == PROFILE_ID
+            return [evaluations[claim_id]]
+
+        def get_current_use_binding(
+            self, tenant_id, claim_id, profile_id, use_scope="knowledge"
+        ):
+            assert tenant_id == "workspace-a"
+            assert profile_id == PROFILE_ID
+            assert use_scope == "knowledge"
+            value = bindings.get(claim_id)
+            return dict(value) if value is not None else None
+
+        def upsert_current_use_binding(self, tenant_id, values):
+            assert tenant_id == "workspace-a"
+            bindings[values["claim_revision_id"]] = dict(values)
+            return dict(values)
+
+    service = QualificationService(lambda: DependencyRepository())
+    refreshed = service._refresh_binding(
+        RequestContext("transitive-refresh", "workspace-a", "reviewer-a"),
+        dict(bindings["A"]),
+    )
+
+    assert refreshed["state"] == "stale"
+    assert refreshed["stale_reason"] == "dependency_binding_changed:B"
+    assert bindings["B"]["state"] == "stale"
+    assert bindings["B"]["stale_reason"] == "dependency_binding_changed:C"
+    assert bindings["C"]["state"] == "current"

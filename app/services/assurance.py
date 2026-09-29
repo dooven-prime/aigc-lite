@@ -8,6 +8,7 @@ import json
 import re
 import zipfile
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -793,11 +794,14 @@ def _assurance_vector(documents: dict[str, object], *, integrity_ok: bool) -> di
         if isinstance(qualification_doc, dict)
         else []
     )
+    evaluated_at = datetime.now(UTC)
     active_grants = [
         item
         for item in grants
         if item.get("state") == "active"
         and item.get("qualification_receipt_id") in current_receipt_ids
+        and int(item.get("calls_used") or 0) < int(item.get("max_calls") or 0)
+        and _grant_not_expired(item, evaluated_at)
     ]
     passed_by_claim = {
         attempt.get("claim_revision_id")
@@ -875,3 +879,14 @@ def _assurance_vector(documents: dict[str, object], *, integrity_ok: bool) -> di
             "authorization_grant_ids": [item.get("id") for item in active_grants],
         },
     }
+
+
+def _grant_not_expired(grant: dict[str, Any], evaluated_at: datetime) -> bool:
+    expires_at = grant.get("expires_at")
+    if not expires_at:
+        return True
+    try:
+        expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return expiry.tzinfo is not None and expiry > evaluated_at

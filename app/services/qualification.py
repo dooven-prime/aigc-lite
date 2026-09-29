@@ -135,7 +135,12 @@ class MathTheoremVerifier:
             and item["payload"].get("outcome") == "passed"
             and not item["payload"].get("verifier_lineage", {}).get("model_route")
         ]
-        certificate, certificate_artifact_id = self._kernel_certificate(kernel_attempts, artifacts)
+        certificate, certificate_artifact_id = self._kernel_certificate(
+            kernel_attempts,
+            artifacts,
+            claim_revision_id=closure.claim_revision_id,
+            claim_semantic_hash=closure.claim_semantic_hash,
+        )
         identity_ok = (
             bool(payload.get("semantic_hash"))
             and payload.get("semantic_hash") == closure.claim_semantic_hash
@@ -272,10 +277,15 @@ class MathTheoremVerifier:
 
     @staticmethod
     def _kernel_certificate(
-        attempts: list[dict], artifacts: dict[str, dict]
+        attempts: list[dict],
+        artifacts: dict[str, dict],
+        *,
+        claim_revision_id: str,
+        claim_semantic_hash: str,
     ) -> tuple[dict[str, Any] | None, str | None]:
-        for attempt in attempts:
-            for artifact_id in attempt["payload"].get("artifact_ids", []):
+        fallback: tuple[dict[str, Any], str] | None = None
+        for attempt in reversed(attempts):
+            for artifact_id in reversed(attempt["payload"].get("artifact_ids", [])):
                 artifact = artifacts.get(artifact_id)
                 if not artifact or artifact.get("metadata", {}).get("role") != "kernel_certificate":
                     continue
@@ -284,8 +294,56 @@ class MathTheoremVerifier:
                 except (TypeError, json.JSONDecodeError):
                     continue
                 if isinstance(value, dict):
-                    return value, artifact_id
-        return None, None
+                    candidate = (value, artifact_id)
+                    if fallback is None:
+                        fallback = candidate
+                    if MathTheoremVerifier._valid_kernel_certificate(
+                        value,
+                        artifacts,
+                        claim_revision_id=claim_revision_id,
+                        claim_semantic_hash=claim_semantic_hash,
+                    ):
+                        return candidate
+        return fallback or (None, None)
+
+    @staticmethod
+    def _valid_kernel_certificate(
+        certificate: dict[str, Any],
+        artifacts: dict[str, dict],
+        *,
+        claim_revision_id: str,
+        claim_semantic_hash: str,
+    ) -> bool:
+        checker = certificate.get("checker")
+        invocation = certificate.get("invocation")
+        isolation = certificate.get("isolation")
+        proof = artifacts.get(certificate.get("proof_artifact_id"))
+        return bool(
+            certificate.get("contract_version") == KERNEL_CERTIFICATE_VERSION
+            and certificate.get("execution_contract_version")
+            == KERNEL_EXECUTION_CONTRACT_VERSION
+            and certificate.get("claim_revision_id") == claim_revision_id
+            and certificate.get("claim_semantic_hash") == claim_semantic_hash
+            and certificate.get("status") == "passed"
+            and certificate.get("axioms") == []
+            and certificate.get("sorry_present") is False
+            and certificate.get("dependencies") == []
+            and isinstance(checker, dict)
+            and checker.get("backend") in {"lean4", "coq"}
+            and checker.get("name")
+            and checker.get("version")
+            and _SHA256.fullmatch(str(checker.get("executable_hash") or ""))
+            and _SHA256.fullmatch(str(checker.get("toolchain_hash") or ""))
+            and isinstance(invocation, dict)
+            and isinstance(invocation.get("command"), list)
+            and bool(invocation.get("command"))
+            and invocation.get("exit_code") == 0
+            and isinstance(isolation, dict)
+            and isolation.get("shell") is False
+            and isolation.get("request_controls_command") is False
+            and proof is not None
+            and proof.get("content_hash") == certificate.get("proof_artifact_hash")
+        )
 
     @staticmethod
     def _criterion(
@@ -382,8 +440,9 @@ class QualificationService:
             raise InvalidEvidenceError(
                 "claim", "definitions and negative boundaries are bounded to 100 items"
             )
+        dependency_claim_ids = tuple(dict.fromkeys(draft.dependency_claim_ids))
         repository = self._repository_provider()
-        for dependency_id in draft.dependency_claim_ids:
+        for dependency_id in dependency_claim_ids:
             if repository.get_research_claim(context.workspace_id, dependency_id) is None:
                 raise ResourceNotFoundError("research_claim", dependency_id)
         if (
@@ -401,7 +460,7 @@ class QualificationService:
             "scope": scope,
             "definitions": list(definitions),
             "negative_boundaries": list(negative_boundaries),
-            "dependency_claim_ids": list(draft.dependency_claim_ids),
+            "dependency_claim_ids": list(dependency_claim_ids),
             "parent_revision_id": draft.parent_revision_id,
         }
         semantic_hash = claim_semantic_hash(semantic_input)
@@ -604,6 +663,26 @@ class QualificationService:
             raise ResourceNotFoundError("qualification_receipt", receipt_id)
         return self._portable_receipt(value)
 
+    def refresh_receipt_binding(
+        self,
+        context: RequestContext,
+        receipt_id: str,
+    ) -> dict | None:
+        """Refresh the exact receipt's binding before an authority decision."""
+
+        repository = self._repository_provider()
+        receipt = repository.get_qualification_receipt(context.workspace_id, receipt_id)
+        if receipt is None:
+            return None
+        binding = repository.get_current_use_binding(
+            context.workspace_id,
+            receipt["claim_revision_id"],
+            receipt["profile_id"],
+        )
+        if binding is None or binding.get("qualification_receipt_id") != receipt_id:
+            return binding
+        return self._refresh_binding(context, binding)
+
     def create_authorization(
         self,
         context: RequestContext,
@@ -631,6 +710,11 @@ class QualificationService:
             raise InvalidEvidenceError(
                 "qualification_receipt_id",
                 "Authorization cannot use a stale qualification binding",
+            )
+        if binding["qualification_receipt_id"] != receipt["id"]:
+            raise InvalidEvidenceError(
+                "qualification_receipt_id",
+                "Authorization requires the receipt selected by the current binding",
             )
         if draft.max_calls < 1 or draft.max_calls > 1_000_000:
             raise InvalidEvidenceError("max_calls", "max_calls is outside policy bounds")
@@ -842,7 +926,7 @@ class QualificationService:
                             None,
                         )
                     )
-        for dependency_id in claim.get("dependency_claim_ids") or []:
+        for dependency_id in dict.fromkeys(claim.get("dependency_claim_ids") or []):
             binding = repository.get_current_use_binding(
                 context.workspace_id, dependency_id, profile_id
             )
@@ -895,12 +979,31 @@ class QualificationService:
             limitations=tuple(limitations),
         )
 
-    def _refresh_binding(self, context: RequestContext, binding: dict) -> dict:
+    def _refresh_binding(
+        self,
+        context: RequestContext,
+        binding: dict,
+        *,
+        _path: frozenset[tuple[str, str]] | None = None,
+    ) -> dict:
         """Lazily propagate semantic/dependency taint without erasing history."""
 
         if binding["state"] != CurrentUseState.CURRENT.value:
             return binding
         repository = self._repository_provider()
+        binding_key = (binding["claim_revision_id"], binding["profile_id"])
+        path = _path or frozenset()
+        if binding_key in path:
+            return repository.upsert_current_use_binding(
+                context.workspace_id,
+                {
+                    **binding,
+                    "state": CurrentUseState.STALE.value,
+                    "stale_reason": "dependency_cycle",
+                    "bound_by": "system:taint-propagation",
+                },
+            )
+        path = path | {binding_key}
         receipt = repository.get_qualification_receipt(
             context.workspace_id, binding["qualification_receipt_id"]
         )
@@ -930,6 +1033,12 @@ class QualificationService:
                     node.get("node_id"),
                     receipt["profile_id"],
                 )
+                if current is not None:
+                    current = self._refresh_binding(
+                        context,
+                        current,
+                        _path=path,
+                    )
                 if (
                     current is None
                     or current.get("state") != CurrentUseState.CURRENT.value

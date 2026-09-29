@@ -6,7 +6,11 @@ import zipfile
 from app.core.contracts import RequestContext
 from app.repository import SQLiteRepository
 from app.services.artifacts import ArtifactService
-from app.services.assurance import AssuranceBundleService, AssuranceBundleVerifier
+from app.services.assurance import (
+    AssuranceBundleService,
+    AssuranceBundleVerifier,
+    _assurance_vector,
+)
 from app.services.evidence import EvidenceService
 from app.services.research_registry import ResearchRegistryService
 
@@ -129,3 +133,46 @@ def test_assurance_bundle_detects_tampered_member(tmp_path) -> None:
         next(item for item in report["checks"] if item["code"] == "member:claims.json")["status"]
         == "failed"
     )
+
+
+def test_assurance_authority_excludes_expired_and_exhausted_grants() -> None:
+    grant = {
+        "id": "grant-1",
+        "qualification_receipt_id": "receipt-1",
+        "state": "active",
+        "expires_at": "2000-01-01T00:00:00+00:00",
+        "calls_used": 0,
+        "max_calls": 2,
+    }
+    documents = {
+        "qualification.json": {
+            "receipts": [{"id": "receipt-1", "verdict": "ADMITTED"}],
+            "current_use_bindings": [
+                {
+                    "qualification_receipt_id": "receipt-1",
+                    "state": "current",
+                }
+            ],
+            "authorization_grants": [grant],
+        }
+    }
+
+    expired = _assurance_vector(documents, integrity_ok=True)
+    assert expired["authority_state"] == {
+        "status": "blocked",
+        "authorization_grant_ids": [],
+    }
+
+    grant["expires_at"] = "2999-01-01T00:00:00+00:00"
+    current = _assurance_vector(documents, integrity_ok=True)
+    assert current["authority_state"] == {
+        "status": "authorized",
+        "authorization_grant_ids": ["grant-1"],
+    }
+
+    grant["calls_used"] = 2
+    exhausted = _assurance_vector(documents, integrity_ok=True)
+    assert exhausted["authority_state"] == {
+        "status": "blocked",
+        "authorization_grant_ids": [],
+    }

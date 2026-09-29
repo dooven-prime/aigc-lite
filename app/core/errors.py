@@ -22,6 +22,7 @@ class ErrorCode(StrEnum):
     TOOL_EXECUTION_FAILED = "tool_execution_failed"
     TOOL_PROVIDER_UNAVAILABLE = "tool_provider_unavailable"
     TOOL_PROVIDER_CONFLICT = "tool_provider_conflict"
+    TOOL_AUTHORIZATION_REQUIRED = "tool_authorization_required"
     TOOL_TIMEOUT = "tool_timeout"
     CREDENTIAL_NOT_CONFIGURED = "credential_not_configured"
     CREDENTIAL_KEY_NOT_CONFIGURED = "credential_key_not_configured"

@@ -26,6 +26,7 @@ from ..database import get_repository
 from ..ports.tools import ToolProvider, ToolProviderSource
 from ..redaction import redact, redact_record_text
 from ..repository import Repository
+from .authorization import ToolAuthorizationGate, tool_authorization_requirement
 
 _RISK_SCOPES = {
     ToolRisk.LOW: frozenset(),
@@ -47,9 +48,15 @@ class ToolSession:
         self,
         entries: dict[str, tuple[ToolSpec, ToolProvider]],
         discovery_errors: dict[str, str] | None = None,
+        *,
+        context: RequestContext,
+        authorization_gate: Callable[[RequestContext, ToolSpec], dict[str, Any] | None]
+        | None = None,
     ) -> None:
         self._entries = entries
         self._discovery_errors = discovery_errors or {}
+        self._context = context
+        self._authorization_gate = authorization_gate
 
     @property
     def specs(self) -> list[ToolSpec]:
@@ -89,6 +96,49 @@ class ToolSession:
                 metadata=self._metadata(spec),
             )
 
+        authorization_metadata: dict[str, Any] = {}
+        requirement = tool_authorization_requirement(spec)
+        if requirement is not None:
+            grant = None
+            if self._authorization_gate is not None:
+                try:
+                    grant = self._authorization_gate(self._context, spec)
+                except Exception:  # noqa: BLE001 - fail closed without leaking policy state
+                    grant = None
+            if not grant:
+                error_code = ErrorCode.TOOL_AUTHORIZATION_REQUIRED.value
+                error = json.dumps({"error": error_code})
+                return ToolInvocationResult(
+                    content=error,
+                    failed=True,
+                    ledger_input=json.dumps(
+                        redact(decoded), ensure_ascii=False, default=str
+                    )[: settings.max_tool_record_chars],
+                    ledger_output=error,
+                    metadata={
+                        **self._metadata(spec),
+                        "error_code": error_code,
+                        "authorization": {
+                            "action": requirement.action,
+                            "target": requirement.target,
+                            "status": "denied",
+                        },
+                    },
+                )
+            authorization_metadata = {
+                "authorization": {
+                    "action": requirement.action,
+                    "target": requirement.target,
+                    "status": "consumed",
+                    "grant_id": grant.get("id"),
+                    "qualification_receipt_id": grant.get(
+                        "qualification_receipt_id"
+                    ),
+                    "calls_used": grant.get("calls_used"),
+                    "max_calls": grant.get("max_calls"),
+                }
+            }
+
         try:
             async with asyncio.timeout(spec.timeout_seconds):
                 result = await provider.call_tool(spec.native_name, decoded)
@@ -102,7 +152,11 @@ class ToolSession:
                     redact(decoded), ensure_ascii=False, default=str
                 )[: settings.max_tool_record_chars],
                 ledger_output=error,
-                metadata={**self._metadata(spec), "error_code": error_code},
+                metadata={
+                    **self._metadata(spec),
+                    **authorization_metadata,
+                    "error_code": error_code,
+                },
             )
         except Exception:  # noqa: BLE001 - keep transport details out of model and ledger
             error_code = ErrorCode.TOOL_PROVIDER_UNAVAILABLE.value
@@ -114,7 +168,11 @@ class ToolSession:
                     redact(decoded), ensure_ascii=False, default=str
                 )[: settings.max_tool_record_chars],
                 ledger_output=error,
-                metadata={**self._metadata(spec), "error_code": error_code},
+                metadata={
+                    **self._metadata(spec),
+                    **authorization_metadata,
+                    "error_code": error_code,
+                },
             )
         model_content = result.content[: settings.max_tool_result_chars]
         return ToolInvocationResult(
@@ -124,7 +182,11 @@ class ToolSession:
                 : settings.max_tool_record_chars
             ],
             ledger_output=_ledger_text(result.content, failed=result.failed),
-            metadata={**self._metadata(spec), **result.metadata},
+            metadata={
+                **self._metadata(spec),
+                **authorization_metadata,
+                **result.metadata,
+            },
             artifacts=result.artifacts,
             citations=result.citations,
         )
@@ -156,9 +218,15 @@ class ToolCatalog:
         self,
         providers: list[ToolProvider] | None = None,
         provider_sources: list[ToolProviderSource] | None = None,
+        *,
+        authorization_gate: Callable[
+            [RequestContext, ToolSpec], dict[str, Any] | None
+        ]
+        | None = None,
     ) -> None:
         self._providers: dict[str, ToolProvider] = {}
         self._provider_sources = provider_sources or []
+        self._authorization_gate = authorization_gate
         for provider in providers or []:
             self.register(provider)
 
@@ -204,7 +272,12 @@ class ToolCatalog:
                 if spec.name in entries:
                     raise ValueError(f"Duplicate public tool name: {spec.name}")
                 entries[spec.name] = (spec, provider)
-        return ToolSession(entries, discovery_errors)
+        return ToolSession(
+            entries,
+            discovery_errors,
+            context=context,
+            authorization_gate=self._authorization_gate,
+        )
 
     @staticmethod
     def _allowed(spec: ToolSpec, context: RequestContext) -> bool:
@@ -282,6 +355,9 @@ def create_default_tool_catalog(
     catalog = ToolCatalog(
         [LocalToolProvider()],
         [RepositoryMCPProviderSource(repository_provider)],
+        authorization_gate=ToolAuthorizationGate(
+            repository_provider
+        ).authorize_and_consume,
     )
     if not settings.mcp_servers_json.strip():
         return catalog

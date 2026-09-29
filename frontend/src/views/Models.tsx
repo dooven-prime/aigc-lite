@@ -46,6 +46,7 @@ export function Models({ api, isAdmin }: { api: Api; isAdmin: boolean }) {
   };
 
   const save = async () => {
+    const existing = models.find(item => item.name === name);
     const value = await api("/api/models", {
       method: "POST",
       body: JSON.stringify({
@@ -53,7 +54,7 @@ export function Models({ api, isAdmin }: { api: Api; isAdmin: boolean }) {
         base_url: baseUrl,
         model,
         credential_reference: credentialReference,
-        is_default: models.length === 0,
+        is_default: existing?.is_default ?? models.length === 0,
       }),
     }) as ModelConfig;
     setModels(current => [...current.filter(item => item.name !== value.name), value]);

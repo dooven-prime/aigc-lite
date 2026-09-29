@@ -41,6 +41,25 @@ class CapabilitySpec:
             }
         }
 
+    def metadata_for(self, robot_id: str) -> dict[str, Any]:
+        """Bind physical authorization to one server-owned robot identity."""
+
+        metadata = self.metadata
+        capability = self.extensions.get("capability", {})
+        if (
+            capability.get("execution_class") == "physical"
+            and capability.get("effect_class") != "observation"
+        ):
+            metadata["aigc-lite"]["extensions"] = {
+                **self.extensions,
+                "authority_requirement": {
+                    "required": True,
+                    "action": self.name,
+                    "target": f"robot:{robot_id}",
+                },
+            }
+        return metadata
+
 
 @dataclass(frozen=True, slots=True)
 class CapabilityResult:

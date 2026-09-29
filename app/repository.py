@@ -26,6 +26,21 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _authorization_not_expired(expires_at: str | None, used_at: str) -> bool:
+    if not expires_at:
+        return True
+    try:
+        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        current = datetime.fromisoformat(used_at.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return False
+    return (
+        expiry.tzinfo is not None
+        and current.tzinfo is not None
+        and expiry > current
+    )
+
+
 class Repository(Protocol):
     def init(self) -> None: ...
 
@@ -351,6 +366,15 @@ class Repository(Protocol):
     def list_authorization_grants(
         self, tenant_id: str, qualification_receipt_ids: list[str] | None = None
     ) -> list[dict]: ...
+
+    def consume_authorization_grant(
+        self,
+        tenant_id: str,
+        actor_id: str,
+        action: str,
+        target: str,
+        used_at: str,
+    ) -> dict | None: ...
 
     def search_backend(self) -> SearchBackend: ...
 
@@ -2650,6 +2674,53 @@ class SQLiteRepository:
             rows = db.execute(sql, parameters).fetchall()
         return [_decode_authorization_grant(row) for row in rows]
 
+    def consume_authorization_grant(
+        self,
+        tenant_id: str,
+        actor_id: str,
+        action: str,
+        target: str,
+        used_at: str,
+    ) -> dict | None:
+        """Atomically consume one grant backed by the exact current receipt."""
+
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT g.* FROM authorization_grants g "
+                "JOIN qualification_receipts r ON r.tenant_id = g.tenant_id "
+                "AND r.id = g.qualification_receipt_id "
+                "WHERE g.tenant_id = ? AND g.actor_id = ? AND g.action = ? "
+                "AND g.target = ? AND g.state = 'active' AND g.calls_used < g.max_calls "
+                "AND EXISTS (SELECT 1 FROM current_use_bindings b "
+                "WHERE b.tenant_id = g.tenant_id "
+                "AND b.claim_revision_id = r.claim_revision_id "
+                "AND b.profile_id = r.profile_id "
+                "AND b.qualification_receipt_id = g.qualification_receipt_id "
+                "AND b.state = 'current') "
+                "ORDER BY g.created_at, g.id",
+                (tenant_id, actor_id, action, target),
+            ).fetchall()
+            for row in rows:
+                grant = dict(row)
+                if not _authorization_not_expired(grant.get("expires_at"), used_at):
+                    db.execute(
+                        "UPDATE authorization_grants SET state = 'expired' "
+                        "WHERE tenant_id = ? AND id = ? AND state = 'active'",
+                        (tenant_id, grant["id"]),
+                    )
+                    continue
+                updated = db.execute(
+                    "UPDATE authorization_grants SET calls_used = calls_used + 1 "
+                    "WHERE tenant_id = ? AND id = ? AND state = 'active' "
+                    "AND calls_used = ? AND calls_used < max_calls",
+                    (tenant_id, grant["id"], grant["calls_used"]),
+                )
+                if updated.rowcount == 1:
+                    grant["calls_used"] = int(grant["calls_used"]) + 1
+                    return _decode_authorization_grant(grant)
+        return None
+
     def _search_candidates(self, tenant_id: str, limit: int) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
@@ -4735,6 +4806,72 @@ class PostgresRepository:
             statement += " AND qualification_receipt_id IN (" + ",".join(placeholders) + ")"
         statement += " ORDER BY created_at, id"
         return [_decode_authorization_grant(row) for row in self._many(statement, parameters)]
+
+    def consume_authorization_grant(
+        self,
+        tenant_id: str,
+        actor_id: str,
+        action: str,
+        target: str,
+        used_at: str,
+    ) -> dict | None:
+        """Atomically consume one grant backed by the exact current receipt."""
+
+        from sqlalchemy import text
+
+        parameters = {
+            "tenant_id": tenant_id,
+            "actor_id": actor_id,
+            "action": action,
+            "target": target,
+        }
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT g.* FROM authorization_grants g "
+                    "JOIN qualification_receipts r ON r.tenant_id = g.tenant_id "
+                    "AND r.id = g.qualification_receipt_id "
+                    "WHERE g.tenant_id = :tenant_id AND g.actor_id = :actor_id "
+                    "AND g.action = :action AND g.target = :target "
+                    "AND g.state = 'active' AND g.calls_used < g.max_calls "
+                    "AND EXISTS (SELECT 1 FROM current_use_bindings b "
+                    "WHERE b.tenant_id = g.tenant_id "
+                    "AND b.claim_revision_id = r.claim_revision_id "
+                    "AND b.profile_id = r.profile_id "
+                    "AND b.qualification_receipt_id = g.qualification_receipt_id "
+                    "AND b.state = 'current') "
+                    "ORDER BY g.created_at, g.id FOR UPDATE OF g"
+                ),
+                parameters,
+            ).mappings().all()
+            for row in rows:
+                grant = dict(row)
+                if not _authorization_not_expired(grant.get("expires_at"), used_at):
+                    connection.execute(
+                        text(
+                            "UPDATE authorization_grants SET state = 'expired' "
+                            "WHERE tenant_id = :tenant_id AND id = :id "
+                            "AND state = 'active'"
+                        ),
+                        {"tenant_id": tenant_id, "id": grant["id"]},
+                    )
+                    continue
+                updated = connection.execute(
+                    text(
+                        "UPDATE authorization_grants SET calls_used = calls_used + 1 "
+                        "WHERE tenant_id = :tenant_id AND id = :id "
+                        "AND state = 'active' AND calls_used = :calls_used "
+                        "AND calls_used < max_calls RETURNING *"
+                    ),
+                    {
+                        "tenant_id": tenant_id,
+                        "id": grant["id"],
+                        "calls_used": grant["calls_used"],
+                    },
+                ).mappings().first()
+                if updated is not None:
+                    return _decode_authorization_grant(updated)
+        return None
 
     def _search_candidates(self, tenant_id: str, limit: int) -> list[dict]:
         values = {"tenant_id": tenant_id, "candidate_limit": limit}
