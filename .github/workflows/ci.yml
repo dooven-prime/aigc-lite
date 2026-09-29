@@ -94,10 +94,11 @@ jobs:
       - run: docker build -t aigc-lite:ci .
       - name: Start hardened container and smoke HTTP/UI
         run: |
+          AUTH_SECRET=$(python -c 'import secrets; print(secrets.token_urlsafe(48))')
           MASTER_KEY=$(python -c 'import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
           docker run -d --name aigc-lite-ci -p 127.0.0.1:8013:8000 \
             -e AIGC_LITE_ALLOW_SIGNUP=false \
-            -e AIGC_LITE_AUTH_SECRET=ci-auth-secret-0123456789abcdef \
+            -e AIGC_LITE_AUTH_SECRET="$AUTH_SECRET" \
             -e AIGC_LITE_MASTER_KEY="$MASTER_KEY" \
             -e AIGC_LITE_ADMIN_EMAIL=ci-admin@example.test \
             -e AIGC_LITE_ADMIN_PASSWORD=ci-bootstrap-password \
