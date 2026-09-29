@@ -5,6 +5,8 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+## 0.4.0 - 2026-09-29
+
 - Closed two credential-confusion boundaries: workspace MCP records now accept
   only same-workspace encrypted credential references, while deployer-owned
   static `env://` references require an explicit environment-variable
