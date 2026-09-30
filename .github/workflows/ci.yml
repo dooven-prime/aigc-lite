@@ -108,4 +108,4 @@ jobs:
             curl --fail --silent http://127.0.0.1:8013/ready && break
             sleep 1
           done
-          curl --fail --silent http://127.0.0.1:8013/ui/ | grep 'react-v0.4'
+          curl --fail --silent http://127.0.0.1:8013/ui/ | grep 'react-v0.5'

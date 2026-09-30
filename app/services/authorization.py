@@ -20,6 +20,15 @@ class ToolAuthorizationRequirement:
     target: str
 
 
+@dataclass(frozen=True, slots=True)
+class ToolAuthorizationInvocation:
+    """Server-derived facts used to evaluate a narrow execution grant."""
+
+    scope: dict[str, Any]
+    conditions: dict[str, Any]
+    budget: dict[str, Any]
+
+
 def tool_authorization_requirement(
     spec: ToolSpec,
 ) -> ToolAuthorizationRequirement | None:
@@ -71,6 +80,7 @@ class ToolAuthorizationGate:
         self,
         context: RequestContext,
         spec: ToolSpec,
+        arguments: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         requirement = tool_authorization_requirement(spec)
         if requirement is None:
@@ -78,21 +88,145 @@ class ToolAuthorizationGate:
         if not context.principal_id:
             return None
         repository = self._repository_provider()
-        matching_receipt_ids = {
-            item["qualification_receipt_id"]
+        invocation = _authorization_invocation(context, spec, arguments or {})
+        candidates = [
+            item
             for item in repository.list_authorization_grants(context.workspace_id)
             if item.get("actor_id") == context.principal_id
             and item.get("action") == requirement.action
             and item.get("target") == requirement.target
             and item.get("state") == "active"
             and int(item.get("calls_used") or 0) < int(item.get("max_calls") or 0)
-        }
-        for receipt_id in matching_receipt_ids:
-            self._qualification.refresh_receipt_binding(context, receipt_id)
-        return repository.consume_authorization_grant(
-            context.workspace_id,
-            context.principal_id,
-            requirement.action,
-            requirement.target,
-            utc_now(),
+        ]
+        for grant in candidates:
+            self._qualification.refresh_receipt_binding(
+                context, grant["qualification_receipt_id"]
+            )
+            if not _grant_allows(grant, invocation):
+                continue
+            consumed = repository.consume_authorization_grant(
+                context.workspace_id,
+                context.principal_id,
+                requirement.action,
+                requirement.target,
+                utc_now(),
+                grant_id=grant["id"],
+            )
+            if consumed is not None:
+                return consumed
+        return None
+
+
+def _authorization_invocation(
+    context: RequestContext,
+    spec: ToolSpec,
+    arguments: dict[str, Any],
+) -> ToolAuthorizationInvocation:
+    """Build a closed, non-model-writable view of the concrete invocation."""
+
+    effective_arguments = dict(arguments)
+    properties = spec.input_schema.get("properties", {})
+    if isinstance(properties, dict):
+        for name, schema in properties.items():
+            if (
+                name not in effective_arguments
+                and isinstance(schema, dict)
+                and "default" in schema
+            ):
+                effective_arguments[name] = schema["default"]
+    extensions = spec.extensions if isinstance(spec.extensions, dict) else {}
+    capability = extensions.get("capability")
+    capability = capability if isinstance(capability, dict) else {}
+    numeric_budget = {
+        key: value
+        for key, value in effective_arguments.items()
+        if key.endswith("timeout_seconds")
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    }
+    return ToolAuthorizationInvocation(
+        scope={
+            "workspace_id": context.workspace_id,
+            "provider_id": spec.provider_id,
+            "tool_name": spec.native_name,
+            "public_tool_name": spec.name,
+            "required_scopes": sorted(spec.required_scopes),
+            "risk": spec.risk.value,
+        },
+        conditions={
+            "arguments": effective_arguments,
+            "capability": capability,
+        },
+        budget={
+            "tool_timeout_seconds": spec.timeout_seconds,
+            "arguments": numeric_budget,
+        },
+    )
+
+
+def _grant_allows(
+    grant: dict[str, Any], invocation: ToolAuthorizationInvocation
+) -> bool:
+    return (
+        _constraint_matches(grant.get("scope") or {}, invocation.scope)
+        and _constraint_matches(
+            grant.get("conditions") or {}, invocation.conditions
         )
+        and _budget_within(grant.get("budget") or {}, invocation.budget)
+    )
+
+
+def _constraint_matches(expected: Any, actual: Any) -> bool:
+    """Match a small deterministic subset/range constraint language."""
+
+    if isinstance(expected, dict):
+        operators = {key for key in expected if str(key).startswith("$")}
+        if operators:
+            if operators != set(expected):
+                return False
+            if "$eq" in expected and actual != expected["$eq"]:
+                return False
+            if "$in" in expected:
+                values = expected["$in"]
+                if not isinstance(values, list) or actual not in values:
+                    return False
+            for operator, comparator in (("$lte", lambda a, b: a <= b), ("$gte", lambda a, b: a >= b)):
+                if operator not in expected:
+                    continue
+                limit = expected[operator]
+                if (
+                    isinstance(actual, bool)
+                    or isinstance(limit, bool)
+                    or not isinstance(actual, (int, float))
+                    or not isinstance(limit, (int, float))
+                    or not comparator(actual, limit)
+                ):
+                    return False
+            return operators.issubset({"$eq", "$in", "$lte", "$gte"})
+        if not isinstance(actual, dict):
+            return False
+        return all(
+            key in actual and _constraint_matches(value, actual[key])
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return isinstance(actual, list) and all(item in actual for item in expected)
+    return expected == actual
+
+
+def _budget_within(limit: Any, actual: Any) -> bool:
+    if isinstance(limit, dict):
+        if not isinstance(actual, dict):
+            return False
+        return all(
+            key in actual and _budget_within(value, actual[key])
+            for key, value in limit.items()
+        )
+    if (
+        isinstance(limit, (int, float))
+        and not isinstance(limit, bool)
+        and isinstance(actual, (int, float))
+        and not isinstance(actual, bool)
+    ):
+        return actual <= limit
+    return limit == actual

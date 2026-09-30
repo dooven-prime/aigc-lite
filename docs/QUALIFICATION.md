@@ -23,6 +23,33 @@ executable hash 的 kernel certificate、无 `sorry`/额外公理、current depe
 semantic-alignment review。资格与权力严格分账：发布或高风险执行仍需要独立、窄范围的
 `AuthorizationGrant(action, target, scope, budget, expiry, max_calls)`。原始候选进入 `/api/search`；
 知识使用面可走 `/api/qualification/search`，避免未资格化候选被下一轮 Agent 当成事实。
+
+执行 grant 的 `scope / conditions / budget` 不是说明性 metadata。Tool Catalog 在 provider dispatch
+之前，用服务端派生的具体 invocation 逐项匹配，并只按匹配到的 grant ID 原子消费：
+
+```json
+{
+  "scope": {
+    "workspace_id": "workspace-a",
+    "provider_id": "robot",
+    "tool_name": "robot_navigate_to",
+    "required_scopes": ["robot:motion"]
+  },
+  "conditions": {
+    "arguments": {
+      "frame_id": "map",
+      "x": {"$gte": 0, "$lte": 5}
+    }
+  },
+  "budget": {
+    "arguments": {"action_timeout_seconds": 60}
+  }
+}
+```
+
+`scope` 和 `conditions` 使用递归子集匹配，并支持 `$eq / $in / $gte / $lte`；`budget` 的数字表示调用
+实际请求的上限。无法从调用中证明的约束会失败关闭，不能用模型输出补齐。旧 grant 若把任意说明字段
+放在这些对象里，升级后应由管理员按上述可执行合同重新签发。
 Kernel attempt 还必须来自服务端持有的 `system:verifier:*` identity 且不能带 model route。真实
 Lean 4/Coq process backend 只接受 proof source、固定 declaration 和 backend id；可执行文件、argv、
 环境与 verifier identity 都由服务器配置，客户端不能上传 command 或用普通 JSON 冒充 certificate。
@@ -94,3 +121,5 @@ independence / epistemic_state / authority_state` 状态包，而不是总分。
 AuthorizationGrant，workflow 的 `release_ready` 不再冒充 authority。验证器
 会重算 Artifact、Verification Plan、冻结 Execution Input 与 Promotion Gate 摘要；旧版只有
 `independent=true`、没有重叠依据的记录会显示为 `undetermined`，不会被升级成独立验证。
+导出前还会递归刷新每个 current-use binding；依赖资格已经换版或变 stale 时，Bundle 保存污染后的
+状态并阻断 authority，而不是把数据库中尚未惰性刷新的旧 `current` 投影成可执行权。

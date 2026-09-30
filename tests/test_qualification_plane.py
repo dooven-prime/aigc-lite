@@ -294,6 +294,23 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
             scope={"claim_revision_id": claim["id"]},
         ),
     )
+    restrictive_physical_grant = qualification.create_authorization(
+        context,
+        context.principal_id,
+        AuthorizationGrantDraft(
+            qualification_receipt_id=current_receipt["id"],
+            action="robot_navigate_to",
+            target="provider:robot/robot:sim-mcp",
+            scope={"provider_id": "robot", "required_scopes": ["robot:motion"]},
+            conditions={
+                "arguments": {
+                    "frame_id": "map",
+                    "x": {"$gte": 0, "$lte": 1},
+                }
+            },
+            budget={"arguments": {"action_timeout_seconds": 60}},
+        ),
+    )
     physical_grant = qualification.create_authorization(
         context,
         context.principal_id,
@@ -301,56 +318,104 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
             qualification_receipt_id=current_receipt["id"],
             action="robot_navigate_to",
             target="provider:robot/robot:sim-mcp",
-            scope={"claim_revision_id": claim["id"]},
+            scope={"provider_id": "robot", "required_scopes": ["robot:motion"]},
+            conditions={
+                "arguments": {
+                    "frame_id": "map",
+                    "x": {"$gte": 0, "$lte": 5},
+                }
+            },
+            budget={"arguments": {"action_timeout_seconds": 60}},
         ),
     )
-    consumed_physical = ToolAuthorizationGate(lambda: repository).authorize_and_consume(
-        context,
-        ToolSpec(
-            name="robot__robot_navigate_to",
-            native_name="robot_navigate_to",
-            description="Navigate.",
-            input_schema={"type": "object"},
-            source=ToolSource.MCP,
-            provider_id="robot",
-            risk=ToolRisk.HIGH,
-            required_scopes=frozenset({"robot:motion"}),
-            hints=ToolHints(read_only=False),
-            extensions={
-                "capability": {
-                    "execution_class": "physical",
-                    "effect_class": "physical_motion",
-                },
-                "authority_requirement": {
-                    "required": True,
-                    "action": "robot_navigate_to",
-                    "target": "robot:sim-mcp",
-                },
+    authorization_gate = ToolAuthorizationGate(lambda: repository)
+    physical_spec = ToolSpec(
+        name="robot__robot_navigate_to",
+        native_name="robot_navigate_to",
+        description="Navigate.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "frame_id": {"type": "string", "default": "map"},
+                "action_timeout_seconds": {"type": "number", "default": 60},
             },
-        ),
+        },
+        source=ToolSource.MCP,
+        provider_id="robot",
+        risk=ToolRisk.HIGH,
+        required_scopes=frozenset({"robot:motion"}),
+        hints=ToolHints(read_only=False),
+        extensions={
+            "capability": {
+                "execution_class": "physical",
+                "effect_class": "physical_motion",
+            },
+            "authority_requirement": {
+                "required": True,
+                "action": "robot_navigate_to",
+                "target": "robot:sim-mcp",
+            },
+        },
+    )
+    denied_physical = authorization_gate.authorize_and_consume(
+        context,
+        physical_spec,
+        {
+            "idempotency_key": "qualification-navigation-denied",
+            "x": 6,
+            "y": 3,
+            "yaw": 0,
+            "frame_id": "map",
+            "action_timeout_seconds": 30,
+        },
+    )
+    assert denied_physical is None
+    assert repository.list_authorization_grants(context.workspace_id)[-1]["calls_used"] == 0
+    consumed_physical = authorization_gate.authorize_and_consume(
+        context,
+        physical_spec,
+        {
+            "idempotency_key": "qualification-navigation-1",
+            "x": 2,
+            "y": 3,
+            "yaw": 0,
+            "frame_id": "map",
+            "action_timeout_seconds": 30,
+        },
     )
     assert consumed_physical is not None
     assert consumed_physical["id"] == physical_grant["id"]
     assert consumed_physical["calls_used"] == 1
+    grants_by_id = {
+        item["id"]: item
+        for item in repository.list_authorization_grants(context.workspace_id)
+    }
+    assert grants_by_id[restrictive_physical_grant["id"]]["calls_used"] == 0
     with repository._connect() as connection:
         connection.execute(
             "UPDATE research_claim_revisions SET scope = ? WHERE tenant_id = ? AND id = ?",
             ("A silently widened domain.", context.workspace_id, claim["id"]),
         )
-    assert qualification.qualified_search(context, "even integers", PROFILE_ID) == []
-    stale_binding = repository.get_current_use_binding(
-        context.workspace_id, claim["id"], PROFILE_ID
-    )
-    assert stale_binding["state"] == "stale"
-    assert "claim_semantic_hash_changed" in stale_binding["stale_reason"]
-    assert qualification.get_receipt(context, receipt["id"])["receipt_hash"] == receipt[
-        "receipt_hash"
-    ]
     stale_archive, _manifest = AssuranceBundleService(lambda: repository).export_zip(
         context, registered["case"]["id"]
     )
     with zipfile.ZipFile(io.BytesIO(stale_archive)) as bundle:
         qualification_document = json.loads(bundle.read("qualification.json"))
+    exported_binding = next(
+        item
+        for item in qualification_document["current_use_bindings"]
+        if item["claim_revision_id"] == claim["id"]
+    )
+    assert exported_binding["state"] == "stale"
+    stale_binding = repository.get_current_use_binding(
+        context.workspace_id, claim["id"], PROFILE_ID
+    )
+    assert stale_binding["state"] == "stale"
+    assert "claim_semantic_hash_changed" in stale_binding["stale_reason"]
+    assert qualification.qualified_search(context, "even integers", PROFILE_ID) == []
+    assert qualification.get_receipt(context, receipt["id"])["receipt_hash"] == receipt[
+        "receipt_hash"
+    ]
     assert {item["id"] for item in qualification_document["receipts"]} == {
         receipt["id"],
         current_receipt["id"],

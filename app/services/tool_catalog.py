@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from math import isfinite
 from typing import Any
 from urllib.parse import urlsplit
@@ -24,7 +25,7 @@ from ..core.contracts import (
 )
 from ..core.errors import ErrorCode
 from ..database import get_repository
-from ..ports.tools import ToolProvider, ToolProviderSource
+from ..ports.tools import ToolAccessPolicy, ToolProvider, ToolProviderSource
 from ..redaction import redact, redact_record_text
 from ..repository import Repository
 from .authorization import ToolAuthorizationGate, tool_authorization_requirement
@@ -51,12 +52,16 @@ class ToolSession:
         discovery_errors: dict[str, str] | None = None,
         *,
         context: RequestContext,
-        authorization_gate: Callable[[RequestContext, ToolSpec], dict[str, Any] | None]
+        access_policy: ToolAccessPolicy | None = None,
+        authorization_gate: Callable[
+            [RequestContext, ToolSpec, dict[str, Any]], dict[str, Any] | None
+        ]
         | None = None,
     ) -> None:
         self._entries = entries
         self._discovery_errors = discovery_errors or {}
         self._context = context
+        self._access_policy = access_policy
         self._authorization_gate = authorization_gate
 
     @property
@@ -98,12 +103,15 @@ class ToolSession:
             )
 
         authorization_metadata: dict[str, Any] = {}
-        requirement = tool_authorization_requirement(spec)
+        authorization_spec = self._authorization_spec(spec)
+        requirement = tool_authorization_requirement(authorization_spec)
         if requirement is not None:
             grant = None
             if self._authorization_gate is not None:
                 try:
-                    grant = self._authorization_gate(self._context, spec)
+                    grant = self._authorization_gate(
+                        self._context, authorization_spec, decoded
+                    )
                 except Exception:  # noqa: BLE001 - fail closed without leaking policy state
                     grant = None
             if not grant:
@@ -192,6 +200,18 @@ class ToolSession:
             citations=result.citations,
         )
 
+    def _authorization_spec(self, spec: ToolSpec) -> ToolSpec:
+        if self._access_policy is None or not self._access_policy.requires_authorization(
+            spec
+        ):
+            return spec
+        extensions = dict(spec.extensions)
+        declared = extensions.get("authority_requirement")
+        requirement = dict(declared) if isinstance(declared, dict) else {}
+        requirement["required"] = True
+        extensions["authority_requirement"] = requirement
+        return replace(spec, extensions=extensions)
+
     @staticmethod
     def _metadata(spec: ToolSpec) -> dict:
         metadata = {
@@ -221,7 +241,7 @@ class ToolCatalog:
         provider_sources: list[ToolProviderSource] | None = None,
         *,
         authorization_gate: Callable[
-            [RequestContext, ToolSpec], dict[str, Any] | None
+            [RequestContext, ToolSpec, dict[str, Any]], dict[str, Any] | None
         ]
         | None = None,
     ) -> None:
@@ -239,7 +259,12 @@ class ToolCatalog:
     def unregister(self, provider_id: str) -> None:
         self._providers.pop(provider_id, None)
 
-    async def open(self, context: RequestContext) -> ToolSession:
+    async def open(
+        self,
+        context: RequestContext,
+        *,
+        access_policy: ToolAccessPolicy | None = None,
+    ) -> ToolSession:
         entries: dict[str, tuple[ToolSpec, ToolProvider]] = {}
         discovery_errors: dict[str, str] = {}
         providers = dict(self._providers)
@@ -270,6 +295,8 @@ class ToolCatalog:
             for spec in specs:
                 if not self._allowed(spec, context):
                     continue
+                if access_policy is not None and not access_policy.allows(spec):
+                    continue
                 if spec.name in entries:
                     raise ValueError(f"Duplicate public tool name: {spec.name}")
                 entries[spec.name] = (spec, provider)
@@ -277,6 +304,7 @@ class ToolCatalog:
             entries,
             discovery_errors,
             context=context,
+            access_policy=access_policy,
             authorization_gate=self._authorization_gate,
         )
 

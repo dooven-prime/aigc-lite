@@ -95,6 +95,16 @@ class _Nav2Action:
     feedback: list[ActionFeedback] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class _PendingNavigation:
+    action_id: str
+    request: NavigationRequest
+    before: RobotState
+    goal_future: Any
+    started_at: str
+    feedback: list[ActionFeedback] = field(default_factory=list)
+
+
 class Nav2Backend:
     """Translate bounded bridge operations to Nav2 Action and TF2 state."""
 
@@ -136,7 +146,9 @@ class Nav2Backend:
         )
         self._spin_thread.start()
         self._active: _Nav2Action | None = None
+        self._pending: _PendingNavigation | None = None
         self._dispatching = False
+        self._reconciliation_tasks: dict[str, asyncio.Task[None]] = {}
         self._receipts: dict[str, PhysicalActionReceipt] = {}
         self._key_to_action: dict[str, str] = {}
         self._latest: PhysicalActionReceipt | None = None
@@ -289,43 +301,56 @@ class Nav2Backend:
                 del feedback_values[:-32]
 
         try:
-            goal_handle = await _await_ros_future(
-                self._action_client.send_goal_async(goal, feedback_callback=on_feedback),
-                timeout=10.0,
+            goal_future = self._action_client.send_goal_async(
+                goal, feedback_callback=on_feedback
             )
         except BaseException:
             async with self._lock:
                 self._dispatching = False
             raise
-        if not goal_handle.accepted:
-            async with self._lock:
-                self._dispatching = False
-            receipt = await self._standalone_receipt(
-                request,
-                before,
-                status=PhysicalActionStatus.FAILED,
-                stop_confirmed=True,
-                error_code="nav2_goal_rejected",
-                error_message="Nav2 rejected the navigation goal.",
-            )
-            return receipt
-
-        action_id = str(uuid4())
-        provider_action_id = bytes(goal_handle.goal_id.uuid).hex()
-        active = _Nav2Action(
-            action_id=action_id,
+        pending = _PendingNavigation(
+            action_id=str(uuid4()),
             request=request,
             before=before,
-            goal_handle=goal_handle,
-            result_future=goal_handle.get_result_async(),
-            provider_action_id=provider_action_id,
+            goal_future=goal_future,
             started_at=utc_now(),
             feedback=feedback_values,
         )
         async with self._lock:
-            self._dispatching = False
-            self._active = active
-            self._key_to_action[request.idempotency_key] = action_id
+            self._pending = pending
+            self._key_to_action[request.idempotency_key] = pending.action_id
+        try:
+            goal_handle = await _await_ros_future(goal_future, timeout=10.0)
+            promoted = await self._promote_pending(pending, goal_handle)
+        except TimeoutError as exc:
+            self._track_reconciliation(
+                f"dispatch:{pending.action_id}",
+                self._reconcile_late_dispatch(pending),
+            )
+            raise RobotBridgeError(
+                "nav2_goal_dispatch_indeterminate",
+                "Nav2 did not confirm whether the navigation goal was accepted; "
+                "new motion is blocked while the bridge reconciles and cancels any late acceptance.",
+                retryable=False,
+                details={"action_id": pending.action_id},
+            ) from exc
+        except asyncio.CancelledError:
+            self._track_reconciliation(
+                f"dispatch:{pending.action_id}",
+                self._reconcile_late_dispatch(pending),
+            )
+            raise
+        except Exception as exc:
+            raise RobotBridgeError(
+                "nav2_goal_dispatch_indeterminate",
+                "Nav2 did not provide a usable goal handle; new motion remains blocked "
+                "until the bridge is reconciled or restarted.",
+                retryable=False,
+                details={"action_id": pending.action_id},
+            ) from exc
+        if isinstance(promoted, PhysicalActionReceipt):
+            return promoted
+        active = promoted
         try:
             return await asyncio.wait_for(
                 self._wait_for_action(active), request.action_timeout_seconds
@@ -347,6 +372,85 @@ class Nav2Backend:
                 )
             )
             raise
+
+    async def _promote_pending(
+        self,
+        pending: _PendingNavigation,
+        goal_handle: Any,
+    ) -> _Nav2Action | PhysicalActionReceipt:
+        if not goal_handle.accepted:
+            await self._release_pending(pending)
+            return await self._standalone_receipt(
+                pending.request,
+                pending.before,
+                action_id=pending.action_id,
+                status=PhysicalActionStatus.FAILED,
+                stop_confirmed=True,
+                error_code="nav2_goal_rejected",
+                error_message="Nav2 rejected the navigation goal.",
+            )
+        active = _Nav2Action(
+            action_id=pending.action_id,
+            request=pending.request,
+            before=pending.before,
+            goal_handle=goal_handle,
+            result_future=goal_handle.get_result_async(),
+            provider_action_id=bytes(goal_handle.goal_id.uuid).hex(),
+            started_at=pending.started_at,
+            feedback=pending.feedback,
+        )
+        async with self._lock:
+            if self._pending is not pending:
+                raise RobotBridgeError(
+                    "nav2_dispatch_reconciliation_conflict",
+                    "The pending Nav2 goal no longer owns the dispatch slot.",
+                )
+            self._pending = None
+            self._dispatching = False
+            self._active = active
+        return active
+
+    async def _release_pending(self, pending: _PendingNavigation) -> None:
+        async with self._lock:
+            if self._pending is pending:
+                self._pending = None
+                self._dispatching = False
+
+    async def _reconcile_late_dispatch(self, pending: _PendingNavigation) -> None:
+        """Own a submitted goal until a late acceptance can be cancelled safely."""
+
+        try:
+            goal_handle = await _await_ros_future(pending.goal_future)
+            promoted = await self._promote_pending(pending, goal_handle)
+        except Exception:  # noqa: BLE001 - remain blocked without a usable goal handle
+            return
+        if isinstance(promoted, PhysicalActionReceipt):
+            return
+        await self._cancel_active(
+            promoted,
+            error_code="dispatch_wait_aborted",
+            error_message=(
+                "The dispatch wait ended before Nav2 accepted the goal; "
+                "late acceptance was cancelled."
+            ),
+            timeout_seconds=5.0,
+        )
+
+    def _track_reconciliation(self, key: str, coroutine: Any) -> None:
+        existing = self._reconciliation_tasks.get(key)
+        if existing is not None and not existing.done():
+            coroutine.close()
+            return
+        task = asyncio.create_task(coroutine)
+        self._reconciliation_tasks[key] = task
+
+        def finished(completed: asyncio.Task[None]) -> None:
+            if self._reconciliation_tasks.get(key) is completed:
+                self._reconciliation_tasks.pop(key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
 
     @staticmethod
     def _same_intent(existing: dict[str, Any], request: NavigationRequest) -> bool:
@@ -399,21 +503,36 @@ class Nav2Backend:
             await _await_ros_future(active.goal_handle.cancel_goal_async(), timeout=timeout_seconds)
             return await asyncio.wait_for(self._wait_for_action(active), timeout_seconds)
         except TimeoutError:
-            return await self._finish(
+            receipt = await self._finish(
                 active,
                 status=PhysicalActionStatus.INDETERMINATE,
                 stop_confirmed=False,
                 error_code="cancel_confirmation_timeout",
                 error_message=(f"{error_message} Stop could not be confirmed before the deadline."),
             )
+            self._ensure_action_reconciliation(active)
+            return receipt
         except Exception as exc:  # noqa: BLE001 - preserve uncertainty on ROS errors
-            return await self._finish(
+            receipt = await self._finish(
                 active,
                 status=PhysicalActionStatus.INDETERMINATE,
                 stop_confirmed=False,
                 error_code=error_code,
                 error_message=f"{error_message} ROS cancellation failed: {type(exc).__name__}.",
             )
+            self._ensure_action_reconciliation(active)
+            return receipt
+
+    def _ensure_action_reconciliation(self, active: _Nav2Action) -> None:
+        self._track_reconciliation(
+            active.action_id, self._reconcile_active_result(active)
+        )
+
+    async def _reconcile_active_result(self, active: _Nav2Action) -> None:
+        try:
+            await self._wait_for_action(active)
+        except Exception:  # noqa: BLE001 - remain blocked when terminal state is unknown
+            return
 
     async def _finish(
         self,
@@ -439,9 +558,11 @@ class Nav2Backend:
                         PhysicalActionStatus.SUCCEEDED,
                         PhysicalActionStatus.CANCELLED,
                     }
+                    else "failed"
+                    if stop_confirmed
                     else "unknown"
                 ),
-                active_action_id=None,
+                active_action_id=None if stop_confirmed else active.action_id,
             )
         with self._feedback_lock:
             feedback = tuple(active.feedback[-32:])
@@ -472,9 +593,9 @@ class Nav2Backend:
         )
         async with self._lock:
             existing = self._receipts.get(active.action_id)
-            if existing is not None:
+            if existing is not None and (existing.stop_confirmed or not stop_confirmed):
                 return existing
-            if self._active is active:
+            if self._active is active and stop_confirmed:
                 self._active = None
             self._receipts[active.action_id] = receipt
             self._latest = receipt
@@ -485,13 +606,14 @@ class Nav2Backend:
         request: NavigationRequest,
         before: RobotState,
         *,
+        action_id: str | None = None,
         status: PhysicalActionStatus,
         stop_confirmed: bool,
         error_code: str,
         error_message: str,
     ) -> PhysicalActionReceipt:
         receipt = PhysicalActionReceipt(
-            action_id=str(uuid4()),
+            action_id=action_id or str(uuid4()),
             idempotency_key=request.idempotency_key,
             capability="robot.navigate_to",
             robot_id=self.robot_id,
@@ -529,14 +651,23 @@ class Nav2Backend:
             resolved_id = action_id or self._key_to_action.get(idempotency_key or "")
             if resolved_id is None:
                 raise RobotBridgeError("action_not_found", "The physical action was not found.")
-            receipt = self._receipts.get(resolved_id)
+            active = self._active
+            if active is not None and active.action_id == resolved_id:
+                receipt = None
+            else:
+                receipt = self._receipts.get(resolved_id)
             if receipt is not None:
                 return replace(
                     receipt,
                     metadata={**receipt.metadata, "cancel_replayed_terminal": True},
                 )
-            active = self._active
             if active is None or active.action_id != resolved_id:
+                if self._pending is not None and self._pending.action_id == resolved_id:
+                    raise RobotBridgeError(
+                        "action_dispatch_pending",
+                        "The goal response is pending; late acceptance is already under cancellation control.",
+                        retryable=True,
+                    )
                 raise RobotBridgeError("action_not_found", "The physical action was not found.")
         return await self._cancel_active(
             active,
@@ -555,6 +686,11 @@ class Nav2Backend:
                 error_message="The bridge is shutting down.",
                 timeout_seconds=5.0,
             )
+        tasks = list(self._reconciliation_tasks.values())
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=5.0)
+            for task in pending:
+                task.cancel()
         self._executor.shutdown(timeout_sec=5.0)
         self._node.destroy_node()
         if self._owns_context and self._ros["rclpy"].ok():

@@ -17,6 +17,7 @@ from ..core.contracts import RequestContext
 from ..core.errors import InvalidAssuranceBundleError, ResourceNotFoundError
 from ..database import get_repository
 from ..repository import Repository
+from .qualification import QualificationService
 
 RepositoryProvider = Callable[[], Repository]
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -61,6 +62,7 @@ class AssuranceBundleService:
 
     def __init__(self, repository_provider: RepositoryProvider = get_repository) -> None:
         self._repository_provider = repository_provider
+        self._qualification = QualificationService(repository_provider)
 
     def export_zip(
         self, context: RequestContext, research_case_id: str
@@ -133,7 +135,10 @@ class AssuranceBundleService:
                 )
                 if binding is None:
                     continue
-                current_use_bindings.append(binding)
+                refreshed = self._qualification.refresh_receipt_binding(
+                    context, binding["qualification_receipt_id"]
+                )
+                current_use_bindings.append(refreshed or binding)
 
         authorization_grants = repository.list_authorization_grants(
             context.workspace_id, sorted(qualification_receipts_by_id)

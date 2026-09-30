@@ -16,11 +16,22 @@ from .core.credentials import (
     encrypted_credential_id,
     validate_workspace_credential_map,
 )
+from .ports.enforcement_repository import EnforcementRepository
+from .ports.import_repository import ImportRepository
 from .ports.qualification_repository import QualificationRepository
 from .ports.research_repository import ResearchRepository
+from .ports.review_repository import ReviewRepository
 from .repositories.common import decode_list as _decode_list
 from .repositories.common import decode_metadata as _decode_metadata
 from .repositories.common import utc_now
+from .repositories.conversation_imports import (
+    PostgresImportRepositoryMixin,
+    SQLiteImportRepositoryMixin,
+)
+from .repositories.enforcement import (
+    PostgresEnforcementRepositoryMixin,
+    SQLiteEnforcementRepositoryMixin,
+)
 from .repositories.qualification import (
     PostgresQualificationRepositoryMixin,
     SQLiteQualificationRepositoryMixin,
@@ -29,12 +40,23 @@ from .repositories.research import (
     PostgresResearchRepositoryMixin,
     SQLiteResearchRepositoryMixin,
 )
+from .repositories.review import (
+    PostgresReviewRepositoryMixin,
+    SQLiteReviewRepositoryMixin,
+)
 
 if TYPE_CHECKING:
     from .ports.search import SearchBackend
 
 
-class Repository(ResearchRepository, QualificationRepository, Protocol):
+class Repository(
+    ResearchRepository,
+    QualificationRepository,
+    ReviewRepository,
+    ImportRepository,
+    EnforcementRepository,
+    Protocol,
+):
     def init(self) -> None: ...
 
     def schema_revision(self) -> str | None: ...
@@ -152,6 +174,9 @@ class Repository(ResearchRepository, QualificationRepository, Protocol):
         request_id: str,
         requested_model: str | None,
         selected_model: str,
+        *,
+        capability_set_id: str = "runtime.none.v1",
+        capability_policy_hash: str | None = None,
     ) -> dict: ...
 
     def append_run_step(
@@ -351,7 +376,11 @@ def _decode_decision_case(row: Any) -> dict[str, Any]:
 
 
 class SQLiteRepository(
-    SQLiteResearchRepositoryMixin, SQLiteQualificationRepositoryMixin
+    SQLiteResearchRepositoryMixin,
+    SQLiteQualificationRepositoryMixin,
+    SQLiteReviewRepositoryMixin,
+    SQLiteImportRepositoryMixin,
+    SQLiteEnforcementRepositoryMixin,
 ):
     """SQLite repository using short-lived connections for safe web requests."""
 
@@ -934,6 +963,9 @@ class SQLiteRepository(
         request_id: str,
         requested_model: str | None,
         selected_model: str,
+        *,
+        capability_set_id: str = "runtime.none.v1",
+        capability_policy_hash: str | None = None,
     ) -> dict:
         value = {
             "id": str(uuid.uuid4()),
@@ -943,6 +975,8 @@ class SQLiteRepository(
             "status": "running",
             "requested_model": requested_model,
             "selected_model": selected_model,
+            "capability_set_id": capability_set_id,
+            "capability_policy_hash": capability_policy_hash,
             "error_code": None,
             "created_at": utc_now(),
             "completed_at": None,
@@ -950,8 +984,9 @@ class SQLiteRepository(
         with self._connect() as db:
             db.execute(
                 "INSERT INTO agent_runs(id, tenant_id, session_id, request_id, status, "
-                "requested_model, selected_model, error_code, created_at, completed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "requested_model, selected_model, capability_set_id, "
+                "capability_policy_hash, error_code, created_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(value.values()),
             )
         return value
@@ -1558,7 +1593,11 @@ class SQLiteRepository(
 
 
 class PostgresRepository(
-    PostgresResearchRepositoryMixin, PostgresQualificationRepositoryMixin
+    PostgresResearchRepositoryMixin,
+    PostgresQualificationRepositoryMixin,
+    PostgresReviewRepositoryMixin,
+    PostgresImportRepositoryMixin,
+    PostgresEnforcementRepositoryMixin,
 ):
     """PostgreSQL adapter with the same public methods as SQLiteRepository.
 
@@ -2115,6 +2154,9 @@ class PostgresRepository(
         request_id: str,
         requested_model: str | None,
         selected_model: str,
+        *,
+        capability_set_id: str = "runtime.none.v1",
+        capability_policy_hash: str | None = None,
     ) -> dict:
         value = {
             "id": str(uuid.uuid4()),
@@ -2124,15 +2166,19 @@ class PostgresRepository(
             "status": "running",
             "requested_model": requested_model,
             "selected_model": selected_model,
+            "capability_set_id": capability_set_id,
+            "capability_policy_hash": capability_policy_hash,
             "error_code": None,
             "created_at": utc_now(),
             "completed_at": None,
         }
         self._execute(
             "INSERT INTO agent_runs(id, tenant_id, session_id, request_id, status, "
-            "requested_model, selected_model, error_code, created_at, completed_at) "
+            "requested_model, selected_model, capability_set_id, capability_policy_hash, "
+            "error_code, created_at, completed_at) "
             "VALUES (:id, :tenant_id, :session_id, :request_id, :status, :requested_model, "
-            ":selected_model, :error_code, :created_at, :completed_at)",
+            ":selected_model, :capability_set_id, :capability_policy_hash, :error_code, "
+            ":created_at, :completed_at)",
             value,
         )
         return value
@@ -2732,6 +2778,19 @@ class PostgresRepository(
             "WHERE tenant_id = :tenant_id ORDER BY created_at DESC LIMIT :candidate_limit",
             values,
         )
+        imported_messages = self._many(
+            "SELECT m.id, 'conversation_message' kind, c.title, m.content, "
+            "COALESCE(m.normalized_created_at, m.created_at) created_at, "
+            "NULL session_id, NULL run_id, NULL step_id, b.source_artifact_id artifact_id, "
+            "m.importer_id source_kind, m.batch_id import_batch_id, "
+            "m.conversation_id FROM conversation_import_messages m "
+            "JOIN conversation_import_conversations c ON c.id = m.conversation_id "
+            "AND c.tenant_id = m.tenant_id "
+            "JOIN conversation_import_batches b ON b.id = m.batch_id "
+            "AND b.tenant_id = m.tenant_id WHERE m.tenant_id = :tenant_id "
+            "ORDER BY m.created_at DESC LIMIT :candidate_limit",
+            values,
+        )
         return [
             *messages,
             *documents,
@@ -2740,6 +2799,7 @@ class PostgresRepository(
             *citations,
             *decisions,
             *research_claims,
+            *imported_messages,
         ]
 
     def search_backend(self) -> SearchBackend:

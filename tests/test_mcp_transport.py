@@ -45,7 +45,7 @@ def test_official_streamable_http_transport(tmp_path) -> None:
     )
     streamable_app, _ = build_transport_apps(server)
 
-    async def run() -> tuple[str, dict[str, bool], dict[str, str]]:
+    async def run() -> tuple[dict[str, dict[str, bool]], dict[str, str]]:
         url = "http://127.0.0.1/"
 
         @asynccontextmanager
@@ -63,23 +63,28 @@ def test_official_streamable_http_transport(tmp_path) -> None:
                 tools = await client.list_tools()
                 result = await client.call_tool("transport_echo", {"value": "ok"})
                 assert not result.is_error
-                annotations = tools.tools[0].annotations.model_dump(
-                    by_alias=True, exclude_none=True
-                )
-                return (
-                    tools.tools[0].name,
-                    annotations,
-                    json.loads(result.content[0].text),
-                )
+                annotations = {
+                    item.name: item.annotations.model_dump(
+                        by_alias=True, exclude_none=True
+                    )
+                    for item in tools.tools
+                }
+                return annotations, json.loads(result.content[0].text)
 
-    name, annotations, result = asyncio.run(run())
-    assert name == "workspace_status"
-    assert annotations == {
+    annotations, result = asyncio.run(run())
+    assert {"workspace_status", "transport_echo"}.issubset(annotations)
+    assert annotations["workspace_status"] == {
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
         "openWorldHint": False,
     }
+    assert all(
+        set(hints)
+        == {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
+        and all(isinstance(value, bool) for value in hints.values())
+        for hints in annotations.values()
+    )
     assert result == {"value": "ok"}
 
 

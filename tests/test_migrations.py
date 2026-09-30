@@ -63,7 +63,7 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "last_latency_ms",
         "last_tool_count",
     } <= columns
-    assert revision == "0013_model_credential_binding"
+    assert revision == "0017_execution_authority"
     assert {
         "artifacts",
         "citations",
@@ -91,6 +91,13 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "evidence_edges",
         "current_use_bindings",
         "authorization_grants",
+        "review_runs",
+        "review_findings",
+        "conversation_import_batches",
+        "conversation_import_conversations",
+        "conversation_import_messages",
+        "execution_policy_proposals",
+        "enforcement_receipts",
     } <= tables
     assert "promotion_stage" in research_claim_columns
     assert {
@@ -101,6 +108,9 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "parent_revision_id",
     } <= research_claim_columns
     with sqlite3.connect(path) as connection:
+        run_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(agent_runs)")
+        }
         attempt_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(research_verification_attempts)")
@@ -114,10 +124,36 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
             for row in connection.execute("PRAGMA table_info(research_verification_executions)")
         }
     assert "independence" in attempt_columns
+    assert {"capability_set_id", "capability_policy_hash"} <= run_columns
+    with sqlite3.connect(path) as connection:
+        search_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(search_entries)")
+        }
+    assert {"import_batch_id", "conversation_id"} <= search_columns
     assert {"validation_modality", "verifier_lineage"} <= attempt_columns
     assert "input_snapshot" in promotion_columns
     assert "input_snapshot" in execution_columns
     assert repository.get_mcp_server("workspace-a", "server-1")["provider_id"] == "research"
+
+
+def test_repository_repairs_unreleased_sqlite_revision_alias(tmp_path) -> None:
+    path = tmp_path / "provisional-revision.db"
+    repository = SQLiteRepository(path)
+    repository.init()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE alembic_version SET version_num = ?",
+            ("0017_execution_authority_evidence",),
+        )
+
+    reopened = SQLiteRepository(path)
+    reopened.init()
+
+    with sqlite3.connect(path) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+    assert revision == "0017_execution_authority"
 
 
 def test_model_credential_binding_migration_drops_legacy_secret_authority(

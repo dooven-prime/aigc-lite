@@ -41,7 +41,8 @@ class SQLiteFTS5SearchBackend:
                 rows = db.execute(
                     "SELECT e.source_id id, e.kind, e.title, e.content, "
                     "e.created_at, e.session_id, e.run_id, e.step_id, "
-                    "e.artifact_id, e.source_kind, "
+                    "e.artifact_id, e.source_kind, e.import_batch_id, "
+                    "e.conversation_id, "
                     "bm25(search_entries_fts, 4.0, 1.0) rank "
                     "FROM search_entries_fts "
                     "JOIN search_entries e ON e.rowid = search_entries_fts.rowid "
@@ -67,6 +68,8 @@ class SQLiteFTS5SearchBackend:
                 "step_id": row["step_id"],
                 "artifact_id": row["artifact_id"],
                 "source_kind": row["source_kind"],
+                "import_batch_id": row["import_batch_id"],
+                "conversation_id": row["conversation_id"],
             }
             for row in rows
         ]

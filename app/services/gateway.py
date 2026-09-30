@@ -33,6 +33,7 @@ from ..database import get_repository
 from ..providers import stream_chat
 from ..repository import Repository
 from .artifacts import ArtifactService
+from .chat_capabilities import ChatCapabilityPolicy
 from .tool_catalog import ToolCatalog, create_default_tool_catalog
 
 AgentRunner = Callable[..., Awaitable[str]]
@@ -87,6 +88,7 @@ class GatewayService:
         tool_catalog: ToolCatalog | None = None,
         active_runs: _ActiveRunRegistry | None = None,
         artifact_service: ArtifactService | None = None,
+        chat_capability_policy: ChatCapabilityPolicy | None = None,
     ) -> None:
         self._repository_provider = repository_provider
         self._agent_runner = agent_runner
@@ -100,8 +102,15 @@ class GatewayService:
         self._artifact_service = artifact_service or ArtifactService(
             repository_provider=repository_provider
         )
+        self._chat_capability_policy = (
+            chat_capability_policy or ChatCapabilityPolicy()
+        )
 
     async def chat(self, command: ChatCommand, context: RequestContext) -> ChatResult:
+        capability = self._chat_capability_policy.resolve(
+            context, command.capability_set_id
+        )
+        capability_metadata = capability.ledger_metadata()
         repository = self._repository_provider()
         session = self._owned_session(repository, context.workspace_id, command.session_id)
         history = session["messages"][-20:]
@@ -121,6 +130,8 @@ class GatewayService:
             context.request_id,
             command.requested_model,
             selected_model,
+            capability_set_id=capability.policy_id,
+            capability_policy_hash=capability.policy_hash,
         )
         sequence = 0
 
@@ -136,7 +147,7 @@ class GatewayService:
                 step.status.value,
                 step.input_content,
                 step.output_content,
-                step.metadata,
+                {**step.metadata, "chat_capability": capability_metadata},
             )
             if step.artifacts or step.citations:
                 self._artifact_service.record_tool_result(
@@ -165,7 +176,10 @@ class GatewayService:
         try:
             try:
                 async with asyncio.timeout(settings.max_agent_run_seconds):
-                    tool_session = await self._tool_catalog.open(context)
+                    tool_session = await self._tool_catalog.open(
+                        capability.context,
+                        access_policy=capability,
+                    )
                     content = await self._agent_runner(
                         command.prompt,
                         command.system,
@@ -192,7 +206,7 @@ class GatewayService:
                     sequence + 1,
                     RunStatus.LIMIT_REACHED,
                     StepStatus.FAILED,
-                    error.metadata,
+                    {**error.metadata, "chat_capability": capability_metadata},
                 )
                 raise error from exc
             except asyncio.CancelledError:
@@ -206,6 +220,7 @@ class GatewayService:
                     sequence + 1,
                     RunStatus.CANCELLED,
                     StepStatus.CANCELLED,
+                    {"chat_capability": capability_metadata},
                 )
                 raise
             except ApplicationError as exc:
@@ -224,7 +239,7 @@ class GatewayService:
                     sequence + 1,
                     run_status,
                     StepStatus.FAILED,
-                    exc.metadata,
+                    {**exc.metadata, "chat_capability": capability_metadata},
                 )
                 raise
             except Exception:
@@ -238,6 +253,7 @@ class GatewayService:
                     sequence + 1,
                     RunStatus.FAILED,
                     StepStatus.FAILED,
+                    {"chat_capability": capability_metadata},
                 )
                 raise
 
@@ -271,6 +287,10 @@ class GatewayService:
         self, command: ChatCommand, context: RequestContext
     ) -> ChatStreamResult:
         """Start a stream whose final content is persisted as one model step."""
+        capability = self._chat_capability_policy.resolve(
+            context, command.capability_set_id
+        )
+        capability_metadata = capability.ledger_metadata()
         repository = self._repository_provider()
         session = self._owned_session(repository, context.workspace_id, command.session_id)
         history = session["messages"][-20:]
@@ -289,6 +309,8 @@ class GatewayService:
             context.request_id,
             command.requested_model,
             selected_model,
+            capability_set_id=capability.policy_id,
+            capability_policy_hash=capability.policy_hash,
         )
         messages = self._message_builder(
             command.prompt, command.system, history, context.workspace_id
@@ -328,7 +350,7 @@ class GatewayService:
                         1,
                         RunStatus.LIMIT_REACHED,
                         StepStatus.FAILED,
-                        error.metadata,
+                        {**error.metadata, "chat_capability": capability_metadata},
                     )
                     raise error from exc
                 except ApplicationError as exc:
@@ -347,7 +369,7 @@ class GatewayService:
                         1,
                         run_status,
                         StepStatus.FAILED,
-                        exc.metadata,
+                        {**exc.metadata, "chat_capability": capability_metadata},
                     )
                     raise
                 except (asyncio.CancelledError, GeneratorExit):
@@ -363,6 +385,7 @@ class GatewayService:
                         {
                             "cancelled": True,
                             "error_code": ErrorCode.AGENT_CANCELLED.value,
+                            "chat_capability": capability_metadata,
                         },
                     )
                     repository.finish_run(
@@ -383,6 +406,7 @@ class GatewayService:
                         1,
                         RunStatus.FAILED,
                         StepStatus.FAILED,
+                        {"chat_capability": capability_metadata},
                     )
                     raise
 
@@ -399,7 +423,10 @@ class GatewayService:
                     StepStatus.SUCCEEDED.value,
                     command.prompt,
                     content,
-                    {"stream": True},
+                    {
+                        "stream": True,
+                        "chat_capability": capability_metadata,
+                    },
                 )
                 repository.finish_run(
                     context.workspace_id, run["id"], RunStatus.SUCCEEDED.value

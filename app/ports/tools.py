@@ -39,3 +39,17 @@ class ToolProviderSource(Protocol):
     source_id: str
 
     def list_providers(self, context: RequestContext) -> list[ToolProvider]: ...
+
+
+class ToolAccessPolicy(Protocol):
+    """Host-owned visibility and authorization policy for one Tool session."""
+
+    @property
+    def policy_id(self) -> str: ...
+
+    @property
+    def policy_hash(self) -> str: ...
+
+    def allows(self, spec: ToolSpec) -> bool: ...
+
+    def requires_authorization(self, spec: ToolSpec) -> bool: ...

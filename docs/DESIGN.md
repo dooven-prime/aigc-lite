@@ -1,6 +1,6 @@
 # aigc-lite 产品与架构设计
 
-状态：Draft，`0.4.1` 补丁基线已冻结，下一阶段进入认证生命周期、依赖供应链和领域拆分。
+状态：Draft，`0.5.0` 功能基线进入发布闭包，下一阶段接外部 policy enforcer 与签名验证。
 
 ## 1. 产品定义
 
@@ -55,7 +55,7 @@ Server、审计、用量和 Web UI。现有测试、Ruff 和前端构建均可�
    治理等待独立的 platform-admin 身份与 scope，不复用 workspace 角色；
 6. 已拆分登录签名密钥与凭据 master key，并使用版本化认证密文；后续仍需增加
    master key 轮换和批量重加密流程；
-7. Schema 已由 13 个 Alembic revision 管理，应用启动时升级到 head；SQLite 回归与
+7. Schema 已由 17 个 Alembic revision 管理，应用启动时升级到 head；SQLite 回归与
    PostgreSQL 17 的真实迁移/repository contract 均进入 CI；
 8. Run/Step 已有首个同步聊天切片，但工具调用、流式事件、Artifact 和 Citation
    尚未接入执行账本；
@@ -277,6 +277,14 @@ MCP 有两个方向：
 两者都必须使用 workspace 身份和同一套权限策略。`mcp-legacy` 只作调试兼容，标记
 deprecated，不扩展其能力。
 
+Chat 不是调用方身份的透明代理。`ChatCapabilityPolicy` 在任何 Session/Run 写入之前，把认证
+上下文解析成 host-owned capability set。默认 `chat.read-only.v1` 清空管理员 Tool scope，只允许
+low-risk、read-only、non-destructive、closed-world 的 local/workspace tool；MCP source 无论自报
+hint 如何均不可见。显式 `chat.delegated.v1` 要求调用方持有 `tools:write`，但 scope 只负责候选面，
+所有 remote 或 side-effecting invocation 还必须消费匹配 actor/action/target 的当前
+AuthorizationGrant。Prompt、RAG 文档、模型输出和远端 tool metadata 都不能选择或扩大集合。
+Run/Step 冻结 capability set ID、policy hash 与 effective scopes，使授权委托成为可审查执行事实。
+
 核心 application service 通过 context-bound `WorkspaceCapabilityProviderSource`
 投影为 AI-first MCP surface，而不是让模型拼 REST 或让 adapter 回调本机 HTTP。首个版本只提供
 统一搜索、qualified-only search，以及 Run、Artifact、ClaimRevision、QualificationReceipt 和
@@ -381,7 +389,19 @@ scope；任何外部发布或高风险 Tool 还需要单独的 AuthorizationGran
 budget/expiry/max_calls。统一搜索保留候选面，qualified-only search 是独立查询面。Assurance Bundle
 携带 Evaluation、Receipt、CurrentUseBinding 和 Grant，离线验证不再把 `release_ready` 当成 authority。
 
-### 4.11 Physical Capability Bridge
+### 4.11 Review Workbench
+
+Review 与 Qualification 分层。Review Profile 只在冻结的 subject snapshot 上生成证据定位的建议，
+不能写 Claim semantics、Qualification verdict、CurrentUseBinding 或 AuthorizationGrant。代码注册的
+Profile 具有稳定 ID、版本和内容哈希；首个 `execution.integrity.v1` 只运行确定性规则，检查 Run/Step
+终态、序列、错误来源、Tool provenance 及结果是否仅滞留在 Step 文本中。
+
+每次运行形成新的不可变 ReviewRun 和有序 ReviewFinding。快照不复制 Step 正文，只保存 presence、
+digest、状态、脱敏 metadata 及 Artifact/Citation 引用。Finding origin 明确区分
+`deterministic_rule / agent_suggestion / human_review`；当前只允许第一种。Finding 的 `open` 状态不等于
+缺陷成立，未来 accepted 也不等于 resolved；处置必须形成追加记录，并由新 Run/验证证据关闭。
+
+### 4.12 Physical Capability Bridge
 
 物理运行时不进入核心依赖，而是作为独立 MCP Provider 进程：
 
@@ -464,6 +484,12 @@ POST /api/v1/agent-runs/{run_id}/cancel
 
 ## 7. 安全基线
 
+完整威胁模型见 [THREAT_MODEL.md](THREAT_MODEL.md)。设计假定被治理的 Agent 最终可能理解
+评估、策略和 gate；理解 gate 不产生修改 gate 的权力，模型能力增长不产生权限增长。
+Qualification Plane 与 Execution Authority Plane 相互独立；应用授权、外部 runtime policy
+和基础设施 watchdog 共同决定有效 capability。当前进程内 gate 与 process backend 不是
+kernel sandbox，也不是独立故障域。
+
 发布前必须满足：
 
 1. 任何外部或私有来源都视为不可信输入：不得复制本地配置、凭据或组织专属地址，
@@ -478,6 +504,9 @@ POST /api/v1/agent-runs/{run_id}/cancel
 8. 上传限制同时覆盖 body bytes、解压后大小、解析时间和保存配额；
 9. 明确 trusted proxy、HTTPS、CORS、Host header 和 cookie/token 部署要求；
 10. 对租户隔离、IDOR、SSRF、secret redaction 和 tool authorization 建立负向测试。
+11. 权限扩张必须形成可审查的 policy diff，由请求执行身份之外的 principal 批准；
+12. 高风险执行保留外部 enforcement seam，且不得把 in-process audit 误称为隔离；
+13. 对外文档区分已实现控制、可选外部集成和厂商声明，不用路线图替代安全保证。
 
 ## 8. 版本路线
 
@@ -634,6 +663,21 @@ ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
     repository 已各自形成显式 Port 和 SQLite/PostgreSQL domain mixin，顶层 `Repository`、
     `SQLiteRepository` 与 `PostgresRepository` 保留为兼容 facade；后续继续拆分其他领域时，
     不在同一切片同时改写存储语义。
+20. 已完成：增加 Review Profile Registry、`execution.integrity.v1` 与 ReviewFinding ledger。
+    确定性规则检查 Run/Step 完整性、错误和 Tool provenance，并把建议绑定到冻结 subject digest
+    与证据引用。Review 与 Qualification/CurrentUse/Authorization 完全分离；输入快照只保存正文
+    digest，不复制会话或工具输出。HTTP 创建仅限 workspace admin，历史与 Finding 可租户内查询。
+21. 已完成：增加 `ChatCapabilityPolicy` 与版本化 capability set。默认 Chat 不继承调用方管理员
+    scope，只投影低风险、只读、无副作用、闭世界的本地/工作区能力；显式 delegated set 要求
+    `tools:write`，且所有远程 MCP 或副作用调用继续消费窄 AuthorizationGrant。策略决定在数据库
+    副作用前完成，Run/Step 冻结 set ID/hash/effective scopes，调度与 Verification Agent 不能通过
+    payload 或模型输出自行提升能力。
+22. 已完成：增加不可变 `PolicyProposal + PermissionDiff + EnforcementReceipt` 基础层。管理员只能
+    提交 base/candidate deny-by-default policy，diff 由服务端确定性计算；无法证明为收紧的
+    constraint change 失败关闭为扩权。Proposal 首版只有 `proposed`，不附带 approve/apply 权力。
+    Receipt 没有公共写 API，只能由 host 注册的 backend issuer 绑定 Run/Step、policy/envelope/tool/
+    argument digest 后写入，重复 receipt hash 幂等。外部认证、签名/attestation 验证、policy CAS
+    apply 和 quarantine 仍属于后续 adapter，当前 ledger 不冒充 sandbox。
 
 每个切片都必须产生可查询的真实纵向行为，不为了目录完整度创建没有 consumer 的抽象。
 
@@ -645,7 +689,8 @@ ROS 2 的环境仍能安装、启动和运行全部非机器人功能。
 - 模型治理：公开模型路由与上游账户分离；
 - Secret：引用优先，每次操作解析，独立 master key；
 - Agent：持久化 Run/Step/Event，预算受限；
-- Tool：统一 Catalog，本地与 MCP 同策同审计；
+- Tool：统一 Catalog，本地与 MCP 同策同审计；Chat 通过 host-owned capability set 决定模型可见面，
+  scope 与逐调用 AuthorizationGrant 分层；
 - Artifact：结果本体与 Citation 来源分离，并可从 Run/Step 双向追溯；
 - Transport：HTTP、MCP、UI 共享 application service；
 - 存储：显式 migration，同一 repository contract 覆盖 SQLite/PostgreSQL；

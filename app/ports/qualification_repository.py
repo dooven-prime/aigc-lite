@@ -61,4 +61,6 @@ class QualificationRepository(Protocol):
         action: str,
         target: str,
         used_at: str,
+        *,
+        grant_id: str | None = None,
     ) -> dict | None: ...

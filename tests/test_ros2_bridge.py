@@ -1,11 +1,19 @@
 import asyncio
 import json
+import threading
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import httpx2
 import pytest
 from aigc_lite_ros2.config import BridgeSettings
-from aigc_lite_ros2.contracts import PhysicalActionStatus
+from aigc_lite_ros2.contracts import (
+    ExecutionEnvironment,
+    NavigationRequest,
+    PhysicalActionStatus,
+    Pose2D,
+    RobotState,
+)
 from aigc_lite_ros2.server import APIKeyASGI, create_server
 from aigc_lite_ros2.service import RobotCapabilityService
 from aigc_lite_ros2.simulator import SimulatorBackend
@@ -170,8 +178,9 @@ def test_bridge_projects_policy_through_remote_mcp_catalog() -> None:
         )
         consumed = []
 
-        def authorize(context, spec):
+        def authorize(context, spec, arguments):
             consumed.append((context.principal_id, spec.native_name))
+            assert arguments["idempotency_key"] == "mcp-navigation-001"
             return {
                 "id": "grant-robot-1",
                 "qualification_receipt_id": "receipt-robot-1",
@@ -287,6 +296,149 @@ def test_nav2_import_failure_is_lazy_and_actionable(monkeypatch) -> None:
     monkeypatch.setattr(nav2.importlib, "import_module", unavailable)
     with pytest.raises(RuntimeError, match="sourced ROS 2 installation"):
         nav2._load_ros()
+
+
+def _nav2_backend_for_reconciliation_test():
+    from aigc_lite_ros2 import nav2
+
+    backend = object.__new__(nav2.Nav2Backend)
+    backend.robot_id = "nav2-test"
+    backend.environment = ExecutionEnvironment.HARDWARE
+    backend.map_id = "map-test"
+    backend.action_name = "navigate_to_pose"
+    backend._lock = asyncio.Lock()
+    backend._feedback_lock = threading.Lock()
+    backend._active = None
+    backend._pending = None
+    backend._dispatching = True
+    backend._receipts = {}
+    backend._key_to_action = {}
+    backend._latest = None
+    backend._reconciliation_tasks = {}
+    backend._ros = {
+        "GoalStatus": SimpleNamespace(
+            STATUS_SUCCEEDED=1,
+            STATUS_CANCELED=2,
+            STATUS_ABORTED=3,
+        )
+    }
+
+    async def get_state():
+        active = backend._active
+        return RobotState(
+            robot_id=backend.robot_id,
+            environment=backend.environment,
+            observed_at="2026-09-30T00:00:00+00:00",
+            pose=Pose2D(0, 0, 0),
+            navigation_status="executing" if active else "idle",
+            active_action_id=active.action_id if active else None,
+            map_id=backend.map_id,
+        )
+
+    backend.get_state = get_state
+    return backend
+
+
+def test_nav2_late_goal_acceptance_is_cancelled_and_recorded() -> None:
+    from aigc_lite_ros2 import nav2
+
+    async def run():
+        backend = _nav2_backend_for_reconciliation_test()
+        loop = asyncio.get_running_loop()
+        goal_future = loop.create_future()
+        result_future = loop.create_future()
+        cancel_future = loop.create_future()
+        cancel_future.set_result(SimpleNamespace())
+        cancel_calls = 0
+
+        class GoalHandle:
+            accepted = True
+            goal_id = SimpleNamespace(uuid=bytes.fromhex("01" * 16))
+
+            def get_result_async(self):
+                return result_future
+
+            def cancel_goal_async(self):
+                nonlocal cancel_calls
+                cancel_calls += 1
+                result_future.set_result(SimpleNamespace(status=2))
+                return cancel_future
+
+        request = NavigationRequest(
+            idempotency_key="late-goal-001",
+            goal=Pose2D(1, 2, 0),
+            action_timeout_seconds=30,
+        )
+        pending = nav2._PendingNavigation(
+            action_id="action-late",
+            request=request,
+            before=await backend.get_state(),
+            goal_future=goal_future,
+            started_at="2026-09-30T00:00:00+00:00",
+        )
+        backend._pending = pending
+        backend._key_to_action[request.idempotency_key] = pending.action_id
+        task = asyncio.create_task(backend._reconcile_late_dispatch(pending))
+        await asyncio.sleep(0)
+        goal_future.set_result(GoalHandle())
+        await task
+        return backend, cancel_calls
+
+    backend, cancel_calls = asyncio.run(run())
+    assert cancel_calls == 1
+    assert backend._pending is None
+    assert backend._active is None
+    assert backend._dispatching is False
+    assert backend._receipts["action-late"].status is PhysicalActionStatus.CANCELLED
+    assert backend._receipts["action-late"].stop_confirmed is True
+
+
+def test_nav2_indeterminate_stop_keeps_motion_slot_until_terminal_result() -> None:
+    from aigc_lite_ros2 import nav2
+
+    async def run():
+        backend = _nav2_backend_for_reconciliation_test()
+        request = NavigationRequest(
+            idempotency_key="indeterminate-001",
+            goal=Pose2D(1, 2, 0),
+            action_timeout_seconds=30,
+        )
+        active = nav2._Nav2Action(
+            action_id="action-indeterminate",
+            request=request,
+            before=await backend.get_state(),
+            goal_handle=SimpleNamespace(),
+            result_future=asyncio.get_running_loop().create_future(),
+            provider_action_id="provider-action",
+            started_at="2026-09-30T00:00:00+00:00",
+        )
+        backend._active = active
+        uncertain = await backend._finish(
+            active,
+            status=PhysicalActionStatus.INDETERMINATE,
+            stop_confirmed=False,
+            error_code="cancel_confirmation_timeout",
+            error_message="Stop was not confirmed.",
+        )
+        still_blocking = backend._active
+        terminal = await backend._finish(
+            active,
+            status=PhysicalActionStatus.CANCELLED,
+            stop_confirmed=True,
+            error_code="action_cancelled",
+            error_message="Nav2 later confirmed cancellation.",
+            nav2_status=2,
+        )
+        return backend, active, uncertain, still_blocking, terminal
+
+    backend, active, uncertain, still_blocking, terminal = asyncio.run(run())
+    assert uncertain.status is PhysicalActionStatus.INDETERMINATE
+    assert uncertain.stop_confirmed is False
+    assert still_blocking is active
+    assert backend._active is None
+    assert terminal.status is PhysicalActionStatus.CANCELLED
+    assert terminal.stop_confirmed is True
+    assert backend._receipts[active.action_id] == terminal
 
 
 def test_remote_tool_cannot_lower_provider_policy() -> None:

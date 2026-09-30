@@ -16,7 +16,7 @@ def main() -> None:
         assert readiness.json()["status"] == "ready"
         index = client.get("/ui/")
         assert index.status_code == 200
-        assert '<meta name="aigc-lite-ui" content="react-v0.4"' in index.text
+        assert '<meta name="aigc-lite-ui" content="react-v0.5"' in index.text
         match = re.search(r'src="(/ui/assets/[^"]+\.js)"', index.text)
         assert match is not None
         asset = client.get(match.group(1))

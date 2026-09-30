@@ -26,6 +26,56 @@ Run ID。
 到持有该 Run 的 worker。异步模型和远程 MCP 调用可以被取消。本地 Python 工具可选择 `async`、
 `thread` 或 `process` backend；线程模式只能停止等待，进程模式则可在超时或取消时终止独立 worker。
 
+### Chat capability boundary
+
+认证主体拥有某个 scope，不等于模型自动继承该 scope。`GatewayService` 在读取会话、写消息或创建
+Run 之前，先由 `ChatCapabilityPolicy` 把调用上下文解析成一个服务端拥有、版本化且内容哈希固定的
+capability set：
+
+| set | 模型可见能力 | 额外边界 |
+|---|---|---|
+| `chat.read-only.v1`（默认） | low-risk、read-only、non-destructive、closed-world 的 local/workspace tool | 清空调用方全部 Tool scope；排除远程 MCP |
+| `chat.delegated.v1` | 通过普通 workspace/risk/scope 过滤后的 local/workspace/MCP tool | 调用方先具备 `tools:write`；远程、写入、破坏性或 medium/high-risk 调用再消费窄 `AuthorizationGrant` |
+
+Tool 描述中的 `readOnly` 等 hint 不是权限来源。远程 Provider 即使把自己标成只读，仍由宿主记录的
+`source=mcp` 触发授权门；没有 grant 时 provider 不会收到调用。Prompt、system prompt、检索到的
+workspace 文档与模型 tool call 都位于策略墙内，不能改变 capability set、scope 或授权账本。
+Grant 中的 invocation scope、argument conditions 与 timeout budget 会针对本次已解码参数执行确定性
+匹配；只拥有相同 actor/action/target 但约束不覆盖本次调用的 grant 不会被消费，也不会放行 provider。
+
+Run 冻结 `capability_set_id + capability_policy_hash`，每个 Step 冻结同一 decision 和实际生效的
+scope。这使后续 Review 可以区分“管理员发起 Chat”和“管理员权限被委托给模型”。调度器的
+`agent.chat` payload 不接受 capability set，Verification Runner 的普通 Agent 执行也不自带 Tool
+scope；两者默认落在只读集合。需要更强能力时应新增服务端注册、目的单一的 target/profile，并由
+独立授权提供执行权，而不是允许计划内容或模型输出提升自己。
+
+### Policy proposal and enforcement evidence
+
+Execution policy 的变更先形成不可变 `PolicyProposal`，而不是直接改当前 runtime。Proposal 同时
+冻结 base/candidate policy snapshot、revision 与 hash；`PermissionDiff` 由服务端计算。新增
+permission/action、删除 limit、放宽 limit 都是扩权；constraint 的领域语义尚未由专用 verifier
+证明时，任何变化也保守地记为扩权。策略必须 `default_action=deny`，candidate revision 必须紧跟
+base revision。Genesis proposal 从 revision 0 的空 deny policy 开始。
+
+当前切片只记录 `proposed`，没有 approve/apply API。后续外部 enforcer 应使用 base hash 做 CAS，
+防止已过期 proposal 覆盖更新后的 runtime policy。模型、Chat tool 和普通 MCP surface 均不能创建、
+批准或应用 policy proposal。
+
+`EnforcementReceipt` 是另一条不可变账本。公共 HTTP 只提供查询；写入只能由 host 注册的 issuer
+通过内部 `EnforcementService.record_receipt()` 完成。Receipt 绑定 Run、可选 Step/Proposal、实际
+policy hash、execution envelope hash、ToolSpec/arguments digest、decision/outcome、观察或拒绝的
+effect、credential binding，以及 host-owned backend identity/trust domain。相同 receipt hash
+幂等折叠，跨 workspace 的 Run、Step 或 Proposal 不能绑定。
+
+这仍不是外部 sandbox 本身。issuer registry 只保证应用 composition 不接受客户端自报 identity；
+真正的 mTLS、签名验证、remote attestation、policy apply 和 quarantine 由后续具体 backend adapter
+负责。在这些 adapter 完成之前，Receipt 的 trust domain 不能高于产生它的实际 enforcement 环境。
+
+ROS2/Nav2 dispatch 一旦提交，即使调用方在 goal handle 返回前取消或超时，bridge 仍保留该 future；
+若 Nav2 随后接受目标，bridge 会立即请求取消并形成 Receipt。取消确认超时或失败时 action 保持
+`indeterminate` 且继续占用运动槽，直到 Nav2 返回终态或运维处置，不能在“可能仍运动”时开始下一次
+导航。
+
 ## 持久化任务调度
 
 应用启动时会从 `scheduled_tasks` 恢复活跃计划，并使用进程内多级时间轮建立可丢弃的唤醒索引；
@@ -33,7 +83,7 @@ SQLite/PostgreSQL 中的计划定义始终是事实来源。`TaskRunner` 当前�
 
 | target | payload | 执行语义 |
 |---|---|---|
-| `agent.chat` | `prompt`，可选 `system/model/session_id` | 通过 `GatewayService` 创建正常 Agent Run |
+| `agent.chat` | `prompt`，可选 `system/model/session_id` | 通过 `GatewayService` 创建默认只读 Chat Run；payload 不能选择委托集合 |
 | `mcp.probe` | `server_id` | 探测已保存的 MCP Server 并更新最新健康投影 |
 | `tool.call` | `name`、可选 `arguments` | 通过 Tool Catalog 执行本地或远程 MCP tool，并记录 Run/Step |
 | `http.poll` | `url`、可选 `expected_status/timeout_seconds` | GET allowlist URL，只记录状态、延迟与 Run/Step |
@@ -105,7 +155,7 @@ workspace 查询均被拒绝。
 
 ## 统一搜索
 
-`/api/search` 通过独立 `SearchBackend` 查询消息、文档 chunk、Run Step、Artifact 和 Citation。
+`/api/search` 通过独立 `SearchBackend` 查询消息、导入候选消息、文档 chunk、Run Step、Artifact 和 Citation。
 SQLite 使用 FTS5 `trigram` 索引，不再受旧版“每类最多扫描 500 条候选”的窗口限制；`0006` migration
 会回填已有记录，数据库触发器负责后续新增、更新和删除同步。用户查询会被转换成引用后的 FTS
 表达式，不直接执行客户端提供的操作符或列选择器。
@@ -113,6 +163,10 @@ SQLite 使用 FTS5 `trigram` 索引，不再受旧版“每类最多扫描 500 �
 少于三个字符的中文/英文查询会走有界词法 fallback；运行时 SQLite 缺少 FTS5 或不支持 trigram
 时也会自动降级。PostgreSQL 当前继续使用相同结果契约的词法 backend，后续可以独立替换成原生
 全文检索或 embedding backend，而无需修改 `MemoryService` 和 HTTP API。
+
+Conversation Import 将每个外部消息图节点作为 `conversation_message` 候选写入同一搜索契约，
+并返回 `import_batch_id`、`conversation_id` 与原始 Artifact 定位。它不会进入 qualified-only
+retrieval；导入存储准入与知识资格仍是两条独立路径。
 
 登录后的侧栏 **Search** 是该契约的统一 UI：一次查询同时返回 Conversation、Knowledge、Run
 Step、Artifact 和 Citation，并可按来源类型过滤。执行类结果保留完整定位关系；用户可以分别打开

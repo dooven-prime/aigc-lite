@@ -37,11 +37,16 @@ Search + Verification + Qualification + Authorization
 ## 核心能力
 
 - 同步/SSE Agent 对话，以及模型轮次、工具次数、墙钟和单工具执行预算；
+- server-owned Chat capability sets；默认对话剥离管理员 scope，只向模型暴露低风险、
+  只读、无副作用的闭世界能力，远程或写能力必须显式委托并经过窄授权；
 - workspace-aware Tool Catalog，统一本地 Python tool、远程 MCP tool 和权限边界；
 - SQLite/PostgreSQL 执行账本，记录 Run、Step、Artifact、Citation 和稳定错误码；
 - 可恢复计划任务、Run Explorer，以及跨会话、知识、步骤和产物的统一搜索；
 - Research Registry、Claim Relation、Verification Runner 和 Promotion Gate；
 - Qualification Plane、Lean/Coq kernel verifier、qualified-only retrieval 和窄授权；
+- Review Profile Registry 与确定性的执行完整性 Finding 账本；
+- 不可变 Policy Proposal、服务端 Permission Diff 与 backend-issued Enforcement Receipt 账本；
+- preview/commit 型 Conversation Import Registry，保留外部消息分支与来源 Artifact，并只进入 candidate search；
 - 可离线校验的 Assurance Bundle；
 - 独立安装的 ROS 2/Nav2 capability provider，核心不依赖 ROS 2。
 
@@ -100,6 +105,10 @@ Fernet master key。所有变量、MiniMax 示例和租户配置见
 - Python thread tool 只能停止等待，不能被 asyncio 强制终止；需要硬取消时使用 process
   backend、容器或外部 sandbox。
 - Qualification 不等于 Authorization；任何高风险或物理动作仍需要独立授权与设备侧安全链。
+- 假定被治理的 Agent 最终能理解 gate；理解 gate 不产生修改 gate 的权力，能力增长也不自动
+  扩大有效权限。应用层 gate 不能替代外部 sandbox 或独立 watchdog。
+- Prompt、RAG 文档和模型输出都不能选择或扩大 Chat capability set；策略选择只来自受认证的
+  请求字段，且 Run/Step 会冻结实际生效的策略 ID、哈希和 scope。
 - `/health` 仅表示进程存活，部署探针应使用 `/ready`。
 
 公网部署、备份恢复和当前运维限制见
@@ -113,12 +122,15 @@ Fernet master key。所有变量、MiniMax 示例和租户配置见
 | [Execution Runtime](docs/EXECUTION.md) | Agent 边界、调度、统一搜索与 Run Explorer |
 | [MCP and Tool Runtime](docs/MCP.md) | MCP、Tool Catalog、Credential Store 和执行 backend |
 | [Qualification and Assurance](docs/QUALIFICATION.md) | Claim qualification、kernel verification、授权与离线 Bundle |
+| [Review Workbench](docs/REVIEW.md) | 版本化审查 Profile、执行完整性规则与 Finding 账本 |
+| [Conversation Imports](docs/CONVERSATION_IMPORTS.md) | ChatGPT/DeepSeek preview、不可变批次、原始 Artifact 与 candidate-only 搜索 |
 | [Configuration](docs/CONFIGURATION.md) | 完整环境变量、模型、租户、MCP 与 formal kernel 配置 |
 | [Production](docs/PRODUCTION.md) | 生产启动保护、备份恢复和已知运维限制 |
+| [Threat Model](docs/THREAT_MODEL.md) | 两个 authority plane、三层 enforcement、系统假设和未实现边界 |
 | [Design](docs/DESIGN.md) | 产品边界、核心契约、架构决策和路线 |
 | [ROS 2 Bridge](extensions/ros2-bridge/README.md) | Simulator/Nav2 provider、物理动作和安全边界 |
 | [Changelog](CHANGELOG.md) | 版本变化 |
-| [v0.4.1 release closure](docs/releases/v0.4.1.md) | 当前补丁基线和验证范围 |
+| [v0.5.0 release closure](docs/releases/v0.5.0.md) | 当前功能基线和验证范围 |
 
 ## 开发
 

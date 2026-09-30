@@ -53,6 +53,13 @@ bindings while refreshing evidence closure, but it can never grant authority.
 
 自定义工具可以放在应用启动代码中导入后注册。Agent 不直接读取全局工具字典，而是在每次 Run 开始时从 Tool Catalog 获取当前 workspace 和 scope 可见的快照。远程 MCP tool 以 `{provider_id}__{tool_name}` 暴露给模型，避免不同服务之间名称冲突。
 
+Tool Catalog 是共同的发现/执行机制，但 transport 的授权入口不同。直接连接 `/mcp` 的客户端使用
+自己的认证 identity 与 scope；`/api/chat` 中的模型还要经过 `ChatCapabilityPolicy`。Chat 默认
+`chat.read-only.v1` 会剥离调用方管理 scope，并完全排除远程 MCP；显式
+`chat.delegated.v1` 只允许拥有 `tools:write` 的调用方请求，且每个远程 MCP 调用无论其 hint 如何，
+仍必须在 provider dispatch 前消费当前 `AuthorizationGrant`。因此“管理员能配置/直连某个 MCP”
+不会自动变成“管理员发起的任意 Chat 都能让模型调用它”。
+
 部署者可以通过环境变量静态装配远程 Streamable HTTP MCP Server。`header_env` 的值是
 环境变量名，不是密钥本身；只有同时列入
 `AIGC_LITE_MCP_ENV_CREDENTIAL_ALLOWLIST` 的变量才可读取。例如：

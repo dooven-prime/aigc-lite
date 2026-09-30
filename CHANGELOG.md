@@ -5,6 +5,44 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-30
+
+- Added immutable `PolicyProposal`, server-derived `PermissionDiff`, and
+  backend-issued `EnforcementReceipt` contracts. Policy requests freeze
+  deny-by-default base/candidate revisions without approving or applying them;
+  conservative diffs expose every expansion. Receipts have no public write
+  route, bind execution and policy digests to host-registered issuer identity,
+  remain workspace-scoped and immutable, and deduplicate retry writes by hash.
+- Added an explicit threat model built around two authority planes and three
+  enforcement layers. It assumes governed Agents may understand their gates,
+  prevents capability growth from implying authority growth, inventories the
+  current in-process controls versus external sandbox/watchdog gaps, and
+  defines a vendor-neutral enforcement receipt seam for future runtimes.
+- Closed four authority/physical-execution races found during review: Nav2 now
+  owns and cancels goals accepted after a dispatch timeout, indeterminate stop
+  results continue blocking new motion, Assurance export refreshes transitive
+  current-use bindings, and Tool authorization enforces invocation scope,
+  conditions, and budgets before atomically consuming the exact matching grant.
+- Added protocol-level coverage requiring every discovered MCP tool to emit all
+  four boolean behavior annotations. The wheel's minified React asset remains a
+  reproducible packaged build; its readable source is maintained in
+  `frontend/src`.
+- Added a versioned Conversation Import Registry with ChatGPT and DeepSeek
+  adapters, stateless preview hashes, atomic immutable ImportBatch commits,
+  content-addressed raw source Artifacts, complete parent/branch/citation/
+  attachment provenance, and candidate-only FTS5/lexical search projection.
+  Imports do not create qualification, current-use, or authorization records.
+- Added a server-owned `ChatCapabilityPolicy`. Chat now defaults to the
+  `chat.read-only.v1` capability set, strips caller administration scopes, and
+  exposes only low-risk, read-only, non-destructive, closed-world local or
+  workspace tools. Explicit `chat.delegated.v1` selection requires
+  `tools:write`; every remote MCP or side-effecting invocation additionally
+  consumes a current narrow `AuthorizationGrant`. Runs and Steps freeze the
+  selected policy ID/hash and effective scopes for later review.
+- Added a versioned Review Profile Registry, the deterministic
+  `execution.integrity.v1` profile, and an immutable ReviewRun/ReviewFinding
+  ledger. Reviews freeze privacy-bounded execution digests and evidence refs,
+  remain workspace-scoped, and cannot mutate qualification or authorization.
 - Added a context-bound, AI-first `WorkspaceCapabilityProvider` to the default
   Tool Catalog. MCP clients and Agents can now search execution memory and
   qualified knowledge, and read Runs, Artifacts, ClaimRevisions,

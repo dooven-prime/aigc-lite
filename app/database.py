@@ -38,7 +38,11 @@ def get_repository() -> Repository:
 
 
 def init_db() -> None:
-    get_repository().init()
+    # Repository construction already applies the migration set before the
+    # instance enters the process cache. Calling ``init`` again here can run
+    # Alembic twice in the same startup path and has been observed to stall
+    # clean Docker boots under Uvicorn/uvloop.
+    get_repository()
 
 
 def get_search_backend() -> SearchBackend:

@@ -14,6 +14,7 @@ from app.core.artifacts import (
 from app.core.contracts import (
     ChatCommand,
     RequestContext,
+    ToolHints,
     ToolProviderResult,
     ToolSource,
     ToolSpec,
@@ -31,14 +32,29 @@ from app.services.tool_catalog import ToolCatalog
 from app.tools import tool
 
 
-@tool("ledger_secret_echo")
+@tool(
+    "ledger_secret_echo",
+    read_only=True,
+    destructive=False,
+    idempotent=True,
+    open_world=False,
+)
 def ledger_secret_echo(api_key: str) -> dict:
     """Echo a credential-shaped value for ledger redaction tests."""
     return {"token": api_key, "ok": True}
 
 
-def _context(workspace_id: str = "workspace-a") -> RequestContext:
-    return RequestContext(request_id="request-1", workspace_id=workspace_id)
+def _context(
+    workspace_id: str = "workspace-a",
+    *,
+    scopes: frozenset[str] = frozenset(),
+) -> RequestContext:
+    return RequestContext(
+        request_id="request-1",
+        workspace_id=workspace_id,
+        principal_id="test-principal",
+        scopes=scopes,
+    )
 
 
 def test_gateway_chat_coordinates_agent_usage_and_persistence(tmp_path) -> None:
@@ -309,6 +325,11 @@ class DisconnectedMCPProvider:
                 input_schema={"type": "object"},
                 source=ToolSource.MCP,
                 provider_id=self.provider_id,
+                hints=ToolHints(
+                    read_only=True,
+                    destructive=False,
+                    idempotent=True,
+                ),
             )
         ]
 
@@ -354,9 +375,25 @@ def test_gateway_persists_safe_failed_step_for_disconnected_mcp_tool(
     service = GatewayService(
         repository_provider=lambda: repository,
         agent_runner=agent.run_agent,
-        tool_catalog=ToolCatalog([DisconnectedMCPProvider()]),
+        tool_catalog=ToolCatalog(
+            [DisconnectedMCPProvider()],
+            authorization_gate=lambda _context, _spec, _arguments: {
+                "id": "grant-remote-lookup",
+                "qualification_receipt_id": "receipt-remote-lookup",
+                "calls_used": 1,
+                "max_calls": 1,
+            },
+        ),
     )
-    result = asyncio.run(service.chat(ChatCommand(prompt="use remote"), _context()))
+    result = asyncio.run(
+        service.chat(
+            ChatCommand(
+                prompt="use remote",
+                capability_set_id="chat.delegated.v1",
+            ),
+            _context(scopes=frozenset({"tools:write"})),
+        )
+    )
     steps = repository.get_run("workspace-a", result.run_id)["steps"]
 
     assert [step["status"] for step in steps] == ["succeeded", "failed", "succeeded"]
@@ -381,6 +418,11 @@ class ArtifactMCPProvider:
                 input_schema={"type": "object"},
                 source=ToolSource.MCP,
                 provider_id=self.provider_id,
+                hints=ToolHints(
+                    read_only=True,
+                    destructive=False,
+                    idempotent=True,
+                ),
             )
         ]
 
@@ -438,10 +480,26 @@ def test_gateway_persists_artifacts_from_agent_tool_steps(
     service = GatewayService(
         repository_provider=lambda: repository,
         agent_runner=agent.run_agent,
-        tool_catalog=ToolCatalog([ArtifactMCPProvider()]),
+        tool_catalog=ToolCatalog(
+            [ArtifactMCPProvider()],
+            authorization_gate=lambda _context, _spec, _arguments: {
+                "id": "grant-artifact-research",
+                "qualification_receipt_id": "receipt-artifact-research",
+                "calls_used": 1,
+                "max_calls": 1,
+            },
+        ),
     )
 
-    result = asyncio.run(service.chat(ChatCommand(prompt="research"), _context()))
+    result = asyncio.run(
+        service.chat(
+            ChatCommand(
+                prompt="research",
+                capability_set_id="chat.delegated.v1",
+            ),
+            _context(scopes=frozenset({"tools:write"})),
+        )
+    )
     detail = repository.get_run("workspace-a", result.run_id)
     tool_step = next(step for step in detail["steps"] if step["kind"] == "tool")
 

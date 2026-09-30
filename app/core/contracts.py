@@ -102,6 +102,7 @@ class ChatCommand:
     system: str = "You are a helpful assistant."
     requested_model: str | None = None
     session_id: str | None = None
+    capability_set_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

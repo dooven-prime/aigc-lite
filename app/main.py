@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -20,7 +21,10 @@ from . import __version__
 from .adapters.kernel_verification import KernelVerifierRegistry
 from .adapters.scheduling import TimeWheelScheduler
 from .api.configuration import create_configuration_router
+from .api.conversation_imports import create_conversation_import_router
+from .api.enforcement import create_enforcement_router
 from .api.research import create_research_router
+from .api.reviews import create_review_router
 from .audit import record_request
 from .auth import (
     create_login_session,
@@ -36,8 +40,11 @@ from .core.errors import (
     AgentLimitError,
     AgentWallTimeLimitError,
     ApplicationError,
+    ChatCapabilityDeniedError,
     InvalidArtifactError,
+    InvalidConversationImportError,
     InvalidEvidenceError,
+    InvalidExecutionPolicyError,
     InvalidKernelVerificationError,
     InvalidScheduleError,
     InvalidVerificationResultError,
@@ -67,8 +74,12 @@ from .database import (
 from .mcp import build_transport_apps, call_local_tool, create_mcp_server, handle_rpc
 from .services.artifacts import ArtifactService
 from .services.assurance import AssuranceBundleService
+from .services.chat_capabilities import ChatCapabilityPolicy
+from .services.conversation_import_registry import ConversationImportRegistry
+from .services.conversation_imports import ConversationImportService
 from .services.credentials import CredentialService
 from .services.decision_lab import DecisionLabService
+from .services.enforcement import EnforcementService
 from .services.evidence import EvidenceService
 from .services.gateway import GatewayService
 from .services.http_poll import HTTPPollService
@@ -78,6 +89,7 @@ from .services.memory import MemoryService
 from .services.qualification import QualificationService
 from .services.readiness import ReadinessService
 from .services.research_registry import ResearchRegistryService
+from .services.reviews import ReviewService
 from .services.scheduler import SchedulerService
 from .services.task_runner import TaskRunner
 from .services.tool_catalog import create_default_tool_catalog
@@ -87,15 +99,19 @@ from .startup import validate_startup_security
 from .tenancy import Tenant, _role_scopes, current_tenant
 
 PACKAGED_UI = Path(__file__).parent / "static"
+logger = logging.getLogger(__name__)
 tool_catalog = create_default_tool_catalog()
 artifact_service = ArtifactService()
+chat_capability_policy = ChatCapabilityPolicy()
 tool_service = ToolService(
     tool_catalog=tool_catalog, artifact_service=artifact_service
 )
 mcp_server = create_mcp_server(tool_service)
 mcp_app, mcp_sse_app = build_transport_apps(mcp_server)
 gateway_service = GatewayService(
-    tool_catalog=tool_catalog, artifact_service=artifact_service
+    tool_catalog=tool_catalog,
+    artifact_service=artifact_service,
+    chat_capability_policy=chat_capability_policy,
 )
 memory_service = MemoryService()
 mcp_probe_service = MCPProbeService()
@@ -107,6 +123,12 @@ decision_lab_service = DecisionLabService(
 )
 research_registry_service = ResearchRegistryService(
     artifact_service=artifact_service, evidence_service=evidence_service
+)
+review_service = ReviewService()
+enforcement_service = EnforcementService()
+conversation_import_registry = ConversationImportRegistry.builtins()
+conversation_import_service = ConversationImportService(
+    registry=conversation_import_registry
 )
 kernel_verifier_registry = KernelVerifierRegistry.from_config(
     lean_executable=settings.lean_executable,
@@ -244,15 +266,22 @@ class MCPAuthMiddleware:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    logger.info("startup phase: validating deployment security")
     validate_startup_security(settings)
+    logger.info("startup phase: initializing database")
     init_db()
+    logger.info("startup phase: ensuring bootstrap administrator")
     ensure_bootstrap_admin()
+    logger.info("startup phase: validating persisted security state")
     validate_startup_security(settings, get_repository())
     if settings.scheduler_enabled:
+        logger.info("startup phase: recovering scheduler")
         await timewheel_scheduler.start()
+    logger.info("startup phase: starting MCP session manager")
     try:
         try:
             async with mcp_server.session_manager.run():
+                logger.info("startup complete")
                 yield
         except RuntimeError as exc:
             if "can only be called once" not in str(exc):
@@ -299,10 +328,14 @@ async def application_error_handler(_request: Request, exc: ApplicationError) ->
         exc, (ResourceConflictError, RunNotActiveError, ScheduleNotActiveError)
     ):
         status_code = 409
+    elif isinstance(exc, ChatCapabilityDeniedError):
+        status_code = 403
     elif isinstance(
         exc,
         (
             InvalidArtifactError,
+            InvalidConversationImportError,
+            InvalidExecutionPolicyError,
             InvalidEvidenceError,
             InvalidKernelVerificationError,
             InvalidScheduleError,
@@ -352,6 +385,12 @@ class ChatRequest(BaseModel):
     system: str = Field(default="You are a helpful assistant.", max_length=20_000)
     model: str | None = None
     session_id: str | None = None
+    capability_set_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^[a-z][a-z0-9_.-]*$",
+    )
 
 
 class SessionRequest(BaseModel):
@@ -516,6 +555,7 @@ async def chat(
             system=request.system,
             requested_model=request.model,
             session_id=request.session_id,
+            capability_set_id=request.capability_set_id,
         ),
         request_context(http_request, tenant),
     )
@@ -538,6 +578,7 @@ async def chat_stream(
             system=request.system,
             requested_model=request.model,
             session_id=request.session_id,
+            capability_set_id=request.capability_set_id,
         ),
         request_context(http_request, tenant),
     )
@@ -556,6 +597,14 @@ async def chat_stream(
         media_type="text/event-stream",
         headers={"X-Run-Id": result.run_id, "X-Session-Id": result.session_id},
     )
+
+
+@app.get("/api/chat/capability-sets")
+async def chat_capability_sets(
+    tenant: Tenant = Depends(current_tenant),
+) -> list[dict]:
+    del tenant
+    return chat_capability_policy.list_capability_sets()
 
 
 @app.get("/api/runs")
@@ -762,25 +811,38 @@ async def create_tenant_user(
     )
 
 
-app.include_router(
-    create_configuration_router(
-        credential_service=credential_service,
-        mcp_probe_service=mcp_probe_service,
-        request_context_factory=request_context,
-    )
+configuration_router = create_configuration_router(
+    credential_service=credential_service,
+    mcp_probe_service=mcp_probe_service,
+    request_context_factory=request_context,
 )
-app.include_router(
-    create_research_router(
-        assurance_bundle_service=assurance_bundle_service,
-        decision_lab_service=decision_lab_service,
-        evidence_service=evidence_service,
-        kernel_verification_service=kernel_verification_service,
-        qualification_service=qualification_service,
-        research_registry_service=research_registry_service,
-        verification_runner=verification_runner,
-        request_context_factory=request_context,
-    )
+research_router = create_research_router(
+    assurance_bundle_service=assurance_bundle_service,
+    decision_lab_service=decision_lab_service,
+    evidence_service=evidence_service,
+    kernel_verification_service=kernel_verification_service,
+    qualification_service=qualification_service,
+    research_registry_service=research_registry_service,
+    verification_runner=verification_runner,
+    request_context_factory=request_context,
 )
+review_router = create_review_router(
+    review_service=review_service,
+    request_context_factory=request_context,
+)
+conversation_import_router = create_conversation_import_router(
+    import_service=conversation_import_service,
+    request_context_factory=request_context,
+)
+enforcement_router = create_enforcement_router(
+    enforcement_service=enforcement_service,
+    request_context_factory=request_context,
+)
+app.include_router(configuration_router)
+app.include_router(research_router)
+app.include_router(review_router)
+app.include_router(conversation_import_router)
+app.include_router(enforcement_router)
 
 
 @app.post("/mcp-legacy")

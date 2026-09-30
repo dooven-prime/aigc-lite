@@ -25,6 +25,7 @@ class ErrorCode(StrEnum):
     TOOL_AUTHORIZATION_REQUIRED = "tool_authorization_required"
     TOOL_TIMEOUT = "tool_timeout"
     TOOL_RESULT_TOO_LARGE = "tool_result_too_large"
+    CHAT_CAPABILITY_NOT_ALLOWED = "chat_capability_not_allowed"
     CREDENTIAL_NOT_CONFIGURED = "credential_not_configured"
     CREDENTIAL_KEY_NOT_CONFIGURED = "credential_key_not_configured"
     CREDENTIAL_DECRYPTION_FAILED = "credential_decryption_failed"
@@ -36,6 +37,8 @@ class ErrorCode(StrEnum):
     INVALID_SCHEDULE = "invalid_schedule"
     SCHEDULE_NOT_ACTIVE = "schedule_not_active"
     INVALID_ARTIFACT = "invalid_artifact"
+    INVALID_CONVERSATION_IMPORT = "invalid_conversation_import"
+    INVALID_EXECUTION_POLICY = "invalid_execution_policy"
     INVALID_EVIDENCE = "invalid_evidence"
     INVALID_ASSURANCE_BUNDLE = "invalid_assurance_bundle"
     INVALID_VERIFICATION_RESULT = "invalid_verification_result"
@@ -170,6 +173,21 @@ class RunNotActiveError(ApplicationError):
         )
 
 
+class ChatCapabilityDeniedError(ApplicationError):
+    """The caller cannot delegate the requested Tool capability set to a model."""
+
+    code = ErrorCode.CHAT_CAPABILITY_NOT_ALLOWED
+
+    def __init__(self, capability_set_id: str, required_scopes: frozenset[str]):
+        super().__init__(
+            "Chat capability set is not allowed for this caller",
+            metadata={
+                "capability_set_id": capability_set_id,
+                "required_scopes": sorted(required_scopes),
+            },
+        )
+
+
 class InvalidScheduleError(ApplicationError):
     code = ErrorCode.INVALID_SCHEDULE
 
@@ -193,6 +211,24 @@ class ScheduleNotActiveError(ApplicationError):
 
 class InvalidArtifactError(ApplicationError):
     code = ErrorCode.INVALID_ARTIFACT
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message, metadata={"field": field})
+
+
+class InvalidConversationImportError(ApplicationError):
+    """An external conversation export violates the import contract."""
+
+    code = ErrorCode.INVALID_CONVERSATION_IMPORT
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message, metadata={"field": field})
+
+
+class InvalidExecutionPolicyError(ApplicationError):
+    """A policy proposal or enforcement receipt violates its frozen contract."""
+
+    code = ErrorCode.INVALID_EXECUTION_POLICY
 
     def __init__(self, field: str, message: str):
         super().__init__(message, metadata={"field": field})

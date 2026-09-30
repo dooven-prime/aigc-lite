@@ -315,11 +315,14 @@ class SQLiteQualificationRepositoryMixin:
         action: str,
         target: str,
         used_at: str,
+        *,
+        grant_id: str | None = None,
     ) -> dict | None:
         """Atomically consume one grant backed by the exact current receipt."""
 
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            grant_filter = " AND g.id = ?" if grant_id is not None else ""
             rows = db.execute(
                 "SELECT g.* FROM authorization_grants g "
                 "JOIN qualification_receipts r ON r.tenant_id = g.tenant_id "
@@ -332,8 +335,10 @@ class SQLiteQualificationRepositoryMixin:
                 "AND b.profile_id = r.profile_id "
                 "AND b.qualification_receipt_id = g.qualification_receipt_id "
                 "AND b.state = 'current') "
+                + grant_filter
+                + " "
                 "ORDER BY g.created_at, g.id",
-                (tenant_id, actor_id, action, target),
+                (tenant_id, actor_id, action, target, *([grant_id] if grant_id else [])),
             ).fetchall()
             for row in rows:
                 grant = dict(row)
@@ -623,6 +628,8 @@ class PostgresQualificationRepositoryMixin:
         action: str,
         target: str,
         used_at: str,
+        *,
+        grant_id: str | None = None,
     ) -> dict | None:
         """Atomically consume one grant backed by the exact current receipt."""
 
@@ -633,7 +640,9 @@ class PostgresQualificationRepositoryMixin:
             "actor_id": actor_id,
             "action": action,
             "target": target,
+            "grant_id": grant_id,
         }
+        grant_filter = " AND g.id = :grant_id" if grant_id is not None else ""
         with self.engine.begin() as connection:
             rows = connection.execute(
                 text(
@@ -649,6 +658,8 @@ class PostgresQualificationRepositoryMixin:
                     "AND b.profile_id = r.profile_id "
                     "AND b.qualification_receipt_id = g.qualification_receipt_id "
                     "AND b.state = 'current') "
+                    + grant_filter
+                    + " "
                     "ORDER BY g.created_at, g.id FOR UPDATE OF g"
                 ),
                 parameters,

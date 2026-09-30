@@ -33,6 +33,8 @@ def rank_lexical(rows: list[dict], query: str, limit: int) -> list[dict]:
                 "step_id": row.get("step_id"),
                 "artifact_id": row.get("artifact_id"),
                 "source_kind": row.get("source_kind"),
+                "import_batch_id": row.get("import_batch_id"),
+                "conversation_id": row.get("conversation_id"),
             }
         )
     ranked.sort(key=lambda item: (item["score"], item["created_at"]), reverse=True)

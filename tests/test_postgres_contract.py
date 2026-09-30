@@ -1,3 +1,4 @@
+import json
 import os
 from uuid import uuid4
 
@@ -8,7 +9,10 @@ from sqlalchemy import create_engine, text
 from app.config import settings
 from app.core.contracts import RequestContext
 from app.repository import PostgresRepository
+from app.services.conversation_import_registry import ConversationImportRegistry
+from app.services.conversation_imports import ConversationImportService
 from app.services.credentials import CredentialService
+from app.services.reviews import ReviewService
 
 POSTGRES_URL = os.getenv("AIGC_LITE_TEST_POSTGRES_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -20,10 +24,58 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
     repository = PostgresRepository(POSTGRES_URL)
     repository.init()
-    assert repository.schema_revision() == "0013_model_credential_binding"
+    assert repository.schema_revision() == "0017_execution_authority"
     workspace_id = f"contract-{uuid4()}"
     repository.create_tenant("PostgreSQL contract", workspace_id)
     context = RequestContext(request_id="postgres-contract", workspace_id=workspace_id)
+    import_source = json.dumps(
+        [
+            {
+                "id": "postgres-import",
+                "title": "PostgreSQL imported conversation",
+                "current_node": "node-1",
+                "mapping": {
+                    "node-1": {
+                        "parent": None,
+                        "children": [],
+                        "message": {
+                            "id": "postgres-message",
+                            "author": {"role": "user"},
+                            "content": {
+                                "content_type": "text",
+                                "parts": ["postgres conversation import marker"],
+                            },
+                            "metadata": {},
+                        },
+                    }
+                },
+            }
+        ]
+    ).encode()
+    import_service = ConversationImportService(
+        registry=ConversationImportRegistry.builtins(),
+        repository_provider=lambda: repository,
+    )
+    import_preview = import_service.preview(
+        context,
+        importer_id="chatgpt.export.v1",
+        source_name="postgres-conversations.json",
+        source_bytes=import_source,
+    )
+    import_batch = import_service.commit(
+        context,
+        importer_id="chatgpt.export.v1",
+        source_name="postgres-conversations.json",
+        source_bytes=import_source,
+        expected_preview_hash=import_preview["preview_hash"],
+    )
+    assert import_batch["admission_state"] == "candidate"
+    assert any(
+        item["kind"] == "conversation_message"
+        for item in repository.search_memory(
+            workspace_id, "conversation import marker", 20
+        )
+    )
     credential = CredentialService(lambda: repository).create(
         context, "model-key", "postgres-contract-secret"
     )
@@ -62,6 +114,11 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     )
     repository.finish_run(workspace_id, run["id"], "succeeded")
     assert repository.get_run(workspace_id, run["id"])["status"] == "succeeded"
+    review = ReviewService(lambda: repository).review_execution_run(
+        context, run["id"], "execution.integrity.v1"
+    )
+    assert review["status"] == "completed"
+    assert repository.get_review_run(workspace_id, review["id"]) == review
 
     engine = create_engine(POSTGRES_URL)
     receipt_id = str(uuid4())
@@ -128,6 +185,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
         "robot_navigate_to",
         "robot:contract",
         "2026-09-29T00:00:01+00:00",
+        grant_id=grant["id"],
     )
     assert consumed is not None
     assert consumed["id"] == grant["id"]
@@ -144,4 +202,4 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     )
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "0013_model_credential_binding"
+    assert revision == "0017_execution_authority"

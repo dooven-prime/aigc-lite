@@ -6,9 +6,17 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       AIGC_LITE_HOST: 0.0.0.0
+      AIGC_LITE_PORT: "8000"
       AIGC_LITE_ALLOW_SIGNUP: "false"
       AIGC_LITE_AUTH_SECRET: ${AIGC_LITE_AUTH_SECRET:?set a 32+ character auth secret}
       AIGC_LITE_MASTER_KEY: ${AIGC_LITE_MASTER_KEY:?set a Fernet master key}
       AIGC_LITE_ADMIN_EMAIL: ${AIGC_LITE_ADMIN_EMAIL:?set the bootstrap admin email}
       AIGC_LITE_ADMIN_PASSWORD: ${AIGC_LITE_ADMIN_PASSWORD:?set a 12+ character admin password}
+      AIGC_LITE_API_KEY: ${AIGC_LITE_API_KEY:-}
+      AIGC_LITE_MCP_API_KEY: ${AIGC_LITE_MCP_API_KEY:-}
+    volumes:
+      - aigc-lite-data:/app/data
     restart: unless-stopped
+
+volumes:
+  aigc-lite-data:

@@ -14,6 +14,22 @@ def echo(value: str) -> dict[str, str]:
     return {"value": value}
 
 
+def test_init_db_does_not_apply_migrations_twice(monkeypatch) -> None:
+    from app import database
+
+    calls = 0
+
+    def initialized_repository():
+        nonlocal calls
+        calls += 1
+        return object()
+
+    monkeypatch.setattr(database, "get_repository", initialized_repository)
+    database.init_db()
+
+    assert calls == 1
+
+
 def test_ui_and_session_api(tmp_path, monkeypatch) -> None:
     from app import database
 

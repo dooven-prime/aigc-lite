@@ -9,6 +9,13 @@ cross-workspace data may be exposed.
 
 ## Deployment baseline
 
+The governing threat model assumes that an Agent may understand its evaluator,
+policy, and gate. Understanding a gate never grants authority to modify it, and
+model capability growth must not expand effective authority. See
+`docs/THREAT_MODEL.md` for the two authority planes, three enforcement layers,
+and the explicit boundary between current application controls and external
+sandbox/watchdog enforcement.
+
 - The process binds to loopback by default. A non-loopback bind fails closed
   unless open signup is disabled, authentication and encryption secrets are
   non-default, and at least one bootstrap/authentication principal exists.
