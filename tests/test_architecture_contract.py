@@ -4,7 +4,7 @@ import sqlite3
 from fastapi.testclient import TestClient
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 
 from app import database, main, tenancy
 from app.core.contracts import ChatResult
@@ -63,10 +63,20 @@ def test_current_http_surface_remains_available() -> None:
         "/api/review-findings",
         "/api/review-findings/{finding_id}",
         "/api/enforcement/issuers",
+        "/api/enforcement/adapters",
+        "/api/enforcement/tool-bindings",
+        "/api/enforcement/dispatches",
+        "/api/enforcement/dispatches/{dispatch_id}",
+        "/api/enforcement/dispatches/{dispatch_id}/reconcile",
+        "/api/enforcement/verification-keys",
         "/api/enforcement/policy-proposals",
         "/api/enforcement/policy-proposals/{proposal_id}",
         "/api/enforcement/receipts",
         "/api/enforcement/receipts/{receipt_id}",
+        "/api/enforcement/receipts/{receipt_id}/signature-verification",
+        "/api/qualification/knowledge-admission-policies",
+        "/api/qualification/knowledge-admissions",
+        "/api/qualification/receipts/{receipt_id}/knowledge-admissions",
         "/mcp-legacy",
     } <= paths
 
@@ -99,6 +109,7 @@ def test_research_control_plane_is_owned_by_domain_router() -> None:
             "/api/decision-lab",
             "/api/qualification/math-theorems",
             "/api/qualification/claims/{claim_id}/evaluations",
+            "/api/qualification/receipts/{receipt_id}/knowledge-admissions",
             "/api/authorization-grants",
         }
     } == {"app.api.research"}
@@ -148,10 +159,17 @@ def test_execution_authority_evidence_is_owned_by_domain_router() -> None:
         route_modules[path]
         for path in {
             "/api/enforcement/issuers",
+            "/api/enforcement/adapters",
+            "/api/enforcement/tool-bindings",
+            "/api/enforcement/dispatches",
+            "/api/enforcement/dispatches/{dispatch_id}",
+            "/api/enforcement/dispatches/{dispatch_id}/reconcile",
+            "/api/enforcement/verification-keys",
             "/api/enforcement/policy-proposals",
             "/api/enforcement/policy-proposals/{proposal_id}",
             "/api/enforcement/receipts",
             "/api/enforcement/receipts/{receipt_id}",
+            "/api/enforcement/receipts/{receipt_id}/signature-verification",
         }
     } == {"app.api.enforcement"}
 
@@ -234,6 +252,36 @@ def test_mcp_mounts_fail_closed_when_transport_key_is_configured(monkeypatch) ->
         assert client.get("/mcp-sse/sse").status_code == 401
 
 
+def test_mcp_mount_root_accepts_post_without_redirect(monkeypatch) -> None:
+    async def protocol_view(_request):
+        return JSONResponse({"transport": "streamable-http"})
+
+    mounted = Starlette(
+        routes=[
+            Mount(
+                "/mcp",
+                app=Starlette(
+                    routes=[Route("/", protocol_view, methods=["POST"])]
+                ),
+            )
+        ]
+    )
+    wrapped = main.MCPAuthMiddleware(mounted)
+    monkeypatch.setattr(main.settings, "mcp_api_key", "mcp-test-key")
+
+    with TestClient(wrapped, follow_redirects=False) as client:
+        headers = {"Authorization": "Bearer mcp-test-key"}
+        compatibility = client.post("/mcp", headers=headers, json={})
+        canonical = client.post("/mcp/", headers=headers, json={})
+
+    assert compatibility.status_code == 200
+    assert compatibility.headers.get("location") is None
+    assert compatibility.history == []
+    assert compatibility.json() == {"transport": "streamable-http"}
+    assert canonical.status_code == 200
+    assert canonical.history == []
+
+
 def test_mcp_middleware_resolves_tenant_key_to_workspace_context(monkeypatch) -> None:
     async def context_view(request):
         context = request.state.mcp_context
@@ -245,7 +293,7 @@ def test_mcp_middleware_resolves_tenant_key_to_workspace_context(monkeypatch) ->
             }
         )
 
-    inner = Starlette(routes=[Route("/mcp", context_view)])
+    inner = Starlette(routes=[Route("/mcp/", context_view)])
     wrapped = main.MCPAuthMiddleware(inner)
     monkeypatch.setattr(main.settings, "mcp_api_key", "")
     monkeypatch.setattr(main.settings, "api_key", "")

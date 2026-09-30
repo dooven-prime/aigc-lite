@@ -34,6 +34,14 @@ class QualificationRepository(Protocol):
         self, tenant_id: str, values: dict[str, Any]
     ) -> dict: ...
 
+    def admit_knowledge(
+        self, tenant_id: str, values: dict[str, Any]
+    ) -> dict: ...
+
+    def list_knowledge_admission_receipts(
+        self, tenant_id: str, claim_id: str | None = None
+    ) -> list[dict]: ...
+
     def get_current_use_binding(
         self,
         tenant_id: str,
@@ -43,7 +51,11 @@ class QualificationRepository(Protocol):
     ) -> dict | None: ...
 
     def list_current_use_bindings(
-        self, tenant_id: str, profile_id: str, state: str = "current"
+        self,
+        tenant_id: str,
+        profile_id: str,
+        state: str = "current",
+        use_scope: str = "knowledge",
     ) -> list[dict]: ...
 
     def create_authorization_grant(

@@ -44,7 +44,9 @@ bindings while refreshing evidence closure, but it can never grant authority.
 
 ## MCP transport
 
-本地工具通过 `@tool` 注册，工具 JSON Schema 会在发现时根据函数签名、类型注解和 docstring 重新生成；修改代码并重启后不需要单独维护一份参数描述。支持 MCP Streamable HTTP 的客户端可直接连接 `/mcp`。服务端使用官方 Python SDK 的 session manager、协议协商和 `Mcp-Session-Id` 会话机制；`/mcp-sse/sse` 保留 SSE transport 兼容性：
+本地工具通过 `@tool` 注册，工具 JSON Schema 会在发现时根据函数签名、类型注解和 docstring 重新生成；修改代码并重启后不需要单独维护一份参数描述。支持 MCP Streamable HTTP 的客户端应连接规范地址 `/mcp/`。服务端使用官方 Python SDK 的 session manager、协议协商和 `Mcp-Session-Id` 会话机制；`/mcp-sse/sse` 保留 SSE transport 兼容性：
+
+当前 MCP SDK 创建的 `httpx2.AsyncClient` 默认 `follow_redirects=false`，因此协议 POST 不应依赖 Mount root 的 307。aigc-lite 会把完全匹配的兼容地址 `/mcp` 在 ASGI 边界内直接改写为 `/mcp/`，不会向客户端返回重定向；新配置仍必须写带尾斜杠的规范地址。
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
@@ -53,7 +55,7 @@ bindings while refreshing evidence closure, but it can never grant authority.
 
 自定义工具可以放在应用启动代码中导入后注册。Agent 不直接读取全局工具字典，而是在每次 Run 开始时从 Tool Catalog 获取当前 workspace 和 scope 可见的快照。远程 MCP tool 以 `{provider_id}__{tool_name}` 暴露给模型，避免不同服务之间名称冲突。
 
-Tool Catalog 是共同的发现/执行机制，但 transport 的授权入口不同。直接连接 `/mcp` 的客户端使用
+Tool Catalog 是共同的发现/执行机制，但 transport 的授权入口不同。直接连接 `/mcp/` 的客户端使用
 自己的认证 identity 与 scope；`/api/chat` 中的模型还要经过 `ChatCapabilityPolicy`。Chat 默认
 `chat.read-only.v1` 会剥离调用方管理 scope，并完全排除远程 MCP；显式
 `chat.delegated.v1` 只允许拥有 `tools:write` 的调用方请求，且每个远程 MCP 调用无论其 hint 如何，
@@ -67,7 +69,7 @@ Tool Catalog 是共同的发现/执行机制，但 transport 的授权入口不�
 ```dotenv
 RESEARCH_MCP_AUTH=Bearer replace-with-real-token
 AIGC_LITE_MCP_ENV_CREDENTIAL_ALLOWLIST=RESEARCH_MCP_AUTH
-AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","workspace_id":"default","header_env":{"Authorization":"RESEARCH_MCP_AUTH"},"risk":"low"}]
+AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp/","workspace_id":"default","header_env":{"Authorization":"RESEARCH_MCP_AUTH"},"risk":"low"}]
 ```
 
 每个配置可选 `risk`（`low`、`medium`、`high`）和 `required_scopes`。`medium` 默认要求 `tools:write`，`high` 默认要求 `tools:high-risk`；管理员和显式配置的 tenant API key 拥有这两个内置 scope，普通成员及无认证 quick start 只发现低风险工具。自定义 scope 预留给后续 scoped API key。单个远程 Provider 发现失败不会影响本地工具或其他 Provider；已经发现的远程工具若调用断连，会生成稳定的 `tool_provider_unavailable` 失败结果和失败 Step。
@@ -79,7 +81,7 @@ AIGC_LITE_MCP_SERVERS_JSON=[{"id":"research","url":"http://127.0.0.1:9000/mcp","
 ```json
 {
   "provider_id": "research",
-  "url": "https://mcp.example.com/mcp",
+  "url": "https://mcp.example.com/mcp/",
   "header_credentials": {
     "Authorization": "encrypted-db://credential/00000000-0000-0000-0000-000000000000"
   },
@@ -105,7 +107,7 @@ POST /api/credentials
 ```json
 {
   "provider_id": "research",
-  "url": "https://mcp.example.com/mcp",
+  "url": "https://mcp.example.com/mcp/",
   "header_credentials": {
     "Authorization": "encrypted-db://credential/00000000-0000-0000-0000-000000000000"
   }
@@ -163,9 +165,9 @@ Run/Step metadata 会记录 `execution_mode` 和 `cancellation_mode`：异步是
 沙箱：worker 仍继承服务进程的环境变量以及文件、网络和系统权限；执行不受信任代码仍需容器或
 专用 sandbox。
 
-将这个模块在 `app.main` 启动时导入后，入站 MCP `tools/list` 和 Agent 都通过同一个 Tool Catalog 发现它。`/mcp` 与 `/mcp-sse/sse` 会根据登录 Bearer token 或 tenant API key 解析 workspace 和 scope，因此只暴露当前身份允许的本地及远程 MCP tool。`AIGC_LITE_MCP_API_KEY` 仅作为兼容模式保留，它固定映射到 `default` workspace；多 workspace 部署应使用用户 token 或 tenant API key。公开核心不自动启用文件系统、Shell、网络爬取等高风险工具，扩展应由部署方显式注册。
+将这个模块在 `app.main` 启动时导入后，入站 MCP `tools/list` 和 Agent 都通过同一个 Tool Catalog 发现它。`/mcp/` 与 `/mcp-sse/sse` 会根据登录 Bearer token 或 tenant API key 解析 workspace 和 scope，因此只暴露当前身份允许的本地及远程 MCP tool。`AIGC_LITE_MCP_API_KEY` 仅作为兼容模式保留，它固定映射到 `default` workspace；多 workspace 部署应使用用户 token 或 tenant API key。公开核心不自动启用文件系统、Shell、网络爬取等高风险工具，扩展应由部署方显式注册。
 
-每次入站 `tools/call` 都创建独立 Run 和 Tool Step，MCP 响应的 `_meta.aigc-lite.run_id` 可用于查询执行详情。参数和结果使用与 Agent 相同的账本脱敏规则；客户端仍获得工具原始结果。出站 MCP 请求会附带内部 hop 标记，收到 hop 标记的 aigc-lite 只投影本地工具，避免两个 Catalog 互相代理或配置指回自身时形成递归发现。正式 `/mcp` 的协议版本由官方 SDK 协商，当前 SDK v2 回归测试固定为 `2026-07-28`；`AIGC_LITE_LEGACY_MCP_PROTOCOL_VERSION` 仅影响手写的 `/mcp-legacy`，后者只用于本地调试兼容。
+每次入站 `tools/call` 都创建独立 Run 和 Tool Step，MCP 响应的 `_meta.aigc-lite.run_id` 可用于查询执行详情。参数和结果使用与 Agent 相同的账本脱敏规则；客户端仍获得工具原始结果。出站 MCP 请求会附带内部 hop 标记，收到 hop 标记的 aigc-lite 只投影本地工具，避免两个 Catalog 互相代理或配置指回自身时形成递归发现。正式 `/mcp/` 的协议版本由官方 SDK 协商，当前 SDK v2 回归测试固定为 `2026-07-28`；`AIGC_LITE_LEGACY_MCP_PROTOCOL_VERSION` 仅影响手写的 `/mcp-legacy`，后者只用于本地调试兼容。
 
 ### ROS 2 Physical Capability Bridge
 

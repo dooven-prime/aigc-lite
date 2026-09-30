@@ -41,8 +41,12 @@ from .core.errors import (
     AgentWallTimeLimitError,
     ApplicationError,
     ChatCapabilityDeniedError,
+    EnforcementDispatchIndeterminateError,
+    EnforcerNotConfiguredError,
+    EnforcerRequestError,
     InvalidArtifactError,
     InvalidConversationImportError,
+    InvalidEnforcementReceiptError,
     InvalidEvidenceError,
     InvalidExecutionPolicyError,
     InvalidKernelVerificationError,
@@ -79,7 +83,17 @@ from .services.conversation_import_registry import ConversationImportRegistry
 from .services.conversation_imports import ConversationImportService
 from .services.credentials import CredentialService
 from .services.decision_lab import DecisionLabService
-from .services.enforcement import EnforcementService
+from .services.enforced_tools import (
+    ExternalToolExecutionBindingRegistry,
+    ExternalToolExecutionRouter,
+)
+from .services.enforcement import EnforcementIssuerRegistry, EnforcementService
+from .services.enforcer import (
+    EnforcementVerificationKeyRegistry,
+    EnforcerAdapterRegistry,
+    ExternalEnforcerService,
+    SignedEnforcementReceiptVerifier,
+)
 from .services.evidence import EvidenceService
 from .services.gateway import GatewayService
 from .services.http_poll import HTTPPollService
@@ -100,9 +114,31 @@ from .tenancy import Tenant, _role_scopes, current_tenant
 
 PACKAGED_UI = Path(__file__).parent / "static"
 logger = logging.getLogger(__name__)
-tool_catalog = create_default_tool_catalog()
 artifact_service = ArtifactService()
 chat_capability_policy = ChatCapabilityPolicy()
+enforcement_issuer_registry = EnforcementIssuerRegistry()
+enforcement_service = EnforcementService(
+    issuer_registry=enforcement_issuer_registry
+)
+enforcement_key_registry = EnforcementVerificationKeyRegistry()
+enforcer_adapter_registry = EnforcerAdapterRegistry()
+signed_enforcement_receipt_verifier = SignedEnforcementReceiptVerifier(
+    issuer_registry=enforcement_issuer_registry,
+    key_registry=enforcement_key_registry,
+)
+external_enforcer_service = ExternalEnforcerService(
+    enforcement_service=enforcement_service,
+    adapter_registry=enforcer_adapter_registry,
+    verifier=signed_enforcement_receipt_verifier,
+)
+external_tool_binding_registry = ExternalToolExecutionBindingRegistry()
+external_tool_execution_router = ExternalToolExecutionRouter(
+    registry=external_tool_binding_registry,
+    enforcer_service=external_enforcer_service,
+)
+tool_catalog = create_default_tool_catalog(
+    external_tool_executor=external_tool_execution_router
+)
 tool_service = ToolService(
     tool_catalog=tool_catalog, artifact_service=artifact_service
 )
@@ -125,7 +161,6 @@ research_registry_service = ResearchRegistryService(
     artifact_service=artifact_service, evidence_service=evidence_service
 )
 review_service = ReviewService()
-enforcement_service = EnforcementService()
 conversation_import_registry = ConversationImportRegistry.builtins()
 conversation_import_service = ConversationImportService(
     registry=conversation_import_registry
@@ -209,6 +244,14 @@ class MCPAuthMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        # Starlette redirects a mount root from ``/mcp`` to ``/mcp/``. The MCP
+        # SDK's default HTTP client does not follow redirects, so canonicalize
+        # the exact compatibility path inside the ASGI boundary instead of
+        # returning a 307 for a protocol POST. ``/mcp/`` remains canonical.
+        if scope["type"] == "http" and scope.get("path") == "/mcp":
+            scope = dict(scope)
+            scope["path"] = "/mcp/"
+            scope["raw_path"] = b"/mcp/"
         if scope["type"] == "http" and scope["path"].startswith(("/mcp", "/mcp-sse")):
             headers = {
                 key.decode().lower(): value.decode()
@@ -349,6 +392,12 @@ async def application_error_handler(_request: Request, exc: ApplicationError) ->
         status_code = 429
     elif isinstance(exc, ProviderNotConfiguredError):
         status_code = 503
+    elif isinstance(exc, EnforcerNotConfiguredError):
+        status_code = 503
+    elif isinstance(exc, (EnforcerRequestError, InvalidEnforcementReceiptError)):
+        status_code = 502
+    elif isinstance(exc, EnforcementDispatchIndeterminateError):
+        status_code = 409
     elif isinstance(exc, KernelVerifierNotConfiguredError):
         status_code = 503
     elif isinstance(exc, LLMError):
@@ -836,6 +885,8 @@ conversation_import_router = create_conversation_import_router(
 )
 enforcement_router = create_enforcement_router(
     enforcement_service=enforcement_service,
+    external_enforcer_service=external_enforcer_service,
+    external_tool_execution_router=external_tool_execution_router,
     request_context_factory=request_context,
 )
 app.include_router(configuration_router)

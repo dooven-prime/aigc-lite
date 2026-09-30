@@ -8,6 +8,8 @@ registered enforcement backend observed; it is not a model-authored result.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -18,6 +20,12 @@ EXECUTION_POLICY_CONTRACT_VERSION = "execution.policy.v1"
 POLICY_PROPOSAL_CONTRACT_VERSION = "policy.proposal.v1"
 PERMISSION_DIFF_CONTRACT_VERSION = "permission.diff.v1"
 ENFORCEMENT_RECEIPT_CONTRACT_VERSION = "enforcement.receipt.v1"
+ENFORCEMENT_DISPATCH_CONTRACT_VERSION = "enforcement.dispatch.v1"
+ENFORCER_REQUEST_CONTRACT_VERSION = "enforcer.request.v1"
+SIGNED_ENFORCEMENT_RECEIPT_CONTRACT_VERSION = "enforcer.signed-receipt.v1"
+SIGNATURE_ENVELOPE_CONTRACT_VERSION = "enforcer.signature-envelope.v1"
+SIGNATURE_VERIFICATION_CONTRACT_VERSION = "enforcer.signature-verification.v1"
+SIGNATURE_RECHECK_CONTRACT_VERSION = "enforcer.signature-recheck.v1"
 
 
 class PermissionDomain(StrEnum):
@@ -70,6 +78,45 @@ class EnforcementTrustDomain(StrEnum):
     APPLICATION_PROCESS = "application_process"
     EXTERNAL_RUNTIME = "external_runtime"
     INDEPENDENT_INFRASTRUCTURE = "independent_infrastructure"
+
+
+class EnforcementSignatureAlgorithm(StrEnum):
+    ED25519 = "ed25519"
+
+
+class EnforcementDispatchState(StrEnum):
+    DISPATCHING = "dispatching"
+    TERMINAL = "terminal"
+    INDETERMINATE = "indeterminate"
+    RECONCILED = "reconciled"
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalToolExecutionBinding:
+    """Deployer-owned authority to route one exact tool through an enforcer."""
+
+    binding_id: str
+    workspace_id: str
+    provider_id: str
+    native_name: str
+    adapter_id: str
+    proposal_id: str
+    policy_hash: str
+    enabled: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        value = {
+            "contract_version": "enforcer.tool-binding.v1",
+            "binding_id": self.binding_id,
+            "workspace_id": self.workspace_id,
+            "provider_id": self.provider_id,
+            "native_name": self.native_name,
+            "adapter_id": self.adapter_id,
+            "proposal_id": self.proposal_id,
+            "policy_hash": self.policy_hash,
+            "enabled": self.enabled,
+        }
+        return {**value, "binding_hash": canonical_hash(value)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +245,7 @@ class EnforcementReceiptDraft:
     arguments_digest: str
     decision: EnforcementDecision
     outcome: EnforcementOutcome
+    execution_envelope_hash: str | None = None
     observed_effects: tuple[dict[str, Any], ...] = ()
     denied_effects: tuple[dict[str, Any], ...] = ()
     credential_bindings: tuple[dict[str, Any], ...] = ()
@@ -210,6 +258,146 @@ class EnforcementReceiptDraft:
     external_signature: str | None = None
     attestation: dict[str, Any] = field(default_factory=dict)
     issued_at: str | None = None
+
+
+def canonical_enforcement_json(value: object) -> bytes:
+    """Encode signed enforcement data without runtime-specific ambiguity."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def enforcement_payload_hash(value: object) -> str:
+    return hashlib.sha256(canonical_enforcement_json(value)).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class EnforcerRequest:
+    """One nonce-bound request sent across the application trust boundary."""
+
+    request_id: str
+    nonce: str
+    workspace_id: str
+    run_id: str
+    step_id: str | None
+    proposal_id: str
+    expected_issuer_id: str
+    target_type: EnforcementTargetType
+    target_id: str
+    policy: dict[str, Any]
+    policy_hash: str
+    permission_diff: dict[str, Any]
+    diff_hash: str
+    execution_envelope: dict[str, Any]
+    execution_envelope_hash: str
+    tool_spec_hash: str
+    arguments_digest: str
+    requested_at: str
+    expires_at: str
+
+    def signed_fields(self) -> dict[str, Any]:
+        return {
+            "contract_version": ENFORCER_REQUEST_CONTRACT_VERSION,
+            "request_id": self.request_id,
+            "nonce": self.nonce,
+            "workspace_id": self.workspace_id,
+            "run_id": self.run_id,
+            "step_id": self.step_id,
+            "proposal_id": self.proposal_id,
+            "expected_issuer_id": self.expected_issuer_id,
+            "target_type": self.target_type.value,
+            "target_id": self.target_id,
+            "policy": self.policy,
+            "policy_hash": self.policy_hash,
+            "permission_diff": self.permission_diff,
+            "diff_hash": self.diff_hash,
+            "execution_envelope": self.execution_envelope,
+            "execution_envelope_hash": self.execution_envelope_hash,
+            "tool_spec_hash": self.tool_spec_hash,
+            "arguments_digest": self.arguments_digest,
+            "requested_at": self.requested_at,
+            "expires_at": self.expires_at,
+        }
+
+    @property
+    def request_hash(self) -> str:
+        return enforcement_payload_hash(self.signed_fields())
+
+    def as_dict(self) -> dict[str, Any]:
+        return {**self.signed_fields(), "request_hash": self.request_hash}
+
+
+@dataclass(frozen=True, slots=True)
+class SignedEnforcementReceiptEnvelope:
+    """Untrusted wire envelope; verification must precede persistence."""
+
+    algorithm: EnforcementSignatureAlgorithm
+    key_id: str
+    payload: dict[str, Any]
+    signature: str
+    contract_version: str = SIGNATURE_ENVELOPE_CONTRACT_VERSION
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "algorithm": self.algorithm.value,
+            "key_id": self.key_id,
+            "payload": self.payload,
+            "signature": self.signature,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EnforcementVerificationKey:
+    """Deployer-owned public verification key for one external issuer."""
+
+    issuer_id: str
+    key_id: str
+    algorithm: EnforcementSignatureAlgorithm
+    public_key: str
+    not_before: str | None = None
+    not_after: str | None = None
+    revoked: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptSignatureVerification:
+    request_id: str
+    request_hash: str
+    nonce_hash: str
+    algorithm: EnforcementSignatureAlgorithm
+    key_id: str
+    signed_payload_hash: str
+    verified_at: str
+    verifier_id: str
+    details: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": SIGNATURE_VERIFICATION_CONTRACT_VERSION,
+            "request_id": self.request_id,
+            "request_hash": self.request_hash,
+            "nonce_hash": self.nonce_hash,
+            "algorithm": self.algorithm.value,
+            "key_id": self.key_id,
+            "signed_payload_hash": self.signed_payload_hash,
+            "verified_at": self.verified_at,
+            "verifier_id": self.verifier_id,
+            "details": self.details,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedEnforcementReceipt:
+    issuer_id: str
+    draft: EnforcementReceiptDraft
+    signed_payload: dict[str, Any]
+    verification: ReceiptSignatureVerification
 
 
 def calculate_permission_diff(

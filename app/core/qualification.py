@@ -15,6 +15,7 @@ from typing import Any
 QUALIFICATION_CONTRACT_VERSION = "qualification.plane.v1"
 EVIDENCE_CLOSURE_VERSION = "evidence.closure.v1"
 VERIFIER_LINEAGE_VERSION = "verifier.lineage.v1"
+KNOWLEDGE_ADMISSION_CONTRACT_VERSION = "knowledge.admission.v1"
 
 
 class QualificationVerdict(StrEnum):
@@ -104,6 +105,79 @@ class QualificationProfile:
                 }
                 for item in self.criteria
             ],
+        }
+
+    @property
+    def content_hash(self) -> str:
+        return canonical_hash(self.as_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeAdmissionPolicy:
+    """Server-owned policy for selecting qualified knowledge for current use."""
+
+    policy_id: str
+    version: int
+    description: str
+    requirements: tuple[str, ...]
+    use_scope: str = "knowledge"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": KNOWLEDGE_ADMISSION_CONTRACT_VERSION,
+            "policy_id": self.policy_id,
+            "version": self.version,
+            "description": self.description,
+            "requirements": list(self.requirements),
+            "use_scope": self.use_scope,
+        }
+
+    @property
+    def content_hash(self) -> str:
+        return canonical_hash(self.as_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeAdmissionDraft:
+    qualification_receipt_id: str
+    admission_policy_id: str
+    rationale: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeAdmissionReceipt:
+    receipt_id: str
+    qualification_receipt_id: str
+    qualification_receipt_hash: str
+    claim_revision_id: str
+    claim_semantic_hash: str
+    profile_id: str
+    profile_version: int
+    use_scope: str
+    admission_policy_id: str
+    admission_policy_version: int
+    admission_policy_hash: str
+    approved_by: str
+    rationale: str
+    issued_at: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": KNOWLEDGE_ADMISSION_CONTRACT_VERSION,
+            "knowledge_admission_receipt_id": self.receipt_id,
+            "qualification_receipt_id": self.qualification_receipt_id,
+            "qualification_receipt_hash": self.qualification_receipt_hash,
+            "claim_revision_id": self.claim_revision_id,
+            "claim_semantic_hash": self.claim_semantic_hash,
+            "profile_id": self.profile_id,
+            "profile_version": self.profile_version,
+            "use_scope": self.use_scope,
+            "admission_policy_id": self.admission_policy_id,
+            "admission_policy_version": self.admission_policy_version,
+            "admission_policy_hash": self.admission_policy_hash,
+            "approved_by": self.approved_by,
+            "rationale": self.rationale,
+            "issued_at": self.issued_at,
         }
 
     @property

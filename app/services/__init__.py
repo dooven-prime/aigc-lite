@@ -5,7 +5,17 @@ from .conversation_import_registry import ConversationImportRegistry
 from .conversation_imports import ConversationImportService
 from .credentials import CredentialService
 from .decision_lab import DecisionLabService
+from .enforced_tools import (
+    ExternalToolExecutionBindingRegistry,
+    ExternalToolExecutionRouter,
+)
 from .enforcement import EnforcementIssuerRegistry, EnforcementService
+from .enforcer import (
+    EnforcementVerificationKeyRegistry,
+    EnforcerAdapterRegistry,
+    ExternalEnforcerService,
+    SignedEnforcementReceiptVerifier,
+)
 from .evidence import EvidenceService
 from .gateway import GatewayService
 from .http_poll import HTTPPollService
@@ -25,6 +35,12 @@ __all__ = [
     "EvidenceService",
     "EnforcementIssuerRegistry",
     "EnforcementService",
+    "EnforcementVerificationKeyRegistry",
+    "EnforcerAdapterRegistry",
+    "ExternalEnforcerService",
+    "ExternalToolExecutionBindingRegistry",
+    "ExternalToolExecutionRouter",
+    "SignedEnforcementReceiptVerifier",
     "ArtifactService",
     "GatewayService",
     "HTTPPollService",

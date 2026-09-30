@@ -21,6 +21,8 @@ from ..core.enforcement import (
     ExecutionPolicySnapshot,
     PolicyPermission,
     PolicyProposalState,
+    ReceiptSignatureVerification,
+    VerifiedEnforcementReceipt,
     calculate_permission_diff,
 )
 from ..core.errors import InvalidExecutionPolicyError, ResourceNotFoundError
@@ -190,6 +192,44 @@ class EnforcementService:
     ) -> dict:
         """Internal adapter seam. No public transport exposes this mutation."""
 
+        return self._record_receipt(
+            workspace_id,
+            issuer_id=issuer_id,
+            draft=draft,
+            signed_payload=None,
+            verification=None,
+        )
+
+    def record_verified_receipt(
+        self,
+        workspace_id: str,
+        *,
+        verified: VerifiedEnforcementReceipt,
+    ) -> dict:
+        """Persist only a verifier-produced signature result."""
+
+        if not verified.draft.external_signature:
+            raise InvalidExecutionPolicyError(
+                "external_signature", "Verified receipt must retain its signature"
+            )
+        return self._record_receipt(
+            workspace_id,
+            issuer_id=verified.issuer_id,
+            draft=verified.draft,
+            signed_payload=verified.signed_payload,
+            verification=verified.verification,
+        )
+
+    def _record_receipt(
+        self,
+        workspace_id: str,
+        *,
+        issuer_id: str,
+        draft: EnforcementReceiptDraft,
+        signed_payload: dict[str, Any] | None,
+        verification: ReceiptSignatureVerification | None,
+    ) -> dict:
+
         issuer = self._issuer_registry.get(issuer_id)
         repository = self._repository_provider()
         if repository.get_run(workspace_id, draft.run_id) is None:
@@ -231,7 +271,10 @@ class EnforcementService:
             "policy_id": draft.policy_id,
             "policy_revision": draft.policy_revision,
             "policy_hash": draft.policy_hash,
-            "execution_envelope_hash": canonical_hash(draft.execution_envelope),
+            "execution_envelope_hash": (
+                draft.execution_envelope_hash
+                or canonical_hash(draft.execution_envelope)
+            ),
             "tool_spec_hash": draft.tool_spec_hash,
             "arguments_digest": draft.arguments_digest,
             "decision": draft.decision.value,
@@ -249,10 +292,38 @@ class EnforcementService:
         }
         # ``identity`` is represented by the explicitly named persistence field.
         payload.pop("identity")
+        if verification is not None:
+            payload["signature_verification"] = verification.as_dict()
         values = {
             "id": str(uuid4()),
             **payload,
             "receipt_hash": canonical_hash(payload),
+            "signature_verified": verification is not None,
+            "enforcement_request_id": (
+                verification.request_id if verification is not None else None
+            ),
+            "enforcement_request_hash": (
+                verification.request_hash if verification is not None else None
+            ),
+            "signature_algorithm": (
+                verification.algorithm.value if verification is not None else None
+            ),
+            "signing_key_id": (
+                verification.key_id if verification is not None else None
+            ),
+            "signed_payload_hash": (
+                verification.signed_payload_hash if verification is not None else None
+            ),
+            "signature_verified_at": (
+                verification.verified_at if verification is not None else None
+            ),
+            "signature_verifier_id": (
+                verification.verifier_id if verification is not None else None
+            ),
+            "signature_verification": (
+                verification.as_dict() if verification is not None else {}
+            ),
+            "signed_payload": signed_payload or {},
         }
         return repository.create_enforcement_receipt(workspace_id, values)
 
@@ -369,6 +440,13 @@ class EnforcementService:
                 raise InvalidExecutionPolicyError(
                     field_name, f"{field_name} must be a lowercase SHA-256 digest"
                 )
+        if draft.execution_envelope_hash is not None and not _HASH.fullmatch(
+            draft.execution_envelope_hash
+        ):
+            raise InvalidExecutionPolicyError(
+                "execution_envelope_hash",
+                "execution_envelope_hash must be a lowercase SHA-256 digest",
+            )
         if not _NAME.fullmatch(draft.policy_id) or draft.policy_revision <= 0:
             raise InvalidExecutionPolicyError("policy", "Receipt policy is invalid")
         for field_name, value, maximum in (

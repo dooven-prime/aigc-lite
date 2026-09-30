@@ -142,7 +142,12 @@ async def test_lean_kernel_service_records_server_derived_evidence(tmp_path) -> 
     assert str(tmp_path) not in json.dumps(certificate)
     attempt = result["verification_attempt"]
     assert attempt["outcome"] == "passed"
-    assert attempt["independent"] is True
+    assert attempt["independent"] is False
+    assert attempt["independence"]["qualified"] is False
+    assert attempt["independence"]["basis"] == []
+    assert attempt["independence"]["verification_properties"] == [
+        "orthogonal_non_llm_checker"
+    ]
     assert attempt["verifier_lineage"]["model_route"] is None
     assert attempt["verifier_lineage"]["principal_id"] == (
         "system:verifier:lean4-kernel"

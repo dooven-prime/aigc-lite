@@ -62,14 +62,27 @@ base revision。Genesis proposal 从 revision 0 的空 deny policy 开始。
 批准或应用 policy proposal。
 
 `EnforcementReceipt` 是另一条不可变账本。公共 HTTP 只提供查询；写入只能由 host 注册的 issuer
-通过内部 `EnforcementService.record_receipt()` 完成。Receipt 绑定 Run、可选 Step/Proposal、实际
+通过内部 service seam 完成。Receipt 绑定 Run、可选 Step/Proposal、实际
 policy hash、execution envelope hash、ToolSpec/arguments digest、decision/outcome、观察或拒绝的
 effect、credential binding，以及 host-owned backend identity/trust domain。相同 receipt hash
 幂等折叠，跨 workspace 的 Run、Step 或 Proposal 不能绑定。
 
-这仍不是外部 sandbox 本身。issuer registry 只保证应用 composition 不接受客户端自报 identity；
-真正的 mTLS、签名验证、remote attestation、policy apply 和 quarantine 由后续具体 backend adapter
-负责。在这些 adapter 完成之前，Receipt 的 trust domain 不能高于产生它的实际 enforcement 环境。
+`EnforcerAdapter` 现在可以把 nonce/expiry-bound frozen request 发送到独立 HTTP runtime；返回 payload
+只有通过 host-owned Ed25519 key、issuer identity、完整 request/digest binding 与时间窗检查，才会以
+`signature_verified=true` 持久化。旧 `record_receipt()` 写入和只有 signature 字符串的历史记录不会
+被自动视为 verified。公共 HTTP、Chat 与 MCP 没有任意 dispatch、trust-root 注册或 receipt 写入口；
+唯一写路径是 host-owned Tool binding 命中后的执行，以及管理员对既有 uncertain dispatch 的窄
+reconciliation。
+
+`ExternalToolExecutionBinding` 把 workspace/provider/native tool 精确绑定到 adapter、proposal 与
+policy hash。绑定后的调用不再执行原 provider，也不允许失败回退。网络超时、取消、无效签名以及
+外部 `indeterminate` 结果都会持久化为占用态；相同 adapter 在签名终态 reconciliation 到达前不能
+开始下一次动作。
+
+这仍不是外部 sandbox 本身。签名只认证 payload 和配置 key 的关系，不验证 observed effects 是否
+完整、不验证 TPM/TEE/DPU quote，也不证明 signer 位于独立故障域。mTLS、policy apply/CAS、remote
+attestation 与 quarantine 仍由实际 backend 和部署基础设施负责。Receipt 的 trust domain 不能高于
+产生它的真实 enforcement 环境；完整 wire contract 见 [ENFORCEMENT.md](ENFORCEMENT.md)。
 
 ROS2/Nav2 dispatch 一旦提交，即使调用方在 goal handle 返回前取消或超时，bridge 仍保留该 future；
 若 Nav2 随后接受目标，bridge 会立即请求取消并形成 Receipt。取消确认超时或失败时 action 保持
@@ -125,12 +138,15 @@ Verification Plan 是不可变版本；创建同一 `plan_key` 的新版本会�
 不会悄悄切换到新版本。周期执行使用 target `research.verify` 与 payload `{"plan_id":"..."}`，因此升级
 方案后需要显式更新或新建计划任务。Agent 输出必须满足 `research.verification-result.v1` 严格 JSON
 合同；有效结果以及无效输出、上游失败或取消都会形成可查询的 execution。只要 Agent Run 已建立，
-Runner 还会写入结果/错误 Artifact、Receipt-bound Attempt 和失败关闭的下一阶段 Promotion Gate。
-自动 Gate 额外要求触发它的本次 Attempt 为 `passed`，不会借用历史通过记录为一次失败执行顺带
-晋升。Agent 执行永远不能自述独立性。Verification Attempt API 不接受 `independent` 或客户端填写的
+Runner 还会写入结果/错误 Artifact 和 Receipt-bound Attempt。VerificationPlan 的兼容字段
+`auto_promote=true` 只要求自动计算下一阶段的 proposal-only Promotion Gate evaluation；即使 Gate
+通过也不更新 `promotion_stage`。真正应用 workflow transition 必须由管理员显式调用控制入口。
+自动 evaluation 额外要求触发它的本次 Attempt 为 `passed`，不会借用历史通过记录为一次失败执行
+生成通过提案。Agent 执行永远不能自述独立性。Verification Attempt API 不接受 `independent` 或客户端填写的
 overlap assessment；principal、workspace、Run、model route、plan hash、checker/toolchain 和数据/环境
 摘要由服务端从已有对象绑定，independence 只是 lineage 上的派生投影。旧布尔值仍可读，但不能成为
-资格或权限依据。`registered -> release_ready` 只表示 workflow stage，不是证据强度。
+资格或权限依据。`registered -> release_ready` 只表示 workflow stage，不是证据强度，更不自动进入
+qualified retrieval。完整 transition owner 见 [AUTHORITY_TRANSITIONS.md](AUTHORITY_TRANSITIONS.md)。
 
 ## HTTP polling and scheduler control
 

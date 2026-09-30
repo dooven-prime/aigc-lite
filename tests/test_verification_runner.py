@@ -192,7 +192,12 @@ def test_verification_runner_versions_plan_and_closes_evidence_chain(tmp_path) -
     assert result["attempt"]["verification_execution_id"] == result["execution"]["id"]
     assert result["attempt"]["independent"] is False
     assert result["promotion"]["evaluation"]["decision"] == "passed"
-    assert result["promotion"]["claim"]["promotion_stage"] == "evidence_ready"
+    assert result["promotion"]["evaluation"]["input_snapshot"]["evaluation_mode"] == (
+        "proposal_only"
+    )
+    assert result["promotion"]["transition_applied"] is False
+    assert result["promotion"]["claim"]["promotion_stage"] == "registered"
+    assert result["execution"]["metadata"]["promotion_transition_applied"] is False
     assert (
         repository.get_artifact("workspace-a", result["artifact"]["id"])["content_hash"]
         == result["execution"]["output_digest"]

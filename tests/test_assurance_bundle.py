@@ -147,9 +147,16 @@ def test_assurance_authority_excludes_expired_and_exhausted_grants() -> None:
     documents = {
         "qualification.json": {
             "receipts": [{"id": "receipt-1", "verdict": "ADMITTED"}],
+            "knowledge_admissions": [
+                {
+                    "id": "admission-1",
+                    "qualification_receipt_id": "receipt-1",
+                }
+            ],
             "current_use_bindings": [
                 {
                     "qualification_receipt_id": "receipt-1",
+                    "knowledge_admission_receipt_id": "admission-1",
                     "state": "current",
                 }
             ],

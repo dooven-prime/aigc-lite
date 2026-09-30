@@ -15,6 +15,7 @@ from ..core.errors import InvalidEvidenceError
 from ..core.kernel_verification import KernelBackendKind, KernelVerificationDraft
 from ..core.qualification import (
     AuthorizationGrantDraft,
+    KnowledgeAdmissionDraft,
     MathTheoremCandidateDraft,
     ValidationModality,
 )
@@ -90,7 +91,9 @@ class VerificationPlanRequest(BaseModel):
         max_length=20_000,
     )
     model: str | None = Field(default=None, max_length=200)
-    auto_promote: bool = True
+    # Compatibility name: true creates a proposal-only gate evaluation after
+    # execution. It never authorizes the Agent runner to change workflow stage.
+    auto_promote: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -111,6 +114,15 @@ class QualificationEvaluationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     profile_id: str = Field(min_length=1, max_length=200)
+
+
+class KnowledgeAdmissionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    admission_policy_id: str = Field(
+        default="knowledge.default.v1", min_length=1, max_length=200
+    )
+    rationale: str = Field(min_length=1, max_length=4_000)
 
 
 class KernelVerificationRequest(BaseModel):
@@ -318,6 +330,56 @@ def create_research_router(
         return qualification_service.get_receipt(
             request_context_factory(http_request, tenant), receipt_id
         )
+
+    @router.get("/api/qualification/knowledge-admission-policies")
+    async def knowledge_admission_policies(
+        _tenant: Tenant = Depends(current_tenant),
+    ) -> list[dict]:
+        return qualification_service.list_knowledge_admission_policies()
+
+    @router.get("/api/qualification/knowledge-admissions")
+    async def knowledge_admissions(
+        http_request: Request,
+        claim_id: str | None = None,
+        tenant: Tenant = Depends(current_tenant),
+    ) -> list[dict]:
+        return qualification_service.list_knowledge_admissions(
+            request_context_factory(http_request, tenant), claim_id
+        )
+
+    @router.post(
+        "/api/qualification/receipts/{receipt_id}/knowledge-admissions",
+        status_code=201,
+    )
+    async def admit_qualified_knowledge(
+        receipt_id: str,
+        payload: KnowledgeAdmissionRequest,
+        http_request: Request,
+        user: dict = Depends(current_admin_user),
+    ) -> dict:
+        result = qualification_service.admit_knowledge(
+            admin_context(http_request, user),
+            KnowledgeAdmissionDraft(
+                qualification_receipt_id=receipt_id,
+                admission_policy_id=payload.admission_policy_id,
+                rationale=payload.rationale,
+            ),
+        )
+        admission = result["knowledge_admission_receipt"]
+        get_repository().write_audit(
+            user["tenant_id"],
+            "qualification.knowledge_admission.create",
+            f"/api/qualification/receipts/{receipt_id}/knowledge-admissions",
+            {
+                "knowledge_admission_receipt_id": admission["id"],
+                "qualification_receipt_id": receipt_id,
+                "claim_revision_id": admission["claim_revision_id"],
+                "profile_id": admission["profile_id"],
+                "admission_policy_id": admission["admission_policy_id"],
+            },
+            user_id=user["id"],
+        )
+        return result
 
     @router.get("/api/qualification/search")
     async def qualified_search(
@@ -588,7 +650,10 @@ def create_research_router(
         user: dict = Depends(current_admin_user),
     ) -> dict:
         result = research_registry_service.evaluate_promotion(
-            admin_context(http_request, user), claim_id, payload.target_stage
+            admin_context(http_request, user),
+            claim_id,
+            payload.target_stage,
+            apply_transition=True,
         )
         evaluation = result["evaluation"]
         get_repository().write_audit(
@@ -601,6 +666,7 @@ def create_research_router(
                 "from_stage": evaluation["from_stage"],
                 "target_stage": evaluation["target_stage"],
                 "decision": evaluation["decision"],
+                "transition_applied": result["transition_applied"],
                 "blockers": evaluation["blockers"],
             },
             user_id=user["id"],

@@ -11,13 +11,17 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from ..auth import current_admin_user
 from ..core.contracts import RequestContext
 from ..core.enforcement import (
+    EnforcementDispatchState,
     EnforcementTargetType,
     ExecutionPolicySnapshot,
     PermissionDomain,
     PolicyPermission,
 )
+from ..core.errors import ResourceNotFoundError
 from ..database import get_repository
+from ..services.enforced_tools import ExternalToolExecutionRouter
 from ..services.enforcement import EnforcementService
+from ..services.enforcer import ExternalEnforcerService
 from ..tenancy import Tenant, current_tenant
 
 RequestContextFactory = Callable[[Request, Tenant], RequestContext]
@@ -71,9 +75,17 @@ class PolicyProposalRequest(BaseModel):
     rationale: str = Field(default="", max_length=4_000)
 
 
+class ReconcileDispatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_seconds: float = Field(default=30.0, ge=0.1, le=300.0)
+
+
 def create_enforcement_router(
     *,
     enforcement_service: EnforcementService,
+    external_enforcer_service: ExternalEnforcerService | None = None,
+    external_tool_execution_router: ExternalToolExecutionRouter | None = None,
     request_context_factory: RequestContextFactory,
 ) -> APIRouter:
     router = APIRouter()
@@ -88,6 +100,82 @@ def create_enforcement_router(
         _tenant: Tenant = Depends(current_tenant),
     ) -> list[dict]:
         return enforcement_service.list_issuers()
+
+    @router.get("/api/enforcement/adapters")
+    async def enforcement_adapters(
+        _tenant: Tenant = Depends(current_tenant),
+    ) -> list[dict]:
+        return (
+            external_enforcer_service.list_adapters()
+            if external_enforcer_service is not None
+            else []
+        )
+
+    @router.get("/api/enforcement/verification-keys")
+    async def enforcement_verification_keys(
+        _tenant: Tenant = Depends(current_tenant),
+    ) -> list[dict]:
+        return (
+            external_enforcer_service.list_verification_keys()
+            if external_enforcer_service is not None
+            else []
+        )
+
+    @router.get("/api/enforcement/tool-bindings")
+    async def enforcement_tool_bindings(
+        tenant: Tenant = Depends(current_tenant),
+    ) -> list[dict]:
+        return (
+            external_tool_execution_router.list_bindings(tenant.id)
+            if external_tool_execution_router is not None
+            else []
+        )
+
+    @router.get("/api/enforcement/dispatches")
+    async def enforcement_dispatches(
+        http_request: Request,
+        adapter_id: str | None = None,
+        proposal_id: str | None = None,
+        state: EnforcementDispatchState | None = None,
+        limit: int = 100,
+        tenant: Tenant = Depends(current_tenant),
+    ) -> list[dict]:
+        if external_enforcer_service is None:
+            return []
+        return external_enforcer_service.list_dispatches(
+            request_context_factory(http_request, tenant),
+            adapter_id=adapter_id,
+            proposal_id=proposal_id,
+            state=state,
+            limit=limit,
+        )
+
+    @router.get("/api/enforcement/dispatches/{dispatch_id}")
+    async def enforcement_dispatch_detail(
+        dispatch_id: str,
+        http_request: Request,
+        tenant: Tenant = Depends(current_tenant),
+    ) -> dict:
+        if external_enforcer_service is None:
+            raise ResourceNotFoundError("enforcement_dispatch", dispatch_id)
+        return external_enforcer_service.get_dispatch(
+            request_context_factory(http_request, tenant), dispatch_id
+        )
+
+    @router.post("/api/enforcement/dispatches/{dispatch_id}/reconcile")
+    async def reconcile_enforcement_dispatch(
+        dispatch_id: str,
+        payload: ReconcileDispatchRequest,
+        http_request: Request,
+        user: dict = Depends(current_admin_user),
+    ) -> dict:
+        if external_enforcer_service is None:
+            raise ResourceNotFoundError("enforcement_dispatch", dispatch_id)
+        return await external_enforcer_service.reconcile_dispatch(
+            admin_context(http_request, user),
+            dispatch_id,
+            expires_in_seconds=payload.timeout_seconds,
+        )
 
     @router.post("/api/enforcement/policy-proposals", status_code=201)
     async def create_policy_proposal(
@@ -171,6 +259,23 @@ def create_enforcement_router(
         tenant: Tenant = Depends(current_tenant),
     ) -> dict:
         return enforcement_service.get_receipt(
+            request_context_factory(http_request, tenant), receipt_id
+        )
+
+    @router.get("/api/enforcement/receipts/{receipt_id}/signature-verification")
+    async def enforcement_receipt_signature_verification(
+        receipt_id: str,
+        http_request: Request,
+        tenant: Tenant = Depends(current_tenant),
+    ) -> dict:
+        if external_enforcer_service is None:
+            return {
+                "receipt_id": receipt_id,
+                "historical_verification": False,
+                "currently_valid": False,
+                "reason": "external_enforcer_not_configured",
+            }
+        return external_enforcer_service.verify_stored_receipt(
             request_context_factory(http_request, tenant), receipt_id
         )
 

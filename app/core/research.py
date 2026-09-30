@@ -168,5 +168,8 @@ class VerificationPlanDraft:
     prompt: str
     system: str
     model: str | None = None
-    auto_promote: bool = True
+    # Legacy name retained for persisted/API compatibility. True requests an
+    # automatic PromotionGate evaluation only; Agent execution never applies
+    # the resulting workflow transition.
+    auto_promote: bool = False
     metadata: dict = field(default_factory=dict)

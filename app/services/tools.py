@@ -62,7 +62,7 @@ class ToolService:
             "tool-catalog",
         )
         try:
-            session = await self._tool_catalog.open(context)
+            session = await self._tool_catalog.open(context, run_id=run["id"])
             result = await session.invoke(
                 name, json.dumps(arguments, ensure_ascii=False, default=str)
             )

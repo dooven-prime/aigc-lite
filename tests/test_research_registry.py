@@ -254,9 +254,13 @@ def test_claim_relations_verification_and_fail_closed_promotion(tmp_path) -> Non
     )
     assert attempt["receipt"]["artifact_ids"] == [artifact["id"]]
     promoted = service.evaluate_promotion(
-        context, closed["id"], ClaimPromotionStage.EVIDENCE_READY
+        context,
+        closed["id"],
+        ClaimPromotionStage.EVIDENCE_READY,
+        apply_transition=True,
     )
     assert promoted["evaluation"]["decision"] == "passed"
+    assert promoted["transition_applied"] is True
     assert promoted["claim"]["promotion_stage"] == "evidence_ready"
 
     review_gate = service.evaluate_promotion(
@@ -296,7 +300,7 @@ def test_claim_relations_verification_and_fail_closed_promotion(tmp_path) -> Non
         workspace_id=context.workspace_id,
         principal_id="system:verifier:fixture-kernel",
     )
-    service.record_verification_attempt(
+    orthogonal_attempt = service.record_verification_attempt(
         verifier_context,
         closed["id"],
         VerificationAttemptDraft(
@@ -311,8 +315,15 @@ def test_claim_relations_verification_and_fail_closed_promotion(tmp_path) -> Non
         ),
     )
     reviewed = service.evaluate_promotion(context, closed["id"], ClaimPromotionStage.REVIEW_READY)
-    assert reviewed["evaluation"]["decision"] == "passed"
-    assert reviewed["claim"]["promotion_stage"] == "review_ready"
+    assert orthogonal_attempt["independent"] is False
+    assert orthogonal_attempt["independence"]["verification_properties"] == [
+        "orthogonal_non_llm_checker"
+    ]
+    assert reviewed["evaluation"]["decision"] == "blocked"
+    assert reviewed["evaluation"]["blockers"] == [
+        "qualified_independence_passed_attempt_present"
+    ]
+    assert reviewed["claim"]["promotion_stage"] == "evidence_ready"
 
     dependency = service.create_relation(
         context,
@@ -334,11 +345,10 @@ def test_claim_relations_verification_and_fail_closed_promotion(tmp_path) -> Non
                 rationale="This reverse edge must fail closed.",
             ),
         )
-    release_gate = service.evaluate_promotion(
-        context, closed["id"], ClaimPromotionStage.RELEASE_READY
-    )
-    assert release_gate["evaluation"]["decision"] == "blocked"
-    assert "dependencies_review_ready" in release_gate["evaluation"]["blockers"]
+    with pytest.raises(InvalidEvidenceError, match="next allowed stage"):
+        service.evaluate_promotion(
+            context, closed["id"], ClaimPromotionStage.RELEASE_READY
+        )
     withdrawn = service.withdraw_relation(
         context,
         closed["id"],
@@ -346,14 +356,9 @@ def test_claim_relations_verification_and_fail_closed_promotion(tmp_path) -> Non
         reason="The dependency was registered against the wrong revision.",
     )
     assert withdrawn["status"] == "withdrawn"
-    released = service.evaluate_promotion(
-        context, closed["id"], ClaimPromotionStage.RELEASE_READY
-    )
-    assert released["evaluation"]["decision"] == "passed"
-    assert released["claim"]["promotion_stage"] == "release_ready"
     detail = service.get_claim(context, closed["id"])
     assert len(detail["verification_attempts"]) == 3
-    assert len(detail["promotion_evaluations"]) == 6
+    assert len(detail["promotion_evaluations"]) == 4
     assert detail["relations"][0]["target_claim_key"] == "CLM-BLOCKED"
 
 

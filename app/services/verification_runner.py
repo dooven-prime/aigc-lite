@@ -461,6 +461,7 @@ class VerificationRunner:
                     plan["claim_revision_id"],
                     next_stage,
                     required_attempt_id=attempt["id"],
+                    apply_transition=False,
                 )
         execution = repository.finish_research_verification_execution(
             context.workspace_id,
@@ -484,6 +485,11 @@ class VerificationRunner:
                         promotion["evaluation"]["decision"]
                         if promotion is not None
                         else None
+                    ),
+                    "promotion_transition_applied": (
+                        promotion["transition_applied"]
+                        if promotion is not None
+                        else False
                     ),
                 },
             },

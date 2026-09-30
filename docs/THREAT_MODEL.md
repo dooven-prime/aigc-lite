@@ -120,7 +120,9 @@ enforcement point, device safety controller, or hardware watchdog. It must be
 able to observe, deny, or quarantine without trusting the Agent to call a
 cooperative safety API.
 
-`aigc-lite` does not currently ship this layer. ROS 2 cancellation and an
+`aigc-lite` now ships a vendor-neutral HTTP adapter and Ed25519 receipt
+verification seam for this layer, but does not ship or operate the external
+enforcer itself. ROS 2 cancellation, a signed runtime receipt, and an
 application `AuthorizationGrant` do not replace a safety-rated controller,
 emergency stop, collision system, network isolation, or out-of-band watchdog.
 
@@ -145,6 +147,9 @@ against a fully compromised host when the enforcer runs on that same host.
 
 ## 5. Security invariants
 
+The concrete transition owners and choke points are enumerated in
+[AUTHORITY_TRANSITIONS.md](AUTHORITY_TRANSITIONS.md).
+
 1. Candidate storage is not knowledge admission.
 2. Qualification is not authorization.
 3. A request for authority is not a grant of authority.
@@ -158,7 +163,11 @@ against a fully compromised host when the enforcer runs on that same host.
    requesting execution identity.
 9. Staleness and taint propagate without erasing historical receipts.
 10. An unconfirmed stop is not a successful cancellation and continues to
-    block conflicting physical work.
+   block conflicting physical work.
+11. A failure candidate is not source-modification authority. A controlled
+    patch attempt requires clean-base reproduction, an immutable FailureReceipt,
+    and a narrow grant that denies every test, validator, baseline, receipt and
+    failure-decision surface used to judge that patch.
 
 ## 6. Current coverage and gaps
 
@@ -169,21 +178,22 @@ against a fully compromised host when the enforcer runs on that same host.
 | Chat capability selection and Tool Catalog scopes | Implemented and server-owned, but still application-layer enforcement. |
 | Narrow AuthorizationGrant consumption | Implemented for delegated and physical dispatch, including invocation restrictions and currentness checks. |
 | PolicyProposal and server-derived PermissionDiff | Implemented as an immutable request ledger. Proposals do not approve or apply themselves. |
-| EnforcementReceipt ledger and host-owned issuer identity | Implemented as an internal-write/read-only-HTTP seam; no external sandbox adapter or attestation verifier is bundled yet. |
+| EnforcementReceipt ledger and host-owned issuer identity | Implemented as an internal-write/read-only-HTTP seam. A strict external HTTP adapter and Ed25519 receipt verifier bind nonce, request, issuer, execution, policy and time-window claims before persistence. |
 | Run, Step, Artifact, Receipt, Review and Finding ledger | Implemented; provides provenance and audit evidence, not prevention by itself. |
 | Separate process lifecycle and hard termination | Available for compatible local tools; not a permission sandbox. |
 | Kernel filesystem/process/network confinement | Not implemented by the core distribution. Use an external sandbox. |
 | Endpoint-bound credential injection enforced below the Agent | Configuration binding exists; complete egress-level enforcement requires an external runtime. |
 | Independent quarantine/watchdog trust domain | Not implemented. |
 | Hardware attestation or safety-rated physical interlock | Not implemented and outside the core project's authority. |
+| Controlled failure reproduction and source patching | Security contract frozen in [PATCH_RUNNER.md](PATCH_RUNNER.md); no patch runner or source-mutation API is implemented. |
 
 ## 7. External enforcement integration contract
 
-External sandboxes remain adapters behind `ToolExecutionBackend` or a
-provider boundary; core contracts must not depend on a particular vendor or
-kernel implementation. The first contract slice now records immutable Policy
-Proposals, conservative server-derived Permission Diffs, and backend-issued
-Enforcement Receipts. A future backend should receive an immutable execution
+External sandboxes remain adapters behind `EnforcerAdapter`,
+`ToolExecutionBackend`, or a provider boundary; core contracts do not depend
+on a particular vendor or kernel implementation. The current contract records
+immutable Policy Proposals, conservative server-derived Permission Diffs, and
+signed backend-issued Enforcement Receipts. A backend receives an immutable execution
 envelope containing at least:
 
 ```text
@@ -196,18 +206,25 @@ budgets, deadlines and cancellation mode
 runtime policy ID and revision hash
 ```
 
-It returns an immutable `EnforcementReceipt` containing the sandbox and
+It returns an immutable signed payload containing the sandbox and
 workload identities, policy hash, image/toolchain digest, observed and denied
 effects, credential bindings used, exit/timeout/quarantine state, and an
 attestation or external signature when available. The Run ledger stores this
 Receipt as evidence; neither the model nor the in-process Agent may mint it.
 
-The current service has no public Receipt write route and accepts writes only
-from code-registered issuer identities. This prevents client self-assertion but
-does not itself authenticate a remote runtime or verify hardware attestation;
-those checks belong in the concrete adapter.
+The current service has no public arbitrary-dispatch or Receipt write route. A receipt is
+marked verified only after an Ed25519 signature from a host-configured key and
+exact request/issuer/freshness bindings pass. Key registration and adapter
+registration remain deployer-owned. Tool execution additionally requires a
+deployer-owned binding to the exact workspace/provider/tool/proposal/policy
+hash. Uncertain or in-flight dispatches retain the adapter slot until signed
+reconciliation; there is no local-provider fallback. This authenticates the signed payload; it
+does not make the payload truthful, validate a hardware quote, prove that the
+enforcer is independently administered, or guarantee that an indeterminate
+workload stopped. Those properties require a domain attestation verifier and
+the actual external control plane.
 
-An OpenShell adapter is a plausible implementation of this seam. It should be
+An OpenShell adapter is a plausible deployment behind this seam. It should be
 optional and out of process, not copied into core or represented as a feature
 already provided by `aigc-lite`.
 

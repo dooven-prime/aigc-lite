@@ -25,6 +25,7 @@ from ..core.contracts import (
 )
 from ..core.errors import ErrorCode
 from ..database import get_repository
+from ..ports.enforcer import ExternalToolExecutor
 from ..ports.tools import ToolAccessPolicy, ToolProvider, ToolProviderSource
 from ..redaction import redact, redact_record_text
 from ..repository import Repository
@@ -57,12 +58,16 @@ class ToolSession:
             [RequestContext, ToolSpec, dict[str, Any]], dict[str, Any] | None
         ]
         | None = None,
+        external_tool_executor: ExternalToolExecutor | None = None,
+        run_id: str | None = None,
     ) -> None:
         self._entries = entries
         self._discovery_errors = discovery_errors or {}
         self._context = context
         self._access_policy = access_policy
         self._authorization_gate = authorization_gate
+        self._external_tool_executor = external_tool_executor
+        self._run_id = run_id
 
     @property
     def specs(self) -> list[ToolSpec]:
@@ -150,7 +155,17 @@ class ToolSession:
 
         try:
             async with asyncio.timeout(spec.timeout_seconds):
-                result = await provider.call_tool(spec.native_name, decoded)
+                result = None
+                if self._external_tool_executor is not None:
+                    result = await self._external_tool_executor.execute_if_bound(
+                        self._context,
+                        self._run_id,
+                        spec,
+                        decoded,
+                        authorization_metadata.get("authorization"),
+                    )
+                if result is None:
+                    result = await provider.call_tool(spec.native_name, decoded)
         except TimeoutError:
             error_code = ErrorCode.TOOL_TIMEOUT.value
             error = json.dumps({"error": error_code})
@@ -244,10 +259,12 @@ class ToolCatalog:
             [RequestContext, ToolSpec, dict[str, Any]], dict[str, Any] | None
         ]
         | None = None,
+        external_tool_executor: ExternalToolExecutor | None = None,
     ) -> None:
         self._providers: dict[str, ToolProvider] = {}
         self._provider_sources = provider_sources or []
         self._authorization_gate = authorization_gate
+        self._external_tool_executor = external_tool_executor
         for provider in providers or []:
             self.register(provider)
 
@@ -264,6 +281,7 @@ class ToolCatalog:
         context: RequestContext,
         *,
         access_policy: ToolAccessPolicy | None = None,
+        run_id: str | None = None,
     ) -> ToolSession:
         entries: dict[str, tuple[ToolSpec, ToolProvider]] = {}
         discovery_errors: dict[str, str] = {}
@@ -306,6 +324,8 @@ class ToolCatalog:
             context=context,
             access_policy=access_policy,
             authorization_gate=self._authorization_gate,
+            external_tool_executor=self._external_tool_executor,
+            run_id=run_id,
         )
 
     @staticmethod
@@ -380,6 +400,8 @@ def _remote_provider(value: Any) -> MCPToolProvider:
 
 def create_default_tool_catalog(
     repository_provider: Callable[[], Repository] = get_repository,
+    *,
+    external_tool_executor: ExternalToolExecutor | None = None,
 ) -> ToolCatalog:
     catalog = ToolCatalog(
         [LocalToolProvider()],
@@ -390,6 +412,7 @@ def create_default_tool_catalog(
         authorization_gate=ToolAuthorizationGate(
             repository_provider
         ).authorize_and_consume,
+        external_tool_executor=external_tool_executor,
     )
     if not settings.mcp_servers_json.strip():
         return catalog

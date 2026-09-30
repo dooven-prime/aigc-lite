@@ -15,14 +15,34 @@ Q(ClaimRevision, QualificationProfile, EvidenceClosure, PolicyVersion)
 
 系统中没有 `artifact.trusted=true` 或 `trusted_agent=true`。模型只能产生 candidate、Artifact、验证/复核
 proposal 和反例；只有确定性的 `QualificationGate` 能写 `ADMITTED / BLOCKED / UNRESOLVED / STALE /
-NOT_APPLICABLE` 评估，且只有 `ADMITTED` 才签发不可变 Qualification Receipt。Claim statement、scope、
-定义、负边界或依赖发生变化时 semantic hash 改变，旧证据继续作为历史记录存在，但不会自动继承。
+NOT_APPLICABLE` 评估，且只有 `ADMITTED` 才签发不可变 Qualification Receipt。它不会自动写入知识层：
+
+```text
+QualificationGate -> QualificationReceipt -> explicit KnowledgeAdmission -> CurrentUseBinding
+```
+
+显式 admission 由 workspace admin 在服务端注册的 `knowledge.default.v1` policy 下发起，形成不可变
+KnowledgeAdmissionReceipt（包含 approver、policy hash 与 rationale），并与 CurrentUseBinding 原子提交。
+Claim statement、scope、定义、负边界或依赖发生变化时 semantic hash 改变，旧证据继续作为历史记录
+存在，但不会自动继承。
 
 首个领域锁 `math.formal.v1` 要求 exact revision identity、formal proof Artifact、带 checker identity 与
 executable hash 的 kernel certificate、无 `sorry`/额外公理、current dependency closure，以及非模型的
 semantic-alignment review。资格与权力严格分账：发布或高风险执行仍需要独立、窄范围的
 `AuthorizationGrant(action, target, scope, budget, expiry, max_calls)`。原始候选进入 `/api/search`；
 知识使用面可走 `/api/qualification/search`，避免未资格化候选被下一轮 Agent 当成事实。
+
+```json
+POST /api/qualification/receipts/{qualification_receipt_id}/knowledge-admissions
+{
+  "admission_policy_id": "knowledge.default.v1",
+  "rationale": "Reviewed for the workspace default theorem retrieval view."
+}
+```
+
+`ADMITTED` 只回答“满足资格合同了吗”；Knowledge Admission 回答“当前组织是否选择它进入默认可复用
+知识”。数据库拒绝任何没有匹配 KnowledgeAdmissionReceipt 的 current knowledge binding。历史 binding
+升级后会变为 stale，必须显式重新 admission，不进行静默回填。
 
 执行 grant 的 `scope / conditions / budget` 不是说明性 metadata。Tool Catalog 在 provider dispatch
 之前，用服务端派生的具体 invocation 逐项匹配，并只按匹配到的 grant ID 原子消费：
@@ -55,8 +75,9 @@ Lean 4/Coq process backend 只接受 proof source、固定 declaration 和 backe
 环境与 verifier identity 都由服务器配置，客户端不能上传 command 或用普通 JSON 冒充 certificate。
 Lean 使用 `--trust=0` 并读取 `#print axioms`，Coq 读取 `Print Assumptions`；非零退出、超时、缺失
 closure marker、`sorry`/`Admitted` 或任意额外公理都生成失败 Attempt，不能通过 Gate。
-即使 kernel 通过也只增加一条合格的 evidence edge，不直接写 Qualification verdict；语义对齐 review、
-dependency closure 和显式 `QualificationGate` 仍必须分别满足。
+即使 kernel 通过也只满足 `orthogonal_verification` 并增加一条合格的 evidence edge，不满足
+`independent_validation`，也不直接写 Qualification verdict；语义对齐 review、dependency closure 和
+显式 `QualificationGate` 仍必须分别满足。
 
 ```dotenv
 # 默认留空并失败关闭；生产环境建议固定到具体 toolchain 的绝对路径。
@@ -79,6 +100,11 @@ POST /api/qualification/claims/{claim_revision_id}/kernel-verifications
 metaprogram 与 Coq plugin 仍可能接触宿主文件系统/网络。因此该入口只开放给 workspace admin，
 不应作为公开匿名 proof upload 服务。需要验证不可信任意代码时，应把同一 backend 放进独立容器/
 VM，并把镜像、库闭包和网络策略纳入后续 Qualification Profile。
+
+`math.formal.v1` 保持保守的 closed/single-proof profile，不扩张成万能 formal profile。后续
+`math.formal.project.v2` 应单独绑定 Lean 版本、Mathlib commit、lake manifest/lockfile、source tree
+digest、content-addressed import closure、challenge statement digest、kernel receipt 与 statement
+comparator receipt；其 dependency closure 表示每个依赖均闭合，而不是依赖必须为空。
 
 ## Portable Assurance Bundle
 

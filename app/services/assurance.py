@@ -106,6 +106,7 @@ class AssuranceBundleService:
         promotions: list[dict] = []
         qualification_evaluations: list[dict] = []
         qualification_receipts_by_id: dict[str, dict] = {}
+        knowledge_admissions_by_id: dict[str, dict] = {}
         current_use_bindings: list[dict] = []
         for claim in claims:
             claim_id = claim["id"]
@@ -129,6 +130,10 @@ class AssuranceBundleService:
                 context.workspace_id, claim_id
             ):
                 qualification_receipts_by_id[receipt["id"]] = receipt
+            for admission in repository.list_knowledge_admission_receipts(
+                context.workspace_id, claim_id
+            ):
+                knowledge_admissions_by_id[admission["id"]] = admission
             for profile_id in sorted({item["profile_id"] for item in claim_evaluations}):
                 binding = repository.get_current_use_binding(
                     context.workspace_id, claim_id, profile_id
@@ -248,9 +253,16 @@ class AssuranceBundleService:
             },
             "qualification.json": {
                 "contract_version": "qualification.bundle-projection.v1",
+                "knowledge_admission_policies": (
+                    self._qualification.list_knowledge_admission_policies()
+                ),
                 "evaluations": qualification_evaluations,
                 "receipts": sorted(
                     qualification_receipts_by_id.values(),
+                    key=lambda item: item["id"],
+                ),
+                "knowledge_admissions": sorted(
+                    knowledge_admissions_by_id.values(),
                     key=lambda item: item["id"],
                 ),
                 "current_use_bindings": sorted(current_use_bindings, key=lambda item: item["id"]),
@@ -650,7 +662,7 @@ class AssuranceBundleVerifier:
             )
             independence = attempt.get("independence") or {}
             if independence.get("derived"):
-                qualified = "orthogonal_non_llm_checker" in independence.get("basis", [])
+                qualified = independence.get("qualified") is True
                 reasons = tuple(independence.get("limitations") or [])
             else:
                 assessment = VerificationIndependence.from_dict(independence)
@@ -697,6 +709,14 @@ class AssuranceBundleVerifier:
         claim_ids = {item.get("id") for item in documents["claims.json"].get("claims", [])}
         evaluations = {item.get("id"): item for item in qualification.get("evaluations", [])}
         receipts = {item.get("id"): item for item in qualification.get("receipts", [])}
+        admissions = {
+            item.get("id"): item
+            for item in qualification.get("knowledge_admissions", [])
+        }
+        admission_policies = {
+            (item.get("policy_id"), item.get("version")): item
+            for item in qualification.get("knowledge_admission_policies", [])
+        }
         broken: list[str] = []
         for evaluation in evaluations.values():
             if evaluation.get("claim_revision_id") not in claim_ids:
@@ -726,9 +746,60 @@ class AssuranceBundleVerifier:
             }
             if json_digest(portable) != receipt.get("receipt_hash"):
                 broken.append(f"receipt:{receipt.get('id')}:receipt_hash")
+        for admission in admissions.values():
+            receipt = receipts.get(admission.get("qualification_receipt_id"))
+            if receipt is None:
+                broken.append(f"admission:{admission.get('id')}:qualification_receipt")
+            portable = {
+                "contract_version": admission.get("contract_version"),
+                "knowledge_admission_receipt_id": admission.get("id"),
+                "qualification_receipt_id": admission.get("qualification_receipt_id"),
+                "qualification_receipt_hash": admission.get(
+                    "qualification_receipt_hash"
+                ),
+                "claim_revision_id": admission.get("claim_revision_id"),
+                "claim_semantic_hash": admission.get("claim_semantic_hash"),
+                "profile_id": admission.get("profile_id"),
+                "profile_version": admission.get("profile_version"),
+                "use_scope": admission.get("use_scope"),
+                "admission_policy_id": admission.get("admission_policy_id"),
+                "admission_policy_version": admission.get(
+                    "admission_policy_version"
+                ),
+                "admission_policy_hash": admission.get("admission_policy_hash"),
+                "approved_by": admission.get("approved_by"),
+                "rationale": admission.get("rationale"),
+                "issued_at": admission.get("issued_at"),
+            }
+            if json_digest(portable) != admission.get("receipt_hash"):
+                broken.append(f"admission:{admission.get('id')}:receipt_hash")
+            if receipt is not None and (
+                admission.get("qualification_receipt_hash")
+                != receipt.get("receipt_hash")
+            ):
+                broken.append(f"admission:{admission.get('id')}:receipt_binding")
+            policy = admission_policies.get(
+                (
+                    admission.get("admission_policy_id"),
+                    admission.get("admission_policy_version"),
+                )
+            )
+            if policy is None:
+                broken.append(f"admission:{admission.get('id')}:policy")
+            elif json_digest(policy) != admission.get("admission_policy_hash"):
+                broken.append(f"admission:{admission.get('id')}:policy_hash")
         for binding in qualification.get("current_use_bindings", []):
             if binding.get("qualification_receipt_id") not in receipts:
                 broken.append(f"binding:{binding.get('id')}:receipt")
+            admission = admissions.get(binding.get("knowledge_admission_receipt_id"))
+            if binding.get("use_scope") == "knowledge" and binding.get("state") == "current":
+                if admission is None:
+                    broken.append(f"binding:{binding.get('id')}:knowledge_admission")
+                elif (
+                    admission.get("qualification_receipt_id")
+                    != binding.get("qualification_receipt_id")
+                ):
+                    broken.append(f"binding:{binding.get('id')}:admission_mismatch")
         for grant in qualification.get("authorization_grants", []):
             if grant.get("qualification_receipt_id") not in receipts:
                 broken.append(f"grant:{grant.get('id')}:receipt")
@@ -772,7 +843,7 @@ def _assurance_vector(documents: dict[str, object], *, integrity_ok: bool) -> di
     for attempt in attempts:
         independence = attempt.get("independence") or {}
         if independence.get("derived"):
-            qualified = "orthogonal_non_llm_checker" in independence.get("basis", [])
+            qualified = independence.get("qualified") is True
         else:
             assessment = VerificationIndependence.from_dict(independence)
             qualified, _reasons = assessment.qualification()
@@ -786,8 +857,17 @@ def _assurance_vector(documents: dict[str, object], *, integrity_ok: bool) -> di
         if isinstance(qualification_doc, dict)
         else []
     )
+    admissions = (
+        qualification_doc.get("knowledge_admissions", [])
+        if isinstance(qualification_doc, dict)
+        else []
+    )
+    admission_ids = {item.get("id") for item in admissions}
     current_receipt_ids = {
-        item.get("qualification_receipt_id") for item in bindings if item.get("state") == "current"
+        item.get("qualification_receipt_id")
+        for item in bindings
+        if item.get("state") == "current"
+        and item.get("knowledge_admission_receipt_id") in admission_ids
     }
     current_receipts = [
         item
@@ -864,12 +944,26 @@ def _assurance_vector(documents: dict[str, object], *, integrity_ok: bool) -> di
             "status": verification_status,
             "domain_semantics": "not_evaluated_by_bundle_verifier",
         },
+        "orthogonal_verification": {
+            "status": (
+                "satisfied"
+                if any(
+                    "orthogonal_non_llm_checker"
+                    in (item.get("independence") or {}).get(
+                        "verification_properties", []
+                    )
+                    for item in attempts
+                )
+                else "undetermined"
+            )
+        },
         "independence": {
             "status": (
                 "qualified"
                 if qualified_attempts
                 or any(
-                    item.get("independence_summary", {}).get("basis") for item in current_receipts
+                    item.get("independence_summary", {}).get("qualified") is True
+                    for item in current_receipts
                 )
                 else "not_qualified"
             ),

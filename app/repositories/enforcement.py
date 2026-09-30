@@ -32,7 +32,47 @@ def _decode_enforcement_receipt(row: Any) -> dict[str, Any]:
     value["denied_effects"] = _decode_list(value.get("denied_effects"))
     value["credential_bindings"] = _decode_list(value.get("credential_bindings"))
     value["attestation"] = _decode_metadata(value.get("attestation"))
+    value["signature_verified"] = bool(value.get("signature_verified"))
+    value["signature_verification"] = _decode_metadata(
+        value.get("signature_verification")
+    )
+    value["signed_payload"] = _decode_metadata(value.get("signed_payload"))
     return value
+
+
+def _decode_enforcement_dispatch(row: Any) -> dict[str, Any]:
+    return dict(row)
+
+
+def _dispatch_row(
+    tenant_id: str, values: dict[str, Any], created_at: str
+) -> dict[str, Any]:
+    return {
+        "id": values["id"],
+        "tenant_id": tenant_id,
+        "contract_version": values["contract_version"],
+        "binding_id": values.get("binding_id"),
+        "adapter_id": values["adapter_id"],
+        "issuer_id": values["issuer_id"],
+        "target_type": values["target_type"],
+        "target_id": values["target_id"],
+        "run_id": values["run_id"],
+        "step_id": values.get("step_id"),
+        "proposal_id": values["proposal_id"],
+        "original_dispatch_id": values.get("original_dispatch_id"),
+        "request_hash": values["request_hash"],
+        "execution_envelope_hash": values["execution_envelope_hash"],
+        "tool_spec_hash": values["tool_spec_hash"],
+        "arguments_digest": values["arguments_digest"],
+        "requested_at": values["requested_at"],
+        "expires_at": values["expires_at"],
+        "state": values["state"],
+        "receipt_id": values.get("receipt_id"),
+        "workload_id": values.get("workload_id"),
+        "last_error_code": values.get("last_error_code"),
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
 
 
 def _proposal_row(
@@ -102,6 +142,20 @@ def _receipt_row(
         "workload_id": values.get("workload_id"),
         "external_signature": values.get("external_signature"),
         "attestation": json.dumps(values.get("attestation") or {}, ensure_ascii=False),
+        "signature_verified": 1 if values.get("signature_verified") else 0,
+        "enforcement_request_id": values.get("enforcement_request_id"),
+        "enforcement_request_hash": values.get("enforcement_request_hash"),
+        "signature_algorithm": values.get("signature_algorithm"),
+        "signing_key_id": values.get("signing_key_id"),
+        "signed_payload_hash": values.get("signed_payload_hash"),
+        "signature_verified_at": values.get("signature_verified_at"),
+        "signature_verifier_id": values.get("signature_verifier_id"),
+        "signed_payload": json.dumps(
+            values.get("signed_payload") or {}, ensure_ascii=False
+        ),
+        "signature_verification": json.dumps(
+            values.get("signature_verification") or {}, ensure_ascii=False
+        ),
         "issued_at": values["issued_at"],
         "receipt_hash": values["receipt_hash"],
         "created_at": created_at,
@@ -157,6 +211,118 @@ class SQLiteEnforcementRepositoryMixin:
             rows = db.execute(statement, parameters).fetchall()
         return [_decode_policy_proposal(row) for row in rows]
 
+    def create_enforcement_dispatch(
+        self, tenant_id: str, values: dict[str, Any]
+    ) -> dict:
+        row = _dispatch_row(tenant_id, values, utc_now())
+        with self._connect() as db:
+            owned_run = db.execute(
+                "SELECT 1 FROM agent_runs WHERE tenant_id = ? AND id = ?",
+                (tenant_id, row["run_id"]),
+            ).fetchone()
+            if owned_run is None:
+                raise KeyError(row["run_id"])
+            if row["step_id"] is not None:
+                owned_step = db.execute(
+                    "SELECT 1 FROM run_steps WHERE tenant_id = ? AND id = ? AND run_id = ?",
+                    (tenant_id, row["step_id"], row["run_id"]),
+                ).fetchone()
+                if owned_step is None:
+                    raise KeyError(row["step_id"])
+            proposal = db.execute(
+                "SELECT 1 FROM execution_policy_proposals WHERE tenant_id = ? AND id = ?",
+                (tenant_id, row["proposal_id"]),
+            ).fetchone()
+            if proposal is None:
+                raise KeyError(row["proposal_id"])
+            if row["original_dispatch_id"] is not None:
+                original = db.execute(
+                    "SELECT 1 FROM enforcement_dispatches WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, row["original_dispatch_id"]),
+                ).fetchone()
+                if original is None:
+                    raise KeyError(row["original_dispatch_id"])
+            db.execute(
+                "INSERT INTO enforcement_dispatches(id, tenant_id, contract_version, "
+                "binding_id, adapter_id, issuer_id, target_type, target_id, run_id, "
+                "step_id, proposal_id, original_dispatch_id, request_hash, "
+                "execution_envelope_hash, tool_spec_hash, arguments_digest, "
+                "requested_at, expires_at, state, "
+                "receipt_id, workload_id, last_error_code, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(row.values()),
+            )
+        return _decode_enforcement_dispatch(row)
+
+    def get_enforcement_dispatch(
+        self, tenant_id: str, dispatch_id: str
+    ) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM enforcement_dispatches WHERE tenant_id = ? AND id = ?",
+                (tenant_id, dispatch_id),
+            ).fetchone()
+        return _decode_enforcement_dispatch(row) if row is not None else None
+
+    def list_enforcement_dispatches(
+        self,
+        tenant_id: str,
+        *,
+        adapter_id: str | None = None,
+        proposal_id: str | None = None,
+        state: str | None = None,
+        original_dispatch_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        statement = "SELECT * FROM enforcement_dispatches WHERE tenant_id = ?"
+        parameters: list[Any] = [tenant_id]
+        for column, value in (
+            ("adapter_id", adapter_id),
+            ("proposal_id", proposal_id),
+            ("state", state),
+            ("original_dispatch_id", original_dispatch_id),
+        ):
+            if value is not None:
+                statement += f" AND {column} = ?"
+                parameters.append(value)
+        statement += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+        parameters.append(max(1, min(limit, 500)))
+        with self._connect() as db:
+            rows = db.execute(statement, parameters).fetchall()
+        return [_decode_enforcement_dispatch(row) for row in rows]
+
+    def finish_enforcement_dispatch(
+        self,
+        tenant_id: str,
+        dispatch_id: str,
+        *,
+        state: str,
+        receipt_id: str | None = None,
+        workload_id: str | None = None,
+        last_error_code: str | None = None,
+    ) -> dict | None:
+        updated_at = utc_now()
+        with self._connect() as db:
+            db.execute(
+                "UPDATE enforcement_dispatches SET state = ?, receipt_id = ?, "
+                "workload_id = ?, last_error_code = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND id = ?",
+                (
+                    state,
+                    receipt_id,
+                    workload_id,
+                    last_error_code,
+                    updated_at,
+                    tenant_id,
+                    dispatch_id,
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM enforcement_dispatches WHERE tenant_id = ? AND id = ?",
+                (tenant_id, dispatch_id),
+            ).fetchone()
+        return _decode_enforcement_dispatch(row) if row is not None else None
+
     def create_enforcement_receipt(
         self, tenant_id: str, values: dict[str, Any]
     ) -> dict:
@@ -190,8 +356,13 @@ class SQLiteEnforcementRepositoryMixin:
                 "execution_envelope_hash, tool_spec_hash, arguments_digest, decision, outcome, "
                 "observed_effects, denied_effects, credential_bindings, image_digest, "
                 "toolchain_digest, sandbox_id, workload_id, external_signature, attestation, "
+                "signature_verified, enforcement_request_id, enforcement_request_hash, "
+                "signature_algorithm, signing_key_id, signed_payload_hash, "
+                "signature_verified_at, signature_verifier_id, signed_payload, "
+                "signature_verification, "
                 "issued_at, receipt_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(tenant_id, receipt_hash) DO NOTHING",
                 tuple(row.values()),
             )
@@ -293,6 +464,149 @@ class PostgresEnforcementRepositoryMixin:
         statement += " ORDER BY created_at DESC, id DESC LIMIT :limit"
         return [_decode_policy_proposal(row) for row in self._many(statement, values)]
 
+    def create_enforcement_dispatch(
+        self, tenant_id: str, values: dict[str, Any]
+    ) -> dict:
+        from sqlalchemy import text
+
+        row = _dispatch_row(tenant_id, values, utc_now())
+        with self.engine.begin() as connection:
+            owned_run = connection.execute(
+                text(
+                    "SELECT 1 FROM agent_runs WHERE tenant_id = :tenant_id AND id = :run_id"
+                ),
+                row,
+            ).first()
+            if owned_run is None:
+                raise KeyError(row["run_id"])
+            if row["step_id"] is not None:
+                owned_step = connection.execute(
+                    text(
+                        "SELECT 1 FROM run_steps WHERE tenant_id = :tenant_id AND id = :step_id "
+                        "AND run_id = :run_id"
+                    ),
+                    row,
+                ).first()
+                if owned_step is None:
+                    raise KeyError(row["step_id"])
+            proposal = connection.execute(
+                text(
+                    "SELECT 1 FROM execution_policy_proposals "
+                    "WHERE tenant_id = :tenant_id AND id = :proposal_id"
+                ),
+                row,
+            ).first()
+            if proposal is None:
+                raise KeyError(row["proposal_id"])
+            if row["original_dispatch_id"] is not None:
+                original = connection.execute(
+                    text(
+                        "SELECT 1 FROM enforcement_dispatches "
+                        "WHERE tenant_id = :tenant_id AND id = :original_dispatch_id"
+                    ),
+                    row,
+                ).first()
+                if original is None:
+                    raise KeyError(row["original_dispatch_id"])
+            connection.execute(
+                text(
+                    "INSERT INTO enforcement_dispatches(id, tenant_id, contract_version, "
+                    "binding_id, adapter_id, issuer_id, target_type, target_id, run_id, "
+                    "step_id, proposal_id, original_dispatch_id, request_hash, "
+                    "execution_envelope_hash, tool_spec_hash, arguments_digest, "
+                    "requested_at, expires_at, state, "
+                    "receipt_id, workload_id, last_error_code, created_at, updated_at) "
+                    "VALUES (:id, :tenant_id, :contract_version, :binding_id, :adapter_id, "
+                    ":issuer_id, :target_type, :target_id, :run_id, :step_id, :proposal_id, "
+                    ":original_dispatch_id, :request_hash, :execution_envelope_hash, "
+                    ":tool_spec_hash, :arguments_digest, :requested_at, :expires_at, :state, "
+                    ":receipt_id, :workload_id, "
+                    ":last_error_code, :created_at, :updated_at)"
+                ),
+                row,
+            )
+        return _decode_enforcement_dispatch(row)
+
+    def get_enforcement_dispatch(
+        self, tenant_id: str, dispatch_id: str
+    ) -> dict | None:
+        row = self._one(
+            "SELECT * FROM enforcement_dispatches "
+            "WHERE tenant_id = :tenant_id AND id = :id",
+            {"tenant_id": tenant_id, "id": dispatch_id},
+        )
+        return _decode_enforcement_dispatch(row) if row is not None else None
+
+    def list_enforcement_dispatches(
+        self,
+        tenant_id: str,
+        *,
+        adapter_id: str | None = None,
+        proposal_id: str | None = None,
+        state: str | None = None,
+        original_dispatch_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        statement = "SELECT * FROM enforcement_dispatches WHERE tenant_id = :tenant_id"
+        values: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "limit": max(1, min(limit, 500)),
+        }
+        for column, value in (
+            ("adapter_id", adapter_id),
+            ("proposal_id", proposal_id),
+            ("state", state),
+            ("original_dispatch_id", original_dispatch_id),
+        ):
+            if value is not None:
+                statement += f" AND {column} = :{column}"
+                values[column] = value
+        statement += " ORDER BY updated_at DESC, id DESC LIMIT :limit"
+        return [
+            _decode_enforcement_dispatch(row)
+            for row in self._many(statement, values)
+        ]
+
+    def finish_enforcement_dispatch(
+        self,
+        tenant_id: str,
+        dispatch_id: str,
+        *,
+        state: str,
+        receipt_id: str | None = None,
+        workload_id: str | None = None,
+        last_error_code: str | None = None,
+    ) -> dict | None:
+        from sqlalchemy import text
+
+        values = {
+            "tenant_id": tenant_id,
+            "id": dispatch_id,
+            "state": state,
+            "receipt_id": receipt_id,
+            "workload_id": workload_id,
+            "last_error_code": last_error_code,
+            "updated_at": utc_now(),
+        }
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE enforcement_dispatches SET state = :state, "
+                    "receipt_id = :receipt_id, workload_id = :workload_id, "
+                    "last_error_code = :last_error_code, updated_at = :updated_at "
+                    "WHERE tenant_id = :tenant_id AND id = :id"
+                ),
+                values,
+            )
+            row = connection.execute(
+                text(
+                    "SELECT * FROM enforcement_dispatches "
+                    "WHERE tenant_id = :tenant_id AND id = :id"
+                ),
+                values,
+            ).mappings().first()
+        return _decode_enforcement_dispatch(row) if row is not None else None
+
     def create_enforcement_receipt(
         self, tenant_id: str, values: dict[str, Any]
     ) -> dict:
@@ -336,13 +650,22 @@ class PostgresEnforcementRepositoryMixin:
                     "execution_envelope_hash, tool_spec_hash, arguments_digest, decision, outcome, "
                     "observed_effects, denied_effects, credential_bindings, image_digest, "
                     "toolchain_digest, sandbox_id, workload_id, external_signature, attestation, "
+                    "signature_verified, enforcement_request_id, enforcement_request_hash, "
+                    "signature_algorithm, signing_key_id, signed_payload_hash, "
+                    "signature_verified_at, signature_verifier_id, signed_payload, "
+                    "signature_verification, "
                     "issued_at, receipt_hash, created_at) VALUES (:id, :tenant_id, "
                     ":contract_version, :run_id, :step_id, :proposal_id, :issuer_id, "
                     ":backend_id, :enforcement_identity, :trust_domain, :attestation_type, "
                     ":policy_id, :policy_revision, :policy_hash, :execution_envelope_hash, "
                     ":tool_spec_hash, :arguments_digest, :decision, :outcome, :observed_effects, "
                     ":denied_effects, :credential_bindings, :image_digest, :toolchain_digest, "
-                    ":sandbox_id, :workload_id, :external_signature, :attestation, :issued_at, "
+                    ":sandbox_id, :workload_id, :external_signature, :attestation, "
+                    ":signature_verified, :enforcement_request_id, :enforcement_request_hash, "
+                    ":signature_algorithm, :signing_key_id, :signed_payload_hash, "
+                    ":signature_verified_at, :signature_verifier_id, :signed_payload, "
+                    ":signature_verification, "
+                    ":issued_at, "
                     ":receipt_hash, :created_at) ON CONFLICT(tenant_id, receipt_hash) DO NOTHING"
                 ),
                 row,

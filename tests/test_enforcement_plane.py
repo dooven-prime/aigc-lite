@@ -231,6 +231,8 @@ def test_registered_backend_records_immutable_deduplicated_receipt(tmp_path) -> 
     assert len(receipt["execution_envelope_hash"]) == 64
     assert len(receipt["receipt_hash"]) == 64
     assert receipt["deduplicated"] is False
+    assert receipt["signature_verified"] is False
+    assert receipt["signature_verification"] == {}
 
     duplicate = service.record_receipt(
         context.workspace_id, issuer_id=issuer.issuer_id, draft=draft
@@ -340,6 +342,16 @@ def test_enforcement_http_exposes_proposals_and_read_only_receipts(
         ) == 1
         assert client.get("/api/enforcement/receipts", headers=headers).json() == []
         assert client.get("/api/enforcement/issuers", headers=headers).json() == []
+        assert client.get("/api/enforcement/adapters", headers=headers).json() == []
+        assert client.get(
+            "/api/enforcement/tool-bindings", headers=headers
+        ).json() == []
+        assert client.get(
+            "/api/enforcement/dispatches", headers=headers
+        ).json() == []
+        assert client.get(
+            "/api/enforcement/verification-keys", headers=headers
+        ).json() == []
 
         hostile = {**payload, "permission_diff": {"expands_authority": False}}
         assert client.post(

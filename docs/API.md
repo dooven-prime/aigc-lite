@@ -31,8 +31,8 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/research-registry/claims/{claim_id}/relations`：管理员登记 supports/refutes/depends_on/qualifies 类型化关系；`.../relations/{relation_id}/withdraw` 保留理由地撤回关系
 - `POST /api/research-registry/claims/{claim_id}/verification-attempts`：管理员登记摘要与 Artifact 绑定的验证尝试及 Receipt
 - `POST /api/research-registry/claims/{claim_id}/verification-plans`：管理员冻结 Verification Plan 的新版本，同一 `plan_key` 的旧版本自动退役
-- `POST /api/research-registry/verification-plans/{plan_id}/runs`：通过 Agent 立即执行有效 Plan，并闭合 Run/Step/Artifact/Receipt/Promotion Gate
-- `POST /api/research-registry/claims/{claim_id}/promotion-gates`：管理员执行下一阶段的失败关闭晋升评估
+- `POST /api/research-registry/verification-plans/{plan_id}/runs`：通过 Agent 立即执行有效 Plan，并闭合 Run/Step/Artifact/Receipt；旧字段 `auto_promote=true` 只追加 proposal-only Promotion Gate evaluation，不更新 workflow stage
+- `POST /api/research-registry/claims/{claim_id}/promotion-gates`：管理员显式执行并应用下一阶段的失败关闭 workflow Gate
 - `POST /api/research-registry/import/frontier`：管理员上传、验证并冻结 Claim Registry
 - `GET /api/qualification/profiles`：列出代码注册、版本固定的领域资格 Profile
 - `GET /api/qualification/kernel-verifiers`：列出 Lean/Coq backend 的配置状态和非敏感执行边界
@@ -40,6 +40,9 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/qualification/claims/{claim_id}/kernel-verifications`：用服务端配置的 Lean/Coq 可执行文件验证冻结 proof，并写入 Run/Step/Artifact/Receipt/Attempt
 - `POST /api/qualification/claims/{claim_id}/evaluations`：按指定 Profile 运行确定性 Qualification Gate
 - `GET /api/qualification/receipts/{receipt_id}`：读取不可变、可携带的资格证书
+- `GET /api/qualification/knowledge-admission-policies`：列出服务端持有的知识准入 policy
+- `POST /api/qualification/receipts/{receipt_id}/knowledge-admissions`：管理员显式准入一张仍有效的资格证书，并原子更新 current knowledge binding
+- `GET /api/qualification/knowledge-admissions`：读取不可变知识准入历史，可按 `claim_id` 过滤
 - `GET /api/qualification/search?q=...&profile=math.formal.v1`：只查询当前仍具该资格的 ClaimRevision
 - `POST /api/authorization-grants`：基于 current Qualification Receipt 签发窄 action/target/scope/budget/max_calls 授权
 - `GET /api/reviews/profiles`：列出代码注册、内容哈希固定的 Review Profile
@@ -53,7 +56,13 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/enforcement/policy-proposals`：管理员提交 base/candidate execution policy；服务端冻结两份 snapshot 并确定性计算 `PermissionDiff`，不批准或应用策略
 - `GET /api/enforcement/policy-proposals` 与 `GET /api/enforcement/policy-proposals/{proposal_id}`：查询 workspace 的不可变策略提案与扩权/收权明细
 - `GET /api/enforcement/issuers`：列出主机代码注册、能够签发 enforcement evidence 的 backend identity；请求不能注册 issuer
+- `GET /api/enforcement/adapters`：列出部署者在 composition root 注册的外部 adapter 及其精确 target；没有公共注册或 dispatch API
+- `GET /api/enforcement/tool-bindings`：列出当前 workspace 由部署者注册的精确 tool → adapter/proposal/policy-hash 绑定
+- `GET /api/enforcement/verification-keys`：只返回可信 Ed25519 key 的 ID、有效期、吊销状态和公钥指纹，不返回公钥配置载体
+- `GET /api/enforcement/dispatches` 与 `GET /api/enforcement/dispatches/{dispatch_id}`：查询持久化 dispatch/reconciliation 状态
+- `POST /api/enforcement/dispatches/{dispatch_id}/reconcile`：管理员要求外部 enforcer 重查 `dispatching/indeterminate` workload；不能创建新的任意动作
 - `GET /api/enforcement/receipts` 与 `GET /api/enforcement/receipts/{receipt_id}`：只读查询外部 backend 写入的不可变 `EnforcementReceipt`；没有公共 Receipt 写入口
+- `GET /api/enforcement/receipts/{receipt_id}/signature-verification`：使用当前 host-owned trust roots 重验已存签名；不改写历史验证结果
 - `GET|POST /api/schedules`：管理员创建或列出当前 workspace 的计划任务
 - `GET /api/schedules/{task_id}`：管理员读取计划任务详情
 - `POST /api/schedules/{task_id}/pause|resume|cancel`：管理员控制后续触发
@@ -73,7 +82,8 @@ configuration, and deployment constraints are documented separately in
 - `GET|POST /api/mcp-servers`：管理员列出或保存 workspace 的远程 MCP Server
 - `POST /api/mcp-servers/{server_id}/probe`：测试连接并保存最新健康状态、延迟、工具数和稳定错误码
 - `DELETE /api/mcp-servers/{server_id}`：管理员删除远程 MCP Server 配置
-- `POST /mcp`：官方 MCP Streamable HTTP Server
+- `POST /mcp/`：官方 MCP Streamable HTTP Server；这是规范地址。兼容地址
+  `/mcp` 在 ASGI 边界内直接规范化，不返回会破坏默认 SDK POST 的 307
 - `GET /mcp-sse/sse`：官方 MCP SSE Server（兼容旧客户端）
 - `POST /mcp-legacy`：简单 JSON-RPC 调试接口
 
@@ -118,7 +128,11 @@ Policy proposal 只代表扩权请求。`PermissionDiff` 由服务端从规范�
 处理。首版 proposal 永远停留在 `proposed`，不会改变 runtime policy。
 
 `EnforcementReceipt` 只能由进程 composition root 注册的 issuer 通过内部 service seam 写入；普通
-HTTP、Chat 和 MCP 均没有创建入口。Receipt 绑定 workspace、Run/Step、policy revision/hash、
-execution envelope hash、tool/argument digest 与 issuer trust domain。`external_signature` 与
-attestation 在当前层是由已认证 adapter 提供的证据载体；是否具备密码学或硬件保证取决于具体
-adapter，核心不会仅凭字段存在把它升级成独立信任域。
+HTTP、Chat 和 MCP 均没有任意 workload 创建或 dispatch 入口。Tool Catalog 只有命中 host-owned
+`ExternalToolExecutionBinding` 才会将调用交给外部 adapter，且绝不失败后回退本地 provider。外部
+adapter 返回的 Ed25519 envelope 必须同时通过
+签名、host-owned key、issuer identity、nonce/request hash、workspace/Run/Step/Proposal、policy 与
+tool/argument digest、时间窗检查，才能写入 `signature_verified=true` 的 receipt。旧式内部
+`record_receipt()` 与仅携带 `external_signature` 的记录明确保持 unverified。签名证明指定 key 对
+指定 payload 的认证，不自动证明 attestation、runtime 实现或硬件测量本身可信；完整协议见
+[ENFORCEMENT.md](ENFORCEMENT.md)。

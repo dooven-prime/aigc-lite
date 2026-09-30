@@ -23,6 +23,36 @@ class EnforcementRepository(Protocol):
         limit: int = 50,
     ) -> list[dict]: ...
 
+    def create_enforcement_dispatch(
+        self, tenant_id: str, values: dict[str, Any]
+    ) -> dict: ...
+
+    def get_enforcement_dispatch(
+        self, tenant_id: str, dispatch_id: str
+    ) -> dict | None: ...
+
+    def list_enforcement_dispatches(
+        self,
+        tenant_id: str,
+        *,
+        adapter_id: str | None = None,
+        proposal_id: str | None = None,
+        state: str | None = None,
+        original_dispatch_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]: ...
+
+    def finish_enforcement_dispatch(
+        self,
+        tenant_id: str,
+        dispatch_id: str,
+        *,
+        state: str,
+        receipt_id: str | None = None,
+        workload_id: str | None = None,
+        last_error_code: str | None = None,
+    ) -> dict | None: ...
+
     def create_enforcement_receipt(
         self, tenant_id: str, values: dict[str, Any]
     ) -> dict: ...

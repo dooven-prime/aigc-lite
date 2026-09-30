@@ -510,7 +510,7 @@ class ResearchRegistryService:
                 raise InvalidEvidenceError(
                     "plan_id", "The verification plan is not bound to this ClaimRevision"
                 )
-        bases = []
+        verification_properties = []
         limitations = []
         if (
             draft.validation_modality is ValidationModality.KERNEL_CHECK
@@ -518,18 +518,27 @@ class ResearchRegistryService:
             and str(lineage.principal_id or "").startswith("system:verifier:")
             and lineage.model_route is None
         ):
-            bases.append("orthogonal_non_llm_checker")
+            verification_properties.append("orthogonal_non_llm_checker")
         if lineage.model_route:
             limitations.append("model-mediated verification is not independent by itself")
-        if not bases:
-            limitations.append("no orthogonal independence basis was derived")
+        if not verification_properties:
+            limitations.append("no orthogonal verification property was derived")
+        else:
+            limitations.append(
+                "orthogonal verification does not establish independent authority"
+            )
+        limitations.append(
+            "verifier organization and trust-domain identity are not yet established"
+        )
         independence_value = {
             "contract_version": "verification.independence-derived.v1",
             "derived": True,
-            "basis": bases,
+            "qualified": False,
+            "basis": [],
+            "verification_properties": verification_properties,
             "limitations": limitations,
         }
-        qualifies_as_independent = "orthogonal_non_llm_checker" in bases
+        qualifies_as_independent = False
         try:
             receipt = self._evidence.create_receipt(
                 context,
@@ -609,7 +618,14 @@ class ResearchRegistryService:
         target_stage: ClaimPromotionStage,
         *,
         required_attempt_id: str | None = None,
+        apply_transition: bool = False,
     ) -> dict:
+        """Evaluate a workflow gate, applying it only with explicit authority.
+
+        The safe service default is proposal-only. Agent/plan execution may
+        request an evaluation, but only an explicit control-plane caller may
+        set ``apply_transition=True``.
+        """
         repository = self._repository_provider()
         claim = repository.get_research_claim(context.workspace_id, claim_id)
         if claim is None:
@@ -655,6 +671,9 @@ class ResearchRegistryService:
         decision = PromotionGateDecision.BLOCKED if blockers else PromotionGateDecision.PASSED
         input_snapshot = {
             "policy_version": PROMOTION_POLICY_VERSION,
+            "evaluation_mode": (
+                "apply_if_passed" if apply_transition else "proposal_only"
+            ),
             "claim": {
                 key: claim.get(key)
                 for key in (
@@ -729,14 +748,24 @@ class ResearchRegistryService:
                     "relation_ids": [item["id"] for item in relevant_relations],
                     "created_by": context.principal_id,
                 },
-                promote=decision is PromotionGateDecision.PASSED,
+                promote=(
+                    apply_transition
+                    and decision is PromotionGateDecision.PASSED
+                ),
             )
         except KeyError as exc:
             raise InvalidEvidenceError(
                 "promotion_stage",
                 "The claim changed while the promotion gate was being evaluated",
             ) from exc
-        return {"evaluation": evaluation, "claim": self.get_claim(context, claim_id)}
+        transition_applied = bool(
+            apply_transition and decision is PromotionGateDecision.PASSED
+        )
+        return {
+            "evaluation": evaluation,
+            "claim": self.get_claim(context, claim_id),
+            "transition_applied": transition_applied,
+        }
 
     @staticmethod
     def _would_cycle(relations: list[dict], source_id: str, target_id: str) -> bool:

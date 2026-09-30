@@ -179,6 +179,7 @@ class GatewayService:
                     tool_session = await self._tool_catalog.open(
                         capability.context,
                         access_policy=capability,
+                        run_id=run["id"],
                     )
                     content = await self._agent_runner(
                         command.prompt,

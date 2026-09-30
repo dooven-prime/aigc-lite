@@ -1,5 +1,6 @@
 import io
 import json
+import sqlite3
 import zipfile
 
 import pytest
@@ -10,6 +11,7 @@ from app.core.errors import InvalidEvidenceError
 from app.core.kernel_verification import KERNEL_EXECUTION_CONTRACT_VERSION
 from app.core.qualification import (
     AuthorizationGrantDraft,
+    KnowledgeAdmissionDraft,
     MathTheoremCandidateDraft,
     QualificationVerdict,
     ValidationModality,
@@ -211,14 +213,68 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
     assert receipt["claim_revision_id"] == claim["id"]
     assert receipt["claim_semantic_hash"] == claim["semantic_hash"]
     assert len(receipt["receipt_hash"]) == 64
-    assert receipt["independence_summary"]["basis"] == [
+    assert receipt["independence_summary"]["basis"] == []
+    assert receipt["independence_summary"]["qualified"] is False
+    assert receipt["independence_summary"]["verification_properties"] == [
         "orthogonal_non_llm_checker"
     ]
+    assert receipt["evidence_vector"]["orthogonal_verification"] == "satisfied"
+    assert receipt["evidence_vector"]["independent_validation"] == "undetermined"
     assert {
         item["same_agent"]
         for item in receipt["independence_summary"]["relationships"]
     } == {False, True}
-    assert admitted["current_use_binding"]["state"] == "current"
+    assert admitted["current_use_binding"] is None
+    assert admitted["knowledge_admission_required"] is True
+    assert qualification.qualified_search(context, "even integers", PROFILE_ID) == []
+
+    admission = qualification.admit_knowledge(
+        context,
+        KnowledgeAdmissionDraft(
+            qualification_receipt_id=receipt["id"],
+            admission_policy_id="knowledge.default.v1",
+            rationale="Admit the reviewed theorem to the workspace knowledge view.",
+        ),
+    )
+    assert (
+        admission["knowledge_admission_receipt"]["contract_version"]
+        == "knowledge.admission.v1"
+    )
+    assert admission["knowledge_admission_receipt"]["approved_by"] == "reviewer-a"
+    assert admission["current_use_binding"]["state"] == "current"
+    assert (
+        admission["current_use_binding"]["knowledge_admission_receipt_id"]
+        == admission["knowledge_admission_receipt"]["id"]
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="requires admission receipt"):
+        repository.upsert_current_use_binding(
+            context.workspace_id,
+            {
+                "claim_revision_id": claim["id"],
+                "profile_id": PROFILE_ID,
+                "use_scope": "knowledge",
+                "qualification_receipt_id": receipt["id"],
+                "state": "current",
+                "bound_by": "bypass-attempt",
+            },
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="matching qualification"):
+        repository.admit_knowledge(
+            context.workspace_id,
+            {
+                **admission["knowledge_admission_receipt"],
+                "id": "forged-admission",
+                "qualification_receipt_hash": "0" * 64,
+                "receipt_hash": "1" * 64,
+            },
+        )
+    with repository._connect() as connection, pytest.raises(
+        sqlite3.IntegrityError, match="immutable"
+    ):
+        connection.execute(
+            "UPDATE knowledge_admission_receipts SET rationale = ? WHERE id = ?",
+            ("silently changed", admission["knowledge_admission_receipt"]["id"]),
+        )
 
     qualified = qualification.qualified_search(context, "even integers", PROFILE_ID)
     assert [item["id"] for item in qualified] == [claim["id"]]
@@ -248,6 +304,8 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
     assert offline["valid"] is True
     assert offline["assurance"]["epistemic_state"]["status"] == "supported"
     assert offline["assurance"]["authority_state"]["status"] == "authorized"
+    assert offline["assurance"]["orthogonal_verification"]["status"] == "satisfied"
+    assert offline["assurance"]["independence"]["status"] == "not_qualified"
 
     consumed = repository.consume_authorization_grant(
         context.workspace_id,
@@ -273,6 +331,21 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
     superseding = qualification.evaluate(context, claim["id"], PROFILE_ID)
     current_receipt = superseding["qualification_receipt"]
     assert current_receipt["id"] != receipt["id"]
+    assert superseding["current_use_binding"] is None
+    assert repository.get_current_use_binding(
+        context.workspace_id, claim["id"], PROFILE_ID
+    )["qualification_receipt_id"] == receipt["id"]
+    second_admission = qualification.admit_knowledge(
+        context,
+        KnowledgeAdmissionDraft(
+            qualification_receipt_id=current_receipt["id"],
+            admission_policy_id="knowledge.default.v1",
+            rationale="Select the newer qualification receipt for current use.",
+        ),
+    )
+    assert second_admission["current_use_binding"]["qualification_receipt_id"] == (
+        current_receipt["id"]
+    )
     with pytest.raises(InvalidEvidenceError, match="current binding"):
         qualification.create_authorization(
             context,
@@ -412,6 +485,15 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
     )
     assert stale_binding["state"] == "stale"
     assert "claim_semantic_hash_changed" in stale_binding["stale_reason"]
+    with pytest.raises(InvalidEvidenceError, match="stale qualification evidence"):
+        qualification.admit_knowledge(
+            context,
+            KnowledgeAdmissionDraft(
+                qualification_receipt_id=current_receipt["id"],
+                admission_policy_id="knowledge.default.v1",
+                rationale="This stale receipt must not be re-admitted.",
+            ),
+        )
     assert qualification.qualified_search(context, "even integers", PROFILE_ID) == []
     assert qualification.get_receipt(context, receipt["id"])["receipt_hash"] == receipt[
         "receipt_hash"
@@ -420,6 +502,10 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
         receipt["id"],
         current_receipt["id"],
     }
+    assert {
+        item["qualification_receipt_id"]
+        for item in qualification_document["knowledge_admissions"]
+    } == {receipt["id"], current_receipt["id"]}
     stale_path = tmp_path / "stale-assurance.zip"
     stale_path.write_bytes(stale_archive)
     stale_offline = AssuranceBundleVerifier().verify(stale_path)

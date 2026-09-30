@@ -21,6 +21,9 @@ from ..core.qualification import (
     EvidenceAxisState,
     EvidenceClosure,
     EvidenceEdgeType,
+    KnowledgeAdmissionDraft,
+    KnowledgeAdmissionPolicy,
+    KnowledgeAdmissionReceipt,
     MathTheoremCandidateDraft,
     QualificationDecision,
     QualificationProfile,
@@ -45,6 +48,20 @@ RepositoryProvider = Callable[[], Repository]
 _KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 AUTHORIZATION_POLICY_VERSION = "authorization.policy.v1"
+DEFAULT_KNOWLEDGE_ADMISSION_POLICY = KnowledgeAdmissionPolicy(
+    policy_id="knowledge.default.v1",
+    version=1,
+    description=(
+        "Explicitly select one still-current QualificationReceipt for the default "
+        "qualified knowledge retrieval view."
+    ),
+    requirements=(
+        "qualification_receipt_admitted",
+        "claim_semantic_identity_current",
+        "dependency_closure_current",
+        "workspace_admin_approval",
+    ),
+)
 
 
 class DomainVerifier(Protocol):
@@ -265,7 +282,7 @@ class MathTheoremVerifier:
             local_correctness=kernel_ok and axioms_ok,
             semantic_alignment=bool(alignment_attempts),
             replayability=bool(certificate and certificate.get("checker")),
-            independent_validation=kernel_ok,
+            orthogonal_verification=kernel_ok,
             disconfirmation=bool(alignment_attempts),
         )
         return QualificationDecision(
@@ -370,6 +387,7 @@ class MathTheoremVerifier:
                 "local_correctness",
                 "semantic_alignment",
                 "replayability",
+                "orthogonal_verification",
                 "independent_validation",
                 "external_reality",
                 "disconfirmation",
@@ -423,6 +441,10 @@ class QualificationService:
 
     def list_profiles(self) -> list[dict[str, Any]]:
         return self._registry.list_profiles()
+
+    @staticmethod
+    def list_knowledge_admission_policies() -> list[dict[str, Any]]:
+        return [DEFAULT_KNOWLEDGE_ADMISSION_POLICY.as_dict()]
 
     def register_math_theorem(
         self, context: RequestContext, draft: MathTheoremCandidateDraft
@@ -593,7 +615,6 @@ class QualificationService:
             context.workspace_id, evaluation["id"], list(closure.edges)
         )
         receipt = None
-        binding = None
         if decision.verdict is QualificationVerdict.ADMITTED:
             receipt_id = str(uuid4())
             issued_at = datetime.now(UTC).isoformat()
@@ -636,23 +657,13 @@ class QualificationService:
                     "issued_at": issued_at,
                 },
             )
-            binding = repository.upsert_current_use_binding(
-                context.workspace_id,
-                {
-                    "claim_revision_id": claim_id,
-                    "profile_id": profile.profile_id,
-                    "use_scope": "knowledge",
-                    "qualification_receipt_id": receipt["id"],
-                    "state": CurrentUseState.CURRENT.value,
-                    "bound_by": context.principal_id,
-                },
-            )
         return {
             "evaluation": evaluation,
             "qualification_receipt": (
                 self._portable_receipt(receipt) if receipt is not None else None
             ),
-            "current_use_binding": binding,
+            "current_use_binding": None,
+            "knowledge_admission_required": receipt is not None,
         }
 
     def get_receipt(self, context: RequestContext, receipt_id: str) -> dict:
@@ -662,6 +673,87 @@ class QualificationService:
         if value is None:
             raise ResourceNotFoundError("qualification_receipt", receipt_id)
         return self._portable_receipt(value)
+
+    def admit_knowledge(
+        self,
+        context: RequestContext,
+        draft: KnowledgeAdmissionDraft,
+    ) -> dict[str, Any]:
+        """Explicitly select a qualified historical receipt for knowledge use."""
+
+        if not context.principal_id:
+            raise InvalidEvidenceError(
+                "approver", "Knowledge admission requires an authenticated approver"
+            )
+        if draft.admission_policy_id != DEFAULT_KNOWLEDGE_ADMISSION_POLICY.policy_id:
+            raise ResourceNotFoundError(
+                "knowledge_admission_policy", draft.admission_policy_id
+            )
+        rationale = self._text("rationale", draft.rationale, 4_000)
+        repository = self._repository_provider()
+        receipt = repository.get_qualification_receipt(
+            context.workspace_id, draft.qualification_receipt_id
+        )
+        if receipt is None:
+            raise ResourceNotFoundError(
+                "qualification_receipt", draft.qualification_receipt_id
+            )
+        if receipt.get("verdict") != QualificationVerdict.ADMITTED.value:
+            raise InvalidEvidenceError(
+                "qualification_receipt_id", "Knowledge admission requires ADMITTED"
+            )
+        stale_reasons = self._receipt_stale_reasons(context, receipt)
+        if stale_reasons:
+            raise InvalidEvidenceError(
+                "qualification_receipt_id",
+                "Knowledge admission cannot use stale qualification evidence: "
+                + ";".join(stale_reasons),
+            )
+        admission_id = str(uuid4())
+        issued_at = datetime.now(UTC).isoformat()
+        admission_receipt = KnowledgeAdmissionReceipt(
+            receipt_id=admission_id,
+            qualification_receipt_id=receipt["id"],
+            qualification_receipt_hash=receipt["receipt_hash"],
+            claim_revision_id=receipt["claim_revision_id"],
+            claim_semantic_hash=receipt["claim_semantic_hash"],
+            profile_id=receipt["profile_id"],
+            profile_version=receipt["profile_version"],
+            use_scope=DEFAULT_KNOWLEDGE_ADMISSION_POLICY.use_scope,
+            admission_policy_id=DEFAULT_KNOWLEDGE_ADMISSION_POLICY.policy_id,
+            admission_policy_version=DEFAULT_KNOWLEDGE_ADMISSION_POLICY.version,
+            admission_policy_hash=DEFAULT_KNOWLEDGE_ADMISSION_POLICY.content_hash,
+            approved_by=context.principal_id,
+            rationale=rationale,
+            issued_at=issued_at,
+        )
+        portable = admission_receipt.as_dict()
+        result = repository.admit_knowledge(
+            context.workspace_id,
+            {
+                "id": admission_id,
+                **{key: value for key, value in portable.items() if key != "knowledge_admission_receipt_id"},
+                "receipt_hash": admission_receipt.content_hash,
+            },
+        )
+        return {
+            **result,
+            "knowledge_admission_receipt": self._portable_admission_receipt(
+                result["knowledge_admission_receipt"]
+            ),
+        }
+
+    def list_knowledge_admissions(
+        self,
+        context: RequestContext,
+        claim_id: str | None = None,
+    ) -> list[dict]:
+        return [
+            self._portable_admission_receipt(item)
+            for item in self._repository_provider().list_knowledge_admission_receipts(
+                context.workspace_id, claim_id
+            )
+        ]
 
     def refresh_receipt_binding(
         self,
@@ -1003,49 +1095,18 @@ class QualificationService:
                     "bound_by": "system:taint-propagation",
                 },
             )
-        path = path | {binding_key}
         receipt = repository.get_qualification_receipt(
             context.workspace_id, binding["qualification_receipt_id"]
         )
-        claim = repository.get_research_claim(context.workspace_id, binding["claim_revision_id"])
-        stale_reasons = []
-        if receipt is None or claim is None:
-            stale_reasons.append("qualification_subject_missing")
-        elif receipt["claim_semantic_hash"] != claim_semantic_hash(claim):
-            stale_reasons.append("claim_semantic_hash_changed")
-        if receipt is not None:
-            evaluations = repository.list_qualification_evaluations(
-                context.workspace_id,
-                receipt["claim_revision_id"],
-                receipt["profile_id"],
+        stale_reasons = (
+            ["qualification_subject_missing"]
+            if receipt is None
+            else self._receipt_stale_reasons(
+                context,
+                receipt,
+                _path=path | {binding_key},
             )
-            evaluation = next(
-                (item for item in evaluations if item["id"] == receipt["evaluation_id"]),
-                None,
-            )
-            closure = evaluation.get("evidence_closure", {}) if evaluation else {}
-            for node in closure.get("nodes", []):
-                if node.get("node_type") != "dependency_binding":
-                    continue
-                frozen = node.get("payload") or {}
-                current = repository.get_current_use_binding(
-                    context.workspace_id,
-                    node.get("node_id"),
-                    receipt["profile_id"],
-                )
-                if current is not None:
-                    current = self._refresh_binding(
-                        context,
-                        current,
-                        _path=path,
-                    )
-                if (
-                    current is None
-                    or current.get("state") != CurrentUseState.CURRENT.value
-                    or current.get("qualification_receipt_id")
-                    != frozen.get("qualification_receipt_id")
-                ):
-                    stale_reasons.append(f"dependency_binding_changed:{node.get('node_id')}")
+        )
         if not stale_reasons:
             return binding
         return repository.upsert_current_use_binding(
@@ -1057,6 +1118,60 @@ class QualificationService:
                 "bound_by": "system:taint-propagation",
             },
         )
+
+    def _receipt_stale_reasons(
+        self,
+        context: RequestContext,
+        receipt: dict,
+        *,
+        _path: frozenset[tuple[str, str]] | None = None,
+    ) -> list[str]:
+        """Evaluate historical receipt currentness without creating a binding."""
+
+        repository = self._repository_provider()
+        claim = repository.get_research_claim(
+            context.workspace_id, receipt["claim_revision_id"]
+        )
+        stale_reasons: list[str] = []
+        if claim is None:
+            stale_reasons.append("qualification_subject_missing")
+        elif receipt["claim_semantic_hash"] != claim_semantic_hash(claim):
+            stale_reasons.append("claim_semantic_hash_changed")
+        evaluations = repository.list_qualification_evaluations(
+            context.workspace_id,
+            receipt["claim_revision_id"],
+            receipt["profile_id"],
+        )
+        evaluation = next(
+            (item for item in evaluations if item["id"] == receipt["evaluation_id"]),
+            None,
+        )
+        if evaluation is None:
+            stale_reasons.append("qualification_evaluation_missing")
+            return sorted(set(stale_reasons))
+        path = _path or frozenset()
+        closure = evaluation.get("evidence_closure", {})
+        for node in closure.get("nodes", []):
+            if node.get("node_type") != "dependency_binding":
+                continue
+            frozen = node.get("payload") or {}
+            current = repository.get_current_use_binding(
+                context.workspace_id,
+                node.get("node_id"),
+                receipt["profile_id"],
+            )
+            if current is not None:
+                current = self._refresh_binding(context, current, _path=path)
+            if (
+                current is None
+                or current.get("state") != CurrentUseState.CURRENT.value
+                or current.get("qualification_receipt_id")
+                != frozen.get("qualification_receipt_id")
+            ):
+                stale_reasons.append(
+                    f"dependency_binding_changed:{node.get('node_id')}"
+                )
+        return sorted(set(stale_reasons))
 
     @staticmethod
     def _edge(
@@ -1158,7 +1273,8 @@ class QualificationService:
             item for item in closure.nodes if item["node_type"] == "claim_revision"
         )
         origin = claim_node["payload"].get("origin_lineage") or {}
-        bases = set()
+        independence_bases = set()
+        verification_properties = set()
         limitations = []
         relationships = []
         for attempt_node in attempts:
@@ -1196,23 +1312,32 @@ class QualificationService:
                 )
                 and not lineage.get("model_route")
             ):
-                bases.add("orthogonal_non_llm_checker")
+                verification_properties.add("orthogonal_non_llm_checker")
                 relationship["orthogonal_non_llm_checker"] = True
             if modality in {
                 ValidationModality.WET_LAB.value,
                 ValidationModality.PHYSICAL_EXPERIMENT.value,
                 ValidationModality.FIELD_OBSERVATION.value,
             }:
-                bases.add("physical_world")
+                verification_properties.add("physical_world")
                 relationship["physical_world"] = True
             if lineage.get("model_route"):
                 limitations.append("model-mediated verification is not independent by itself")
             relationships.append(relationship)
         if not attempts:
             limitations.append("no verifier lineage is present")
+        if "orthogonal_non_llm_checker" in verification_properties:
+            limitations.append(
+                "orthogonal verification does not establish independent authority"
+            )
+        limitations.append(
+            "verifier organization and trust-domain identity are not yet established"
+        )
         return {
             "derived": True,
-            "basis": sorted(bases),
+            "qualified": False,
+            "basis": sorted(independence_bases),
+            "verification_properties": sorted(verification_properties),
             "verifier_count": len(attempts),
             "relationships": relationships,
             "limitations": sorted(set(limitations)),
@@ -1232,6 +1357,13 @@ class QualificationService:
             **value,
             "qualification_receipt_id": value["id"],
             "profile": value["profile_id"],
+        }
+
+    @staticmethod
+    def _portable_admission_receipt(value: dict) -> dict:
+        return {
+            **value,
+            "knowledge_admission_receipt_id": value["id"],
         }
 
     @staticmethod

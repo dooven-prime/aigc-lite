@@ -5,13 +5,22 @@ from uuid import uuid4
 import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.core.contracts import RequestContext
+from app.core.enforcement import (
+    ENFORCEMENT_DISPATCH_CONTRACT_VERSION,
+    EnforcementTargetType,
+    ExecutionPolicySnapshot,
+    PermissionDomain,
+    PolicyPermission,
+)
 from app.repository import PostgresRepository
 from app.services.conversation_import_registry import ConversationImportRegistry
 from app.services.conversation_imports import ConversationImportService
 from app.services.credentials import CredentialService
+from app.services.enforcement import EnforcementService
 from app.services.reviews import ReviewService
 
 POSTGRES_URL = os.getenv("AIGC_LITE_TEST_POSTGRES_URL", "")
@@ -24,7 +33,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
     repository = PostgresRepository(POSTGRES_URL)
     repository.init()
-    assert repository.schema_revision() == "0017_execution_authority"
+    assert repository.schema_revision() == "0020_knowledge_admission"
     workspace_id = f"contract-{uuid4()}"
     repository.create_tenant("PostgreSQL contract", workspace_id)
     context = RequestContext(request_id="postgres-contract", workspace_id=workspace_id)
@@ -114,6 +123,60 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     )
     repository.finish_run(workspace_id, run["id"], "succeeded")
     assert repository.get_run(workspace_id, run["id"])["status"] == "succeeded"
+    proposal = EnforcementService(lambda: repository).propose_policy(
+        context,
+        target_type=EnforcementTargetType.TOOL_EXECUTION_BACKEND,
+        target_id="postgres-enforcer",
+        candidate_policy=ExecutionPolicySnapshot(
+            policy_id="postgres.policy",
+            revision=1,
+            permissions=(
+                PolicyPermission(
+                    domain=PermissionDomain.NETWORK,
+                    resource="api.example.test:443",
+                    actions=("connect",),
+                ),
+            ),
+        ),
+    )
+    dispatch_values = {
+        "id": str(uuid4()),
+        "contract_version": ENFORCEMENT_DISPATCH_CONTRACT_VERSION,
+        "binding_id": "postgres-binding",
+        "adapter_id": "postgres-adapter",
+        "issuer_id": "postgres-issuer",
+        "target_type": "tool_execution_backend",
+        "target_id": "postgres-enforcer",
+        "run_id": run["id"],
+        "step_id": None,
+        "proposal_id": proposal["id"],
+        "original_dispatch_id": None,
+        "request_hash": "1" * 64,
+        "execution_envelope_hash": "2" * 64,
+        "tool_spec_hash": "3" * 64,
+        "arguments_digest": "4" * 64,
+        "requested_at": "2026-09-30T00:00:00+00:00",
+        "expires_at": "2026-09-30T00:00:30+00:00",
+        "state": "dispatching",
+    }
+    dispatch = repository.create_enforcement_dispatch(
+        workspace_id, dispatch_values
+    )
+    assert dispatch["state"] == "dispatching"
+    with pytest.raises(IntegrityError):
+        repository.create_enforcement_dispatch(
+            workspace_id, {**dispatch_values, "id": str(uuid4())}
+        )
+    repository.finish_enforcement_dispatch(
+        workspace_id, dispatch["id"], state="terminal"
+    )
+    replacement = repository.create_enforcement_dispatch(
+        workspace_id, {**dispatch_values, "id": str(uuid4())}
+    )
+    assert replacement["state"] == "dispatching"
+    repository.finish_enforcement_dispatch(
+        workspace_id, replacement["id"], state="terminal"
+    )
     review = ReviewService(lambda: repository).review_execution_run(
         context, run["id"], "execution.integrity.v1"
     )
@@ -149,24 +212,28 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
                 "issued_at": now,
             },
         )
-        connection.execute(
-            text(
-                "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, "
-                "profile_id, use_scope, qualification_receipt_id, state, stale_reason, "
-                "bound_by, created_at, updated_at) VALUES (:id, :tenant_id, :claim_id, "
-                ":profile_id, 'knowledge', :receipt_id, 'current', NULL, 'contract-test', "
-                ":created_at, :updated_at)"
-            ),
-            {
-                "id": str(uuid4()),
-                "tenant_id": workspace_id,
-                "claim_id": claim_id,
-                "profile_id": "contract.profile.v1",
-                "receipt_id": receipt_id,
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
+    admission = repository.admit_knowledge(
+        workspace_id,
+        {
+            "id": str(uuid4()),
+            "contract_version": "knowledge.admission.v1",
+            "qualification_receipt_id": receipt_id,
+            "qualification_receipt_hash": "d" * 64,
+            "claim_revision_id": claim_id,
+            "claim_semantic_hash": "a" * 64,
+            "profile_id": "contract.profile.v1",
+            "profile_version": 1,
+            "use_scope": "knowledge",
+            "admission_policy_id": "knowledge.default.v1",
+            "admission_policy_version": 1,
+            "admission_policy_hash": "f" * 64,
+            "approved_by": "contract-test",
+            "rationale": "PostgreSQL atomic admission contract.",
+            "receipt_hash": "0" * 64,
+            "issued_at": now,
+        },
+    )
+    assert admission["current_use_binding"]["qualification_receipt_id"] == receipt_id
     grant = repository.create_authorization_grant(
         workspace_id,
         {
@@ -202,4 +269,48 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     )
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-    assert revision == "0017_execution_authority"
+        enforcement_columns = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = 'enforcement_receipts'"
+                )
+            )
+        }
+        dispatch_columns = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = 'enforcement_dispatches'"
+                )
+            )
+        }
+    assert revision == "0020_knowledge_admission"
+    assert {
+        "signature_verified",
+        "enforcement_request_id",
+        "enforcement_request_hash",
+        "signature_algorithm",
+        "signing_key_id",
+        "signed_payload_hash",
+        "signature_verified_at",
+        "signature_verifier_id",
+        "signed_payload",
+        "signature_verification",
+    } <= enforcement_columns
+    assert {
+        "binding_id",
+        "adapter_id",
+        "original_dispatch_id",
+        "request_hash",
+        "requested_at",
+        "expires_at",
+        "state",
+        "receipt_id",
+        "workload_id",
+        "last_error_code",
+    } <= dispatch_columns

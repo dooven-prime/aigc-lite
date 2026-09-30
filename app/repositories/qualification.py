@@ -46,6 +46,15 @@ def _decode_authorization_grant(row: Any) -> dict[str, Any]:
     return value
 
 
+def _decode_knowledge_admission_receipt(row: Any) -> dict[str, Any]:
+    value = dict(row)
+    value["profile_version"] = int(value.get("profile_version") or 1)
+    value["admission_policy_version"] = int(
+        value.get("admission_policy_version") or 1
+    )
+    return value
+
+
 class SQLiteQualificationRepositoryMixin:
     """SQLite implementation of the qualification repository port."""
 
@@ -204,6 +213,9 @@ class SQLiteQualificationRepositoryMixin:
             "profile_id": values["profile_id"],
             "use_scope": values.get("use_scope") or "knowledge",
             "qualification_receipt_id": values["qualification_receipt_id"],
+            "knowledge_admission_receipt_id": values.get(
+                "knowledge_admission_receipt_id"
+            ),
             "state": values.get("state") or "current",
             "stale_reason": values.get("stale_reason"),
             "bound_by": values.get("bound_by"),
@@ -213,10 +225,12 @@ class SQLiteQualificationRepositoryMixin:
         with self._connect() as db:
             db.execute(
                 "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, "
-                "profile_id, use_scope, qualification_receipt_id, state, stale_reason, "
-                "bound_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "profile_id, use_scope, qualification_receipt_id, "
+                "knowledge_admission_receipt_id, state, stale_reason, bound_by, created_at, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(tenant_id, claim_revision_id, profile_id, use_scope) DO UPDATE "
                 "SET qualification_receipt_id = excluded.qualification_receipt_id, "
+                "knowledge_admission_receipt_id = excluded.knowledge_admission_receipt_id, "
                 "state = excluded.state, stale_reason = excluded.stale_reason, "
                 "bound_by = excluded.bound_by, updated_at = excluded.updated_at",
                 tuple(value.values()),
@@ -227,6 +241,96 @@ class SQLiteQualificationRepositoryMixin:
                 (tenant_id, value["claim_revision_id"], value["profile_id"], value["use_scope"]),
             ).fetchone()
         return dict(row)
+
+    def admit_knowledge(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        """Atomically append an admission receipt and select its qualification."""
+
+        now = utc_now()
+        admission = {
+            "id": values["id"],
+            "tenant_id": tenant_id,
+            "contract_version": values["contract_version"],
+            "qualification_receipt_id": values["qualification_receipt_id"],
+            "qualification_receipt_hash": values["qualification_receipt_hash"],
+            "claim_revision_id": values["claim_revision_id"],
+            "claim_semantic_hash": values["claim_semantic_hash"],
+            "profile_id": values["profile_id"],
+            "profile_version": int(values["profile_version"]),
+            "use_scope": values["use_scope"],
+            "admission_policy_id": values["admission_policy_id"],
+            "admission_policy_version": int(values["admission_policy_version"]),
+            "admission_policy_hash": values["admission_policy_hash"],
+            "approved_by": values["approved_by"],
+            "rationale": values["rationale"],
+            "receipt_hash": values["receipt_hash"],
+            "issued_at": values["issued_at"],
+        }
+        binding = {
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "claim_revision_id": admission["claim_revision_id"],
+            "profile_id": admission["profile_id"],
+            "use_scope": admission["use_scope"],
+            "qualification_receipt_id": admission["qualification_receipt_id"],
+            "knowledge_admission_receipt_id": admission["id"],
+            "state": "current",
+            "stale_reason": None,
+            "bound_by": admission["approved_by"],
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO knowledge_admission_receipts(id, tenant_id, "
+                "contract_version, qualification_receipt_id, qualification_receipt_hash, claim_revision_id, "
+                "claim_semantic_hash, profile_id, profile_version, use_scope, "
+                "admission_policy_id, admission_policy_version, admission_policy_hash, "
+                "approved_by, rationale, receipt_hash, issued_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(admission.values()),
+            )
+            db.execute(
+                "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, "
+                "profile_id, use_scope, qualification_receipt_id, "
+                "knowledge_admission_receipt_id, state, stale_reason, bound_by, created_at, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(tenant_id, claim_revision_id, profile_id, use_scope) DO UPDATE "
+                "SET qualification_receipt_id = excluded.qualification_receipt_id, "
+                "knowledge_admission_receipt_id = excluded.knowledge_admission_receipt_id, "
+                "state = excluded.state, stale_reason = excluded.stale_reason, "
+                "bound_by = excluded.bound_by, updated_at = excluded.updated_at",
+                tuple(binding.values()),
+            )
+            selected = db.execute(
+                "SELECT * FROM current_use_bindings WHERE tenant_id = ? "
+                "AND claim_revision_id = ? AND profile_id = ? AND use_scope = ?",
+                (
+                    tenant_id,
+                    binding["claim_revision_id"],
+                    binding["profile_id"],
+                    binding["use_scope"],
+                ),
+            ).fetchone()
+        return {
+            "knowledge_admission_receipt": _decode_knowledge_admission_receipt(
+                admission
+            ),
+            "current_use_binding": dict(selected),
+        }
+
+    def list_knowledge_admission_receipts(
+        self, tenant_id: str, claim_id: str | None = None
+    ) -> list[dict]:
+        sql = "SELECT * FROM knowledge_admission_receipts WHERE tenant_id = ?"
+        parameters: list[Any] = [tenant_id]
+        if claim_id is not None:
+            sql += " AND claim_revision_id = ?"
+            parameters.append(claim_id)
+        sql += " ORDER BY issued_at, id"
+        with self._connect() as db:
+            rows = db.execute(sql, parameters).fetchall()
+        return [_decode_knowledge_admission_receipt(row) for row in rows]
 
     def get_current_use_binding(
         self,
@@ -244,13 +348,18 @@ class SQLiteQualificationRepositoryMixin:
         return dict(row) if row is not None else None
 
     def list_current_use_bindings(
-        self, tenant_id: str, profile_id: str, state: str = "current"
+        self,
+        tenant_id: str,
+        profile_id: str,
+        state: str = "current",
+        use_scope: str = "knowledge",
     ) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM current_use_bindings WHERE tenant_id = ? "
-                "AND profile_id = ? AND state = ? ORDER BY updated_at DESC",
-                (tenant_id, profile_id, state),
+                "AND profile_id = ? AND state = ? AND use_scope = ? "
+                "ORDER BY updated_at DESC",
+                (tenant_id, profile_id, state, use_scope),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -519,6 +628,9 @@ class PostgresQualificationRepositoryMixin:
             "profile_id": values["profile_id"],
             "use_scope": values.get("use_scope") or "knowledge",
             "qualification_receipt_id": values["qualification_receipt_id"],
+            "knowledge_admission_receipt_id": values.get(
+                "knowledge_admission_receipt_id"
+            ),
             "state": values.get("state") or "current",
             "stale_reason": values.get("stale_reason"),
             "bound_by": values.get("bound_by"),
@@ -527,12 +639,14 @@ class PostgresQualificationRepositoryMixin:
         }
         self._execute(
             "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, profile_id, "
-            "use_scope, qualification_receipt_id, state, stale_reason, bound_by, created_at, "
-            "updated_at) VALUES (:id, :tenant_id, :claim_revision_id, :profile_id, "
-            ":use_scope, :qualification_receipt_id, :state, :stale_reason, :bound_by, "
+            "use_scope, qualification_receipt_id, knowledge_admission_receipt_id, state, "
+            "stale_reason, bound_by, created_at, updated_at) VALUES (:id, :tenant_id, "
+            ":claim_revision_id, :profile_id, :use_scope, :qualification_receipt_id, "
+            ":knowledge_admission_receipt_id, :state, :stale_reason, :bound_by, "
             ":created_at, :updated_at) ON CONFLICT(tenant_id, claim_revision_id, "
             "profile_id, use_scope) DO UPDATE SET qualification_receipt_id = "
-            "excluded.qualification_receipt_id, state = excluded.state, stale_reason = "
+            "excluded.qualification_receipt_id, knowledge_admission_receipt_id = "
+            "excluded.knowledge_admission_receipt_id, state = excluded.state, stale_reason = "
             "excluded.stale_reason, bound_by = excluded.bound_by, updated_at = excluded.updated_at",
             value,
         )
@@ -542,6 +656,109 @@ class PostgresQualificationRepositoryMixin:
             )
             or value
         )
+
+    def admit_knowledge(self, tenant_id: str, values: dict[str, Any]) -> dict:
+        """Atomically append an admission receipt and select its qualification."""
+
+        from sqlalchemy import text
+
+        now = utc_now()
+        admission = {
+            "id": values["id"],
+            "tenant_id": tenant_id,
+            "contract_version": values["contract_version"],
+            "qualification_receipt_id": values["qualification_receipt_id"],
+            "qualification_receipt_hash": values["qualification_receipt_hash"],
+            "claim_revision_id": values["claim_revision_id"],
+            "claim_semantic_hash": values["claim_semantic_hash"],
+            "profile_id": values["profile_id"],
+            "profile_version": int(values["profile_version"]),
+            "use_scope": values["use_scope"],
+            "admission_policy_id": values["admission_policy_id"],
+            "admission_policy_version": int(values["admission_policy_version"]),
+            "admission_policy_hash": values["admission_policy_hash"],
+            "approved_by": values["approved_by"],
+            "rationale": values["rationale"],
+            "receipt_hash": values["receipt_hash"],
+            "issued_at": values["issued_at"],
+        }
+        binding = {
+            "id": str(uuid.uuid4()),
+            "tenant_id": tenant_id,
+            "claim_revision_id": admission["claim_revision_id"],
+            "profile_id": admission["profile_id"],
+            "use_scope": admission["use_scope"],
+            "qualification_receipt_id": admission["qualification_receipt_id"],
+            "knowledge_admission_receipt_id": admission["id"],
+            "state": "current",
+            "stale_reason": None,
+            "bound_by": admission["approved_by"],
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO knowledge_admission_receipts(id, tenant_id, "
+                    "contract_version, qualification_receipt_id, qualification_receipt_hash, "
+                    "claim_revision_id, claim_semantic_hash, profile_id, profile_version, "
+                    "use_scope, admission_policy_id, admission_policy_version, "
+                    "admission_policy_hash, approved_by, rationale, receipt_hash, issued_at) "
+                    "VALUES (:id, :tenant_id, :contract_version, :qualification_receipt_id, "
+                    ":qualification_receipt_hash, :claim_revision_id, :claim_semantic_hash, "
+                    ":profile_id, :profile_version, :use_scope, :admission_policy_id, "
+                    ":admission_policy_version, :admission_policy_hash, :approved_by, "
+                    ":rationale, :receipt_hash, :issued_at)"
+                ),
+                admission,
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, "
+                    "profile_id, use_scope, qualification_receipt_id, "
+                    "knowledge_admission_receipt_id, state, stale_reason, bound_by, "
+                    "created_at, updated_at) VALUES (:id, :tenant_id, :claim_revision_id, "
+                    ":profile_id, :use_scope, :qualification_receipt_id, "
+                    ":knowledge_admission_receipt_id, :state, :stale_reason, :bound_by, "
+                    ":created_at, :updated_at) ON CONFLICT(tenant_id, claim_revision_id, "
+                    "profile_id, use_scope) DO UPDATE SET qualification_receipt_id = "
+                    "excluded.qualification_receipt_id, knowledge_admission_receipt_id = "
+                    "excluded.knowledge_admission_receipt_id, state = excluded.state, "
+                    "stale_reason = excluded.stale_reason, bound_by = excluded.bound_by, "
+                    "updated_at = excluded.updated_at"
+                ),
+                binding,
+            )
+            row = connection.execute(
+                text(
+                    "SELECT * FROM current_use_bindings WHERE tenant_id = :tenant_id "
+                    "AND claim_revision_id = :claim_revision_id "
+                    "AND profile_id = :profile_id AND use_scope = :use_scope"
+                ),
+                binding,
+            ).mappings().one()
+        return {
+            "knowledge_admission_receipt": _decode_knowledge_admission_receipt(
+                admission
+            ),
+            "current_use_binding": dict(row),
+        }
+
+    def list_knowledge_admission_receipts(
+        self, tenant_id: str, claim_id: str | None = None
+    ) -> list[dict]:
+        statement = (
+            "SELECT * FROM knowledge_admission_receipts WHERE tenant_id = :tenant_id"
+        )
+        parameters: dict[str, Any] = {"tenant_id": tenant_id}
+        if claim_id is not None:
+            statement += " AND claim_revision_id = :claim_id"
+            parameters["claim_id"] = claim_id
+        statement += " ORDER BY issued_at, id"
+        return [
+            _decode_knowledge_admission_receipt(row)
+            for row in self._many(statement, parameters)
+        ]
 
     def get_current_use_binding(
         self,
@@ -563,12 +780,22 @@ class PostgresQualificationRepositoryMixin:
         )
 
     def list_current_use_bindings(
-        self, tenant_id: str, profile_id: str, state: str = "current"
+        self,
+        tenant_id: str,
+        profile_id: str,
+        state: str = "current",
+        use_scope: str = "knowledge",
     ) -> list[dict]:
         return self._many(
             "SELECT * FROM current_use_bindings WHERE tenant_id = :tenant_id "
-            "AND profile_id = :profile_id AND state = :state ORDER BY updated_at DESC",
-            {"tenant_id": tenant_id, "profile_id": profile_id, "state": state},
+            "AND profile_id = :profile_id AND state = :state "
+            "AND use_scope = :use_scope ORDER BY updated_at DESC",
+            {
+                "tenant_id": tenant_id,
+                "profile_id": profile_id,
+                "state": state,
+                "use_scope": use_scope,
+            },
         )
 
     def create_authorization_grant(self, tenant_id: str, values: dict[str, Any]) -> dict:

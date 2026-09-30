@@ -21,10 +21,10 @@ def test_release_version_surfaces_are_aligned() -> None:
         encoding="utf-8"
     )
 
-    assert __version__ == "0.5.0"
+    assert __version__ == "0.6.0"
     assert app.version == __version__
-    assert 'version = "0.5.0"' in pyproject
-    assert '"version": "0.5.0"' in package_json
-    assert '"version": "0.5.0"' in package_lock
+    assert 'version = "0.6.0"' in pyproject
+    assert '"version": "0.6.0"' in package_json
+    assert '"version": "0.6.0"' in package_lock
     assert ros2_bridge_version == __version__
-    assert 'version = "0.5.0"' in ros2_pyproject
+    assert 'version = "0.6.0"' in ros2_pyproject

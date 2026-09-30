@@ -39,6 +39,12 @@ class ErrorCode(StrEnum):
     INVALID_ARTIFACT = "invalid_artifact"
     INVALID_CONVERSATION_IMPORT = "invalid_conversation_import"
     INVALID_EXECUTION_POLICY = "invalid_execution_policy"
+    ENFORCER_NOT_CONFIGURED = "enforcer_not_configured"
+    ENFORCER_REQUEST_FAILED = "enforcer_request_failed"
+    INVALID_ENFORCEMENT_RECEIPT = "invalid_enforcement_receipt"
+    ENFORCEMENT_DISPATCH_INDETERMINATE = "enforcement_dispatch_indeterminate"
+    EXTERNAL_ENFORCEMENT_DENIED = "external_enforcement_denied"
+    EXTERNAL_ENFORCEMENT_REQUIRED = "external_enforcement_required"
     INVALID_EVIDENCE = "invalid_evidence"
     INVALID_ASSURANCE_BUNDLE = "invalid_assurance_bundle"
     INVALID_VERIFICATION_RESULT = "invalid_verification_result"
@@ -232,6 +238,47 @@ class InvalidExecutionPolicyError(ApplicationError):
 
     def __init__(self, field: str, message: str):
         super().__init__(message, metadata={"field": field})
+
+
+class EnforcerNotConfiguredError(ApplicationError):
+    """No host-owned adapter or verification key matches the requested issuer."""
+
+    code = ErrorCode.ENFORCER_NOT_CONFIGURED
+
+    def __init__(self, resource_id: str):
+        super().__init__(
+            "External enforcer is not configured",
+            metadata={"resource": "enforcer", "resource_id": resource_id},
+        )
+
+
+class EnforcerRequestError(ApplicationError):
+    """The out-of-process enforcer did not return a verifiable result in time."""
+
+    code = ErrorCode.ENFORCER_REQUEST_FAILED
+    retryable = True
+
+
+class InvalidEnforcementReceiptError(ApplicationError):
+    """An external receipt failed signature, binding, freshness, or schema checks."""
+
+    code = ErrorCode.INVALID_ENFORCEMENT_RECEIPT
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message, metadata={"field": field})
+
+
+class EnforcementDispatchIndeterminateError(ApplicationError):
+    """An external workload may have started but no terminal state is proven."""
+
+    code = ErrorCode.ENFORCEMENT_DISPATCH_INDETERMINATE
+    retryable = False
+
+    def __init__(self, dispatch_id: str, cause: str):
+        super().__init__(
+            "External enforcement dispatch requires reconciliation",
+            metadata={"dispatch_id": dispatch_id, "cause": cause},
+        )
 
 
 class InvalidEvidenceError(ApplicationError):

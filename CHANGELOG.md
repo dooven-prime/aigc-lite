@@ -5,6 +5,53 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+## 0.6.0 - 2026-09-30
+
+- Made `/mcp/` the canonical Streamable HTTP endpoint and internally
+  canonicalized the exact `/mcp` compatibility path, so protocol POSTs do not
+  depend on redirects that the default MCP HTTP client does not follow.
+- Frozen the planned Controlled Patch Runner contract without exposing source
+  mutation: clean-base independent reproduction and an immutable
+  FailureReceipt must precede any narrow write grant, and the patching identity
+  cannot modify the tests, validator, baseline, receipt, or failure predicate
+  that judges its own patch.
+- Frozen the first Authority Separation Baseline. VerificationPlan now defaults
+  `auto_promote` to false; the retained compatibility flag can only request a
+  proposal-only Promotion Gate evaluation. Agent/plan execution cannot apply a
+  workflow transition, while the explicit administrator control route remains
+  the sole application caller that requests `apply_transition=True`.
+- Added the normative authority-transition matrix and an adversarial authority
+  suite. Hostile Agent verification output cannot smuggle qualification,
+  admission, current-use, authorization, or release fields through the frozen
+  result contract.
+
+- Split orthogonal verification from epistemic independence. Lean/Coq kernel
+  success now satisfies `orthogonal_verification` while
+  `independent_validation` remains undetermined until distinct authority,
+  organization/trust-domain, and reproduction lineage can be established.
+- Added migration `0020_knowledge_admission`, immutable
+  `KnowledgeAdmissionReceipt` records, a server-owned admission policy, and an
+  explicit admin transition from QualificationReceipt to the current knowledge
+  view. `ADMITTED` no longer creates a CurrentUseBinding, and the database
+  rejects current knowledge bindings without a matching admission receipt.
+- Added a vendor-neutral `EnforcerAdapter` port, a hardened out-of-process HTTP
+  adapter, nonce/expiry-bound request contracts, a host-owned Ed25519 keyring,
+  and strict signed Enforcement Receipt verification. Verified receipts bind
+  issuer, request, workspace, Run/Step/Proposal, policy, execution envelope,
+  ToolSpec and argument digests before immutable persistence; legacy or merely
+  signature-bearing receipts remain explicitly unverified.
+- Added Alembic revision `0018_enforcer_signatures` and read-only operational
+  projections for registered adapters and verification-key fingerprints. No
+  public endpoint can register trust roots, dispatch arbitrary workloads, or
+  write receipts.
+- Added deployer-owned `ExternalToolExecutionBinding` projection into the Tool
+  Catalog. Bound tools execute only through the external adapter and never
+  fall back to their ordinary provider.
+- Added migration `0019_enforcement_dispatches`, persistent
+  `dispatching/terminal/indeterminate/reconciled` state, one active root
+  workload per adapter, and admin-only signed reconciliation of existing
+  uncertain dispatches.
+
 ## 0.5.0 - 2026-09-30
 
 - Added immutable `PolicyProposal`, server-derived `PermissionDiff`, and

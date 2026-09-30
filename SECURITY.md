@@ -40,6 +40,14 @@ sandbox/watchdog enforcement.
   the exact variable appears in `AIGC_LITE_MCP_ENV_CREDENTIAL_ALLOWLIST`.
 - A workspace model endpoint and its credential are one routing unit. A custom
   endpoint never inherits the process-wide LLM key and redirects are disabled.
+- External enforcer issuers, adapters, and Ed25519 public keys are deployer-owned
+  composition, not workspace configuration. Keep enforcer authentication or
+  mTLS material out of the database; use HTTPS and rotate/revoke receipt keys
+  explicitly. `signature_verified=true` authenticates the exact signed payload
+  and request binding, not the truth of runtime observations or a hardware quote.
+- External tool bindings are also deployer-owned and pin the exact workspace,
+  provider, tool, proposal, and policy hash. An uncertain dispatch blocks that
+  adapter until signed reconciliation; it never falls back to local execution.
 
 Execution records and audit metadata use centralized best-effort redaction.
 This is defense in depth, not a substitute for keeping secrets out of prompts
