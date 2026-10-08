@@ -23,6 +23,7 @@ from .adapters.scheduling import TimeWheelScheduler
 from .api.configuration import create_configuration_router
 from .api.conversation_imports import create_conversation_import_router
 from .api.enforcement import create_enforcement_router
+from .api.math_release_imports import create_math_release_import_router
 from .api.research import create_research_router
 from .api.reviews import create_review_router
 from .audit import record_request
@@ -98,6 +99,7 @@ from .services.evidence import EvidenceService
 from .services.gateway import GatewayService
 from .services.http_poll import HTTPPollService
 from .services.kernel_verification import KernelVerificationService
+from .services.math_release_imports import MathReleaseImportService
 from .services.mcp_probe import MCPProbeService
 from .services.memory import MemoryService
 from .services.qualification import QualificationService
@@ -165,6 +167,7 @@ conversation_import_registry = ConversationImportRegistry.builtins()
 conversation_import_service = ConversationImportService(
     registry=conversation_import_registry
 )
+math_release_import_service = MathReleaseImportService()
 kernel_verifier_registry = KernelVerifierRegistry.from_config(
     lean_executable=settings.lean_executable,
     coq_executable=settings.coq_executable,
@@ -883,6 +886,10 @@ conversation_import_router = create_conversation_import_router(
     import_service=conversation_import_service,
     request_context_factory=request_context,
 )
+math_release_import_router = create_math_release_import_router(
+    import_service=math_release_import_service,
+    request_context_factory=request_context,
+)
 enforcement_router = create_enforcement_router(
     enforcement_service=enforcement_service,
     external_enforcer_service=external_enforcer_service,
@@ -893,6 +900,7 @@ app.include_router(configuration_router)
 app.include_router(research_router)
 app.include_router(review_router)
 app.include_router(conversation_import_router)
+app.include_router(math_release_import_router)
 app.include_router(enforcement_router)
 
 

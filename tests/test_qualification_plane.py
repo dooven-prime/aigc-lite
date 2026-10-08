@@ -72,7 +72,7 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
     claim = registered["claim"]
 
     assert claim["semantic_hash"] == claim_semantic_hash(claim)
-    assert qualification.list_profiles()[0]["profile_id"] == PROFILE_ID
+    assert PROFILE_ID in {item["profile_id"] for item in qualification.list_profiles()}
     unresolved = qualification.evaluate(context, claim["id"], PROFILE_ID)
     assert unresolved["evaluation"]["verdict"] == QualificationVerdict.UNRESOLVED
     assert unresolved["qualification_receipt"] is None

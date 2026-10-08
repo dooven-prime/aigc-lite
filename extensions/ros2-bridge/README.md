@@ -130,6 +130,25 @@ elevation, cancellation, idempotency, and receipt contracts. It does not claim
 live Nav2, Gazebo, DDS, or hardware validation; those require a sourced ROS
 graph and become a separate integration job.
 
+## Minimum credible autonomy acceptance loop (not yet completed)
+
+A Nav2 provider call alone is not robotics validation. The next integration
+milestone is a fixed simulation scenario with a frozen map, initial pose,
+goal tolerance, robot/software versions, and a task success predicate. Run a
+baseline and inject at least goal rejection, delayed feedback, transport loss,
+cancel timeout, and localization degradation. For each trial, capture the ROS
+goal ID, feedback/pose timeline, timeout and cancellation decisions, stop
+confirmation (or explicit `indeterminate`), and matching aigc-lite
+Run/Step/ActionReceipt IDs. A runner should replay the scenario under the same
+seed/config and produce a machine-readable report with success rate, failure
+taxonomy, latency distribution, and unresolved-stop count. The report must
+distinguish simulator assertions from a real Nav2/Gazebo graph and never treat
+an unconfirmed stop as success or permission for another motion.
+
+This remains an acceptance target, not a claim that the current simulator or
+unit tests measure physical stop distance or hardware safety. Device-side
+e-stop and protective interlocks remain outside this bridge.
+
 ## Safety boundary
 
 MCP cancellation is a best-effort Action cancellation path. It is not a safety

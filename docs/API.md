@@ -53,6 +53,9 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/conversation-imports/preview`：管理员解析上传的 JSON，返回 source/preview hash、告警和有界样本，不创建导入记录
 - `POST /api/conversation-imports`：管理员用相同文件和 `expected_preview_hash` 原子提交 Artifact、不可变 ImportBatch 与完整消息图
 - `GET /api/conversation-imports` 与 `GET /api/conversation-imports/{batch_id}`：查询 workspace 导入批次；详情可显式传 `include_messages=true`
+- `POST /api/research/math-release-imports/preview`：管理员预览固定 `openai/math` commit 的 family/manuscript 目录，不写入数据
+- `POST /api/research/math-release-imports`：管理员提交相同 commit 与 `expected_preview_hash`，原子保存原始目录 Artifact 和 candidate-only manifest
+- `GET /api/research/math-release-imports` 与 `GET /api/research/math-release-imports/{import_id}`：查询目录快照；详情可显式传 `include_families=true`，不代表数学资格
 - `POST /api/enforcement/policy-proposals`：管理员提交 base/candidate execution policy；服务端冻结两份 snapshot 并确定性计算 `PermissionDiff`，不批准或应用策略
 - `GET /api/enforcement/policy-proposals` 与 `GET /api/enforcement/policy-proposals/{proposal_id}`：查询 workspace 的不可变策略提案与扩权/收权明细
 - `GET /api/enforcement/issuers`：列出主机代码注册、能够签发 enforcement evidence 的 backend identity；请求不能注册 issuer

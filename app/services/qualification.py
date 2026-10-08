@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -34,6 +35,7 @@ from ..core.qualification import (
     claim_semantic_hash,
 )
 from ..database import get_repository
+from ..profiles.math_project import MATH_PROJECT_PROFILE, PROJECT_RECEIPT_VERSION, SNAPSHOT_VERSION
 from ..profiles.math_theorem import (
     CLAIM_KIND,
     KERNEL_CERTIFICATE_VERSION,
@@ -103,6 +105,13 @@ class MathTheoremVerifier:
                 verdict=QualificationVerdict.NOT_APPLICABLE,
                 criteria=(),
                 blockers=("claim_kind_mismatch",),
+                evidence_vector=self._vector(),
+            )
+        if payload.get("claim_key") == "OAI-MATH-003-ZETA-7-8":
+            return QualificationDecision(
+                verdict=QualificationVerdict.NOT_APPLICABLE,
+                criteria=(),
+                blockers=("project_profile_required",),
                 evidence_vector=self._vector(),
             )
         if "statement_drift" in closure.limitations:
@@ -211,9 +220,7 @@ class MathTheoremVerifier:
         dependency_nodes = [
             item for item in closure.nodes if item["node_type"] == "dependency_binding"
         ]
-        dependencies_ok = (
-            certificate is None or certificate.get("dependencies") == []
-        ) and all(
+        dependencies_ok = (certificate is None or certificate.get("dependencies") == []) and all(
             item["payload"].get("state") == CurrentUseState.CURRENT.value
             for item in dependency_nodes
         )
@@ -337,8 +344,7 @@ class MathTheoremVerifier:
         proof = artifacts.get(certificate.get("proof_artifact_id"))
         return bool(
             certificate.get("contract_version") == KERNEL_CERTIFICATE_VERSION
-            and certificate.get("execution_contract_version")
-            == KERNEL_EXECUTION_CONTRACT_VERSION
+            and certificate.get("execution_contract_version") == KERNEL_EXECUTION_CONTRACT_VERSION
             and certificate.get("claim_revision_id") == claim_revision_id
             and certificate.get("claim_semantic_hash") == claim_semantic_hash
             and certificate.get("status") == "passed"
@@ -403,6 +409,269 @@ class MathTheoremVerifier:
         return result
 
 
+class MathProjectVerifier(MathTheoremVerifier):
+    """Fail-closed gate for a project replay and an exact Comparator challenge."""
+
+    profile = MATH_PROJECT_PROFILE
+
+    def evaluate(self, closure: EvidenceClosure) -> QualificationDecision:
+        claim = next(item for item in closure.nodes if item["node_type"] == "claim_revision")
+        if (
+            claim["payload"].get("claim_type") != CLAIM_KIND
+            or claim["payload"].get("claim_key") != "OAI-MATH-003-ZETA-7-8"
+        ):
+            return QualificationDecision(
+                QualificationVerdict.NOT_APPLICABLE, (), ("case_003_claim_required",), self._vector()
+            )
+        if "statement_drift" in closure.limitations:
+            return QualificationDecision(
+                QualificationVerdict.STALE,
+                (),
+                ("statement_drift",),
+                self._vector(statement_identity=False),
+            )
+
+        artifacts = {
+            item["node_id"]: item["payload"]
+            for item in closure.nodes
+            if item["node_type"] == "artifact"
+        }
+        attempts = [
+            item
+            for item in closure.nodes
+            if item["node_type"] == "verification_attempt"
+            and item["payload"].get("validation_modality") == ValidationModality.KERNEL_CHECK.value
+            and item["payload"].get("verifier_lineage", {}).get("runtime_derived") is True
+            and str(
+                item["payload"].get("verifier_lineage", {}).get("principal_id") or ""
+            ).startswith("system:verifier:math-project:")
+            and not item["payload"].get("verifier_lineage", {}).get("model_route")
+            and item["payload"].get("run_id")
+        ]
+        candidates: list[tuple[dict, dict, str]] = []
+        for attempt in attempts:
+            for artifact_id in attempt["payload"].get("artifact_ids", []):
+                artifact = artifacts.get(artifact_id)
+                if (
+                    artifact is None
+                    or artifact.get("metadata", {}).get("role") != "project_verification_receipt"
+                ):
+                    continue
+                try:
+                    receipt = json.loads(artifact.get("content_text") or "")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if (
+                    isinstance(receipt, dict)
+                    and receipt.get("claim_revision_id") == closure.claim_revision_id
+                ):
+                    candidates.append((receipt, attempt, artifact_id))
+        selected = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate[1]["payload"].get("outcome") == "passed"
+                and isinstance(candidate[0].get("comparator"), dict)
+                and candidate[0]["comparator"].get("statement_identity") == "passed"
+            ),
+            candidates[-1] if candidates else None,
+        )
+        receipt, attempt, receipt_id = selected if selected else ({}, {}, "")
+        receipt_artifact = artifacts.get(receipt_id, {})
+        source_attempts = [
+            item for item in closure.nodes
+            if item["node_type"] == "verification_attempt"
+            and item["payload"].get("validation_modality") == ValidationModality.EXACT_REPLAY.value
+            and item["payload"].get("outcome") == "passed"
+            and item["payload"].get("verifier_lineage", {}).get("principal_id")
+            == "system:source-snapshot:openai-math-003"
+            and not item["payload"].get("verifier_lineage", {}).get("model_route")
+        ]
+        source_snapshot_ids = [
+            artifact_id
+            for source_attempt in source_attempts
+            for artifact_id in source_attempt["payload"].get("artifact_ids", [])
+            if artifacts.get(artifact_id, {}).get("metadata", {}).get("role") == "source_snapshot"
+        ]
+        snapshot_id = receipt.get("source_snapshot_artifact_id") or (
+            source_snapshot_ids[0] if source_snapshot_ids else None
+        )
+        snapshot = artifacts.get(snapshot_id)
+        manifest = {}
+        if snapshot and snapshot.get("metadata", {}).get("role") == "source_snapshot":
+            try:
+                manifest = json.loads(snapshot.get("content_text") or "")
+            except (TypeError, json.JSONDecodeError):
+                pass
+        if not isinstance(manifest, dict):
+            manifest = {}
+        files = manifest.get("files")
+        from ..adapters.research_import.math_case_003 import (
+            CHALLENGE_PATH,
+            CONFIG_PATH,
+            LAKEFILE_PATH,
+            MANIFEST_PATH,
+            PDF_PATH,
+            SOLUTION_PATH,
+            SOURCE_COMMIT,
+            TOOLCHAIN_PATH,
+            validate_snapshot_files,
+        )
+
+        file_index = (
+            {item.get("path"): item for item in files if isinstance(item, dict)}
+            if isinstance(files, list)
+            else {}
+        )
+        snapshot_ok = bool(
+            snapshot
+            and snapshot_id in source_snapshot_ids
+            and any(
+                item["payload"].get("output_digest") == snapshot.get("content_hash")
+                and snapshot_id in item["payload"].get("artifact_ids", [])
+                for item in source_attempts
+            )
+            and hashlib.sha256(str(snapshot.get("content_text") or "").encode("utf-8")).hexdigest()
+            == snapshot.get("content_hash")
+            and manifest.get("contract_version") == SNAPSHOT_VERSION
+            and manifest.get("source_commit") == SOURCE_COMMIT
+            and validate_snapshot_files(files, artifacts)
+            and (
+                not receipt or snapshot.get("content_hash") == receipt.get("source_snapshot_hash")
+            )
+        )
+        checker = receipt.get("comparator") if isinstance(receipt.get("comparator"), dict) else {}
+        kernel = receipt.get("kernel") if isinstance(receipt.get("kernel"), dict) else {}
+        deps = receipt.get("dependencies") if isinstance(receipt.get("dependencies"), dict) else {}
+        bound = bool(
+            receipt.get("contract_version") == PROJECT_RECEIPT_VERSION
+            and attempt.get("payload", {}).get("outcome") in {"passed", "failed"}
+            and hashlib.sha256(
+                str(receipt_artifact.get("content_text") or "").encode("utf-8")
+            ).hexdigest()
+            == receipt_artifact.get("content_hash")
+            and receipt.get("claim_semantic_hash") == closure.claim_semantic_hash
+            and receipt.get("source_commit") == SOURCE_COMMIT
+            and snapshot_ok
+            and receipt.get("challenge_sha256") == file_index[CHALLENGE_PATH]["sha256"]
+            and receipt.get("config_sha256") == file_index[CONFIG_PATH]["sha256"]
+            and receipt.get("solution_sha256") == file_index[SOLUTION_PATH]["sha256"]
+            and receipt.get("lean_toolchain_sha256") == file_index[TOOLCHAIN_PATH]["sha256"]
+            and receipt.get("lake_manifest_sha256") == file_index[MANIFEST_PATH]["sha256"]
+            and receipt.get("lakefile_sha256") == file_index[LAKEFILE_PATH]["sha256"]
+            and receipt.get("paper_sha256") == file_index[PDF_PATH]["sha256"]
+            and receipt.get("worktree_clean") is True
+            and receipt.get("theorem_name") == "OAI.riemannZeta_ne_zero_of_seven_eighths_lt_re"
+            and _SHA256.fullmatch(str(checker.get("executable_hash") or ""))
+            and _SHA256.fullmatch(str(checker.get("sandbox_executable_hash") or ""))
+            and checker.get("isolation_enforced") is True
+            and _SHA256.fullmatch(str(kernel.get("lean_executable_hash") or ""))
+            and _SHA256.fullmatch(str(kernel.get("lake_executable_hash") or ""))
+            and "4.34.1" in str(kernel.get("lean_version") or "")
+            and "4.34.1" in str(kernel.get("lake_version") or "")
+        )
+        identity_ok = bool(
+            bound
+            and attempt.get("payload", {}).get("outcome") == "passed"
+            and checker.get("statement_identity") == "passed"
+            and checker.get("exit_code") == 0
+        )
+        kernel_ok = bool(
+            bound
+            and attempt.get("payload", {}).get("outcome") == "passed"
+            and checker.get("kernel_check") == "passed"
+            and kernel.get("status") == "passed"
+            and kernel.get("sorry_present") is False
+            and kernel.get("axioms_permitted") is True
+        )
+        deps_ok = bool(
+            bound
+            and deps.get("closed") is True
+            and deps.get("patch_closure_verified") is True
+            and deps.get("clean_build_exit_code") == 0
+            and deps.get("mathlib_rev") == "d13f23b723b8a846827a245b89c10fc7d3f11612"
+            and deps.get("all_pinned_revisions_match") is True
+        )
+        reviews = [
+            item
+            for item in closure.nodes
+            if item["node_type"] == "verification_attempt"
+            and item["payload"].get("validation_modality") == ValidationModality.EXPERT_REVIEW.value
+            and item["payload"].get("outcome") == "passed"
+            and not item["payload"].get("verifier_lineage", {}).get("model_route")
+            and snapshot_id in item["payload"].get("artifact_ids", [])
+            and item["payload"].get("input_digest")
+            == canonical_hash(
+                {
+                    "claim": closure.claim_semantic_hash,
+                    "snapshot": snapshot.get("content_hash") if snapshot else None,
+                }
+            )
+        ]
+        review_ok = bool(reviews)
+        criteria = (
+            self._criterion(
+                "source_snapshot",
+                snapshot_ok,
+                "Pinned source bytes are present.",
+                "Pinned source snapshot is missing or incomplete.",
+                (snapshot_id,) if snapshot_id else (),
+            ),
+            self._criterion(
+                "statement_identity",
+                identity_ok,
+                "Comparator matched the challenge statement.",
+                "No passing, isolated Comparator statement check is bound to this revision.",
+                (receipt_id,) if receipt_id else (),
+            ),
+            self._criterion(
+                "kernel_check",
+                kernel_ok,
+                "Comparator observed kernel acceptance and allowed axioms.",
+                "No bound passing kernel check is present.",
+                (receipt_id,) if receipt_id else (),
+            ),
+            self._criterion(
+                "dependency_closure",
+                deps_ok,
+                "Pinned project dependencies were checked locally.",
+                "Project dependencies are not closed at pinned revisions.",
+                (receipt_id,) if receipt_id else (),
+            ),
+            self._criterion(
+                "semantic_alignment_review",
+                review_ok,
+                "A non-model review links the paper to this challenge.",
+                "Paper-to-challenge alignment has not been reviewed.",
+                tuple(item["node_id"] for item in reviews),
+            ),
+        )
+        comparator_rejected = bool(
+            bound and isinstance(checker.get("exit_code"), int) and checker["exit_code"] != 0
+        )
+        blockers = tuple(
+            item.code for item in criteria if item.state is not EvidenceAxisState.SATISFIED
+        )
+        verdict = (
+            QualificationVerdict.ADMITTED
+            if not blockers
+            else QualificationVerdict.BLOCKED
+            if comparator_rejected
+            else QualificationVerdict.UNRESOLVED
+        )
+        vector = self._vector(
+            statement_identity=identity_ok,
+            artifact_integrity=snapshot_ok,
+            local_correctness=kernel_ok,
+            semantic_alignment=review_ok,
+            replayability=deps_ok,
+            orthogonal_verification=kernel_ok,
+        )
+        if comparator_rejected:
+            blockers = ("comparator_rejected", *blockers)
+        return QualificationDecision(verdict, criteria, blockers, vector)
+
+
 class QualificationGate:
     """The sole deterministic writer-side decision boundary for qualification."""
 
@@ -419,6 +688,7 @@ class QualificationGate:
 def create_default_verifier_registry() -> DomainVerifierRegistry:
     registry = DomainVerifierRegistry()
     registry.register(MathTheoremVerifier())
+    registry.register(MathProjectVerifier())
     return registry
 
 
@@ -686,18 +956,14 @@ class QualificationService:
                 "approver", "Knowledge admission requires an authenticated approver"
             )
         if draft.admission_policy_id != DEFAULT_KNOWLEDGE_ADMISSION_POLICY.policy_id:
-            raise ResourceNotFoundError(
-                "knowledge_admission_policy", draft.admission_policy_id
-            )
+            raise ResourceNotFoundError("knowledge_admission_policy", draft.admission_policy_id)
         rationale = self._text("rationale", draft.rationale, 4_000)
         repository = self._repository_provider()
         receipt = repository.get_qualification_receipt(
             context.workspace_id, draft.qualification_receipt_id
         )
         if receipt is None:
-            raise ResourceNotFoundError(
-                "qualification_receipt", draft.qualification_receipt_id
-            )
+            raise ResourceNotFoundError("qualification_receipt", draft.qualification_receipt_id)
         if receipt.get("verdict") != QualificationVerdict.ADMITTED.value:
             raise InvalidEvidenceError(
                 "qualification_receipt_id", "Knowledge admission requires ADMITTED"
@@ -732,7 +998,11 @@ class QualificationService:
             context.workspace_id,
             {
                 "id": admission_id,
-                **{key: value for key, value in portable.items() if key != "knowledge_admission_receipt_id"},
+                **{
+                    key: value
+                    for key, value in portable.items()
+                    if key != "knowledge_admission_receipt_id"
+                },
                 "receipt_hash": admission_receipt.content_hash,
             },
         )
@@ -1129,9 +1399,7 @@ class QualificationService:
         """Evaluate historical receipt currentness without creating a binding."""
 
         repository = self._repository_provider()
-        claim = repository.get_research_claim(
-            context.workspace_id, receipt["claim_revision_id"]
-        )
+        claim = repository.get_research_claim(context.workspace_id, receipt["claim_revision_id"])
         stale_reasons: list[str] = []
         if claim is None:
             stale_reasons.append("qualification_subject_missing")
@@ -1165,12 +1433,9 @@ class QualificationService:
             if (
                 current is None
                 or current.get("state") != CurrentUseState.CURRENT.value
-                or current.get("qualification_receipt_id")
-                != frozen.get("qualification_receipt_id")
+                or current.get("qualification_receipt_id") != frozen.get("qualification_receipt_id")
             ):
-                stale_reasons.append(
-                    f"dependency_binding_changed:{node.get('node_id')}"
-                )
+                stale_reasons.append(f"dependency_binding_changed:{node.get('node_id')}")
         return sorted(set(stale_reasons))
 
     @staticmethod
@@ -1241,9 +1506,7 @@ class QualificationService:
                     certificate = {}
                 if isinstance(certificate, dict):
                     checker = certificate.get("checker") or {}
-                    checker_hash = checker.get("toolchain_hash") or checker.get(
-                        "executable_hash"
-                    )
+                    checker_hash = checker.get("toolchain_hash") or checker.get("executable_hash")
             if metadata.get("data_snapshot_hash"):
                 data_hashes.append(metadata["data_snapshot_hash"])
             if metadata.get("environment_hash"):
@@ -1266,12 +1529,8 @@ class QualificationService:
 
     @staticmethod
     def _independence_summary(closure: EvidenceClosure) -> dict[str, Any]:
-        attempts = [
-            item for item in closure.nodes if item["node_type"] == "verification_attempt"
-        ]
-        claim_node = next(
-            item for item in closure.nodes if item["node_type"] == "claim_revision"
-        )
+        attempts = [item for item in closure.nodes if item["node_type"] == "verification_attempt"]
+        claim_node = next(item for item in closure.nodes if item["node_type"] == "claim_revision")
         origin = claim_node["payload"].get("origin_lineage") or {}
         independence_bases = set()
         verification_properties = set()
@@ -1283,15 +1542,9 @@ class QualificationService:
             lineage = attempt.get("verifier_lineage") or {}
             relationship = {
                 "attempt_id": attempt_node["node_id"],
-                "same_run": QualificationService._shared_value(
-                    lineage, origin, "run_id"
-                ),
-                "same_agent": QualificationService._shared_value(
-                    lineage, origin, "principal_id"
-                ),
-                "same_model": QualificationService._shared_value(
-                    lineage, origin, "model_route"
-                ),
+                "same_run": QualificationService._shared_value(lineage, origin, "run_id"),
+                "same_agent": QualificationService._shared_value(lineage, origin, "principal_id"),
+                "same_model": QualificationService._shared_value(lineage, origin, "model_route"),
                 "same_model_family": QualificationService._shared_value(
                     lineage, origin, "model_family"
                 ),
@@ -1307,9 +1560,7 @@ class QualificationService:
             if (
                 modality == ValidationModality.KERNEL_CHECK.value
                 and lineage.get("toolchain_hash")
-                and str(lineage.get("principal_id") or "").startswith(
-                    "system:verifier:"
-                )
+                and str(lineage.get("principal_id") or "").startswith("system:verifier:")
                 and not lineage.get("model_route")
             ):
                 verification_properties.add("orthogonal_non_llm_checker")
@@ -1327,9 +1578,7 @@ class QualificationService:
         if not attempts:
             limitations.append("no verifier lineage is present")
         if "orthogonal_non_llm_checker" in verification_properties:
-            limitations.append(
-                "orthogonal verification does not establish independent authority"
-            )
+            limitations.append("orthogonal verification does not establish independent authority")
         limitations.append(
             "verifier organization and trust-domain identity are not yet established"
         )

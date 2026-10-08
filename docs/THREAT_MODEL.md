@@ -187,6 +187,26 @@ The concrete transition owners and choke points are enumerated in
 | Hardware attestation or safety-rated physical interlock | Not implemented and outside the core project's authority. |
 | Controlled failure reproduction and source patching | Security contract frozen in [PATCH_RUNNER.md](PATCH_RUNNER.md); no patch runner or source-mutation API is implemented. |
 
+### Collaborative research boundary
+
+Agent-to-Agent communication is transport, not knowledge admission. A peer's
+message, copied heuristic, or repeated review remains a candidate tied to its
+source Artifact, ClaimRevision, run, principal, and model route. Changing the
+model behind one principal does not create a new independent principal; adding
+more same-source reviewers does not create independent evidence. A revised
+statement starts a new semantic identity and does not inherit the earlier
+revision's verification attempts. Default qualified retrieval still requires
+an admitted Receipt and an explicit current-use binding. Peer text cannot mint
+an `AuthorizationGrant` or bypass tool dispatch checks. The deterministic
+regressions are in
+[`tests/adversarial/test_swarm_epistemic_boundaries.py`](../tests/adversarial/test_swarm_epistemic_boundaries.py).
+
+The current system records verifier lineage but cannot certify external
+organization or trust-domain independence. It also has per-run Agent budgets,
+not a shared root budget across a research swarm. Therefore agent count,
+message count, reviewer count, and model-route diversity must not be reported
+as effective independent search branches or as a swarm-wide safety limit.
+
 ## 7. External enforcement integration contract
 
 External sandboxes remain adapters behind `EnforcerAdapter`,

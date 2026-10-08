@@ -7,6 +7,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
+from app.adapters.research_import import OpenAIMathReleaseAdapter
 from app.config import settings
 from app.core.contracts import RequestContext
 from app.core.enforcement import (
@@ -21,6 +22,7 @@ from app.services.conversation_import_registry import ConversationImportRegistry
 from app.services.conversation_imports import ConversationImportService
 from app.services.credentials import CredentialService
 from app.services.enforcement import EnforcementService
+from app.services.math_release_imports import MathReleaseImportService
 from app.services.reviews import ReviewService
 
 POSTGRES_URL = os.getenv("AIGC_LITE_TEST_POSTGRES_URL", "")
@@ -33,10 +35,33 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
     repository = PostgresRepository(POSTGRES_URL)
     repository.init()
-    assert repository.schema_revision() == "0020_knowledge_admission"
+    assert repository.schema_revision() == "0021_math_release_candidates"
     workspace_id = f"contract-{uuid4()}"
     repository.create_tenant("PostgreSQL contract", workspace_id)
     context = RequestContext(request_id="postgres-contract", workspace_id=workspace_id)
+
+    class StaticMathAdapter(OpenAIMathReleaseAdapter):
+        def fetch(self, source_commit: str) -> tuple[bytes, bytes]:
+            self._validate_commit(source_commit)
+            return (
+                b"# Mathematics manuscript collection\n"
+                b"**1 manuscripts covering 1 result families.**\n"
+                b"**001. PostgreSQL candidate.** Catalogue summary only.\n"
+                b"</td>\n&emsp;[Paper](preprints/paper.pdf)\n"
+                b"Candidate abstract.\n</td>\n",
+                b"version: v0.4\n",
+            )
+
+    math_imports = MathReleaseImportService(
+        lambda: repository, adapter=StaticMathAdapter()
+    )
+    math_commit = "b" * 40
+    math_preview = math_imports.preview(context, math_commit)
+    math_batch = math_imports.commit(
+        context, math_commit, math_preview["preview_hash"]
+    )
+    assert math_batch["admission_state"] == "candidate"
+    assert math_imports.get(context, math_batch["id"])["family_count"] == 1
     import_source = json.dumps(
         [
             {
@@ -289,7 +314,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
                 )
             )
         }
-    assert revision == "0020_knowledge_admission"
+    assert revision == "0021_math_release_candidates"
     assert {
         "signature_verified",
         "enforcement_request_id",

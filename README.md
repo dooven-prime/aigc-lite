@@ -5,13 +5,13 @@
 > M8ven 徽章表示第三方对公开 MCP 源码的扫描状态，不构成本项目
 > Qualification Plane 的资格或授权结论。
 
-一个可自托管、以可搜索执行记忆为核心的 AI 工作台与 Agent/MCP
-运行时。它可以通过 OpenAI-compatible 上游调用模型，但不以重复建设通用
-AI Gateway 为目标。
+一个可自托管的可信自主系统与可验证知识基础设施实验底座。它通过 Agent/MCP
+运行时保留可搜索的执行记忆，再把候选、证据、资格、当前知识使用和行动授权
+拆成不同边界；不以重复建设通用 AI Gateway 为目标。
 
 ## 项目定位
 
-aigc-lite 关注的是 bounded autonomous execution infrastructure：
+aigc-lite 关注的是 bounded autonomous execution 与可验证知识的交界：
 
 ```text
 Agent / Scheduler / MCP
@@ -23,13 +23,18 @@ Run / Step / Artifact / Citation / Receipt
 Search + Verification + Qualification + Authorization
 ```
 
-模型的一次回答会消失，执行事实不应该消失。系统把会话、模型调用、工具调用、
-失败、取消、来源和产物写入同一套可查询账本，并严格区分：
+「Agent 做过的事不再随一次回答消失」仍是底层能力，不是最终信任结论。系统把
+会话、模型调用、工具调用、失败、取消、来源和产物写入可查询账本，再严格区分：
 
 - candidate storage 与 qualified knowledge；
 - epistemic qualification 与 execution authorization；
 - Agent proposal 与确定性 Gate 决定；
 - workflow stage 与 evidence strength。
+
+生成可以很便宜，取得某种可使用的资格必须经过版本化条件与证据闭包；
+「证明工件通过检查」也不自动等于「论文主张被验证」或「进入默认知识层」。
+ROS 2 扩展同样不能只证明调用过 Nav2：可说服人的验收需包括仿真任务、
+故障注入、取消与安全停止、执行轨迹、失败分类和可重放报告。
 
 企业私有业务、第三方平台凭据、组织专属连接器和运行时数据不属于公开核心，
 通过独立扩展接入。
@@ -48,6 +53,7 @@ Search + Verification + Qualification + Authorization
 - Review Profile Registry 与确定性的执行完整性 Finding 账本；
 - 不可变 Policy Proposal、服务端 Permission Diff、独立 Enforcer Adapter 与 Ed25519 验签后的 Enforcement Receipt 账本；
 - preview/commit 型 Conversation Import Registry，保留外部消息分支与来源 Artifact，并只进入 candidate search；
+- 固定 commit 的 OpenAI 数学目录 candidate-only 导入；保留 family、manuscript 与来源 hash，不自动生成资格或知识绑定；
 - 可离线校验的 Assurance Bundle；
 - 独立安装的 ROS 2/Nav2 capability provider，核心不依赖 ROS 2。
 
@@ -127,6 +133,8 @@ Fernet master key。所有变量、MiniMax 示例和租户配置见
 | [Review Workbench](docs/REVIEW.md) | 版本化审查 Profile、执行完整性规则与 Finding 账本 |
 | [External Enforcement](docs/ENFORCEMENT.md) | 独立 Enforcer Adapter、签名 wire contract、key rotation 与可信边界 |
 | [Conversation Imports](docs/CONVERSATION_IMPORTS.md) | ChatGPT/DeepSeek preview、不可变批次、原始 Artifact 与 candidate-only 搜索 |
+| [Math Release Import](docs/MATH_RELEASE_IMPORT.md) | 固定 commit 的数学目录快照、family/manuscript 候选映射与零 silent promotion 边界 |
+| [Math Project 003](docs/MATH_PROJECT_003.md) | 单条 Claim 的源码快照、只读补丁闭包、编译缓存审计与资格边界 |
 | [Configuration](docs/CONFIGURATION.md) | 完整环境变量、模型、租户、MCP 与 formal kernel 配置 |
 | [Production](docs/PRODUCTION.md) | 生产启动保护、备份恢复和已知运维限制 |
 | [Threat Model](docs/THREAT_MODEL.md) | 两个 authority plane、三层 enforcement、系统假设和未实现边界 |

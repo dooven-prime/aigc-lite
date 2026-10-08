@@ -101,10 +101,12 @@ metaprogram 与 Coq plugin 仍可能接触宿主文件系统/网络。因此该�
 不应作为公开匿名 proof upload 服务。需要验证不可信任意代码时，应把同一 backend 放进独立容器/
 VM，并把镜像、库闭包和网络策略纳入后续 Qualification Profile。
 
-`math.formal.v1` 保持保守的 closed/single-proof profile，不扩张成万能 formal profile。后续
-`math.formal.project.v2` 应单独绑定 Lean 版本、Mathlib commit、lake manifest/lockfile、source tree
-digest、content-addressed import closure、challenge statement digest、kernel receipt 与 statement
-comparator receipt；其 dependency closure 表示每个依赖均闭合，而不是依赖必须为空。
+`math.formal.v1` 保持保守的 closed/single-proof profile，不扩张成万能 formal profile。
+`math.formal.project.v2` 已作为[单条 case-003 vertical slice](MATH_PROJECT_003.md) 注册：
+它分别绑定原始 PDF/challenge/solution 与 Lake 配置字节、项目依赖 checkout、Comparator
+命题核对和 kernel 结果。它不是通用 formal 项目认证，且目前没有上游全项目真实重放 Receipt。
+这里的 dependency closure 表示每个 pinned package checkout 已本地核对，而非零依赖；
+commit/hash 仍不能独立认证远端 Git tree 或签名。
 
 ## Portable Assurance Bundle
 
