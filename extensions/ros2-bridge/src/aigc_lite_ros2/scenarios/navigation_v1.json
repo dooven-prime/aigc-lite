@@ -1,0 +1,20 @@
+{
+  "contract_version": "robot.eval-scenario.v1",
+  "scenario_id": "navigation-fault-matrix-v1",
+  "robot_id": "sim-eval-1",
+  "map_id": "demo-map",
+  "seed": 1,
+  "start_pose": {"x": 0, "y": 0, "yaw": 0},
+  "goal_tolerance_m": 0.02,
+  "trials": [
+    {"id": "baseline", "fault": "success", "operation": "navigate", "goal": {"x": 1, "y": 0, "yaw": 0}, "travel_seconds": 0.05, "action_timeout_seconds": 2, "expected": {"status": "succeeded", "stop_confirmed": true, "error_code": null, "motion_blocked": false, "feedback_class": "normal"}},
+    {"id": "goal-rejection", "fault": "goal_rejected", "operation": "navigate", "goal": {"x": 1, "y": 0, "yaw": 0}, "travel_seconds": 0.05, "action_timeout_seconds": 2, "expected": {"status": "failed", "stop_confirmed": true, "error_code": "navigation_goal_rejected", "motion_blocked": false, "feedback_class": "none"}},
+    {"id": "navigation-failure", "fault": "failure", "operation": "navigate", "goal": {"x": 1, "y": 0, "yaw": 0}, "travel_seconds": 0.05, "action_timeout_seconds": 2, "expected": {"status": "failed", "stop_confirmed": true, "error_code": "navigation_failed", "motion_blocked": false, "feedback_class": "normal"}},
+    {"id": "feedback-stall", "fault": "feedback_stall", "operation": "navigate", "goal": {"x": 1, "y": 0, "yaw": 0}, "travel_seconds": 0.05, "action_timeout_seconds": 2, "expected": {"status": "succeeded", "stop_confirmed": true, "error_code": null, "motion_blocked": false, "feedback_class": "sparse"}},
+    {"id": "transport-loss", "fault": "transport_loss", "operation": "navigate", "goal": {"x": 1, "y": 0, "yaw": 0}, "travel_seconds": 0.05, "action_timeout_seconds": 2, "expected": {"status": "indeterminate", "stop_confirmed": false, "error_code": "transport_lost", "motion_blocked": true, "feedback_class": "normal"}},
+    {"id": "localization-loss", "fault": "localization_loss", "operation": "navigate", "goal": {"x": 1, "y": 0, "yaw": 0}, "travel_seconds": 0.05, "action_timeout_seconds": 2, "expected": {"status": "indeterminate", "stop_confirmed": false, "error_code": "localization_lost", "motion_blocked": true, "feedback_class": "normal"}},
+    {"id": "cancel-confirmed", "fault": "success", "operation": "cancel", "goal": {"x": 1, "y": 0, "yaw": 0}, "travel_seconds": 0.5, "action_timeout_seconds": 2, "cancel_after_seconds": 0.02, "expected": {"status": "cancelled", "stop_confirmed": true, "error_code": "action_cancelled", "motion_blocked": false, "feedback_class": "variable"}},
+    {"id": "cancel-unconfirmed", "fault": "cancel_unconfirmed", "operation": "cancel", "goal": {"x": 1, "y": 0, "yaw": 0}, "travel_seconds": 0.5, "action_timeout_seconds": 2, "cancel_after_seconds": 0.02, "expected": {"status": "indeterminate", "stop_confirmed": false, "error_code": "cancel_confirmation_timeout", "motion_blocked": true, "feedback_class": "variable"}},
+    {"id": "action-timeout", "fault": "success", "operation": "navigate", "goal": {"x": 1, "y": 0, "yaw": 0}, "travel_seconds": 1.2, "action_timeout_seconds": 1, "expected": {"status": "cancelled", "stop_confirmed": true, "error_code": "action_timeout", "motion_blocked": false, "feedback_class": "normal"}}
+  ]
+}

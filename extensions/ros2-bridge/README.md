@@ -58,7 +58,8 @@ AIGC_LITE_ROS2_BACKEND=simulator
 AIGC_LITE_ROS2_ROBOT_ID=sim-1
 AIGC_LITE_ROS2_MAP_ID=demo-map
 AIGC_LITE_ROS2_SIM_TRAVEL_SECONDS=0.2
-# success | failure | indeterminate
+# success | failure | indeterminate | goal_rejected | feedback_stall
+# transport_loss | localization_loss | cancel_unconfirmed
 AIGC_LITE_ROS2_SIM_OUTCOME=success
 # Optional for loopback simulator; required for Nav2 or non-loopback binding.
 AIGC_LITE_ROS2_API_KEY=replace-with-a-long-random-secret
@@ -130,24 +131,55 @@ elevation, cancellation, idempotency, and receipt contracts. It does not claim
 live Nav2, Gazebo, DDS, or hardware validation; those require a sourced ROS
 graph and become a separate integration job.
 
-## Minimum credible autonomy acceptance loop (not yet completed)
+## Deterministic simulator acceptance loop
 
-A Nav2 provider call alone is not robotics validation. The next integration
-milestone is a fixed simulation scenario with a frozen map, initial pose,
-goal tolerance, robot/software versions, and a task success predicate. Run a
-baseline and inject at least goal rejection, delayed feedback, transport loss,
-cancel timeout, and localization degradation. For each trial, capture the ROS
-goal ID, feedback/pose timeline, timeout and cancellation decisions, stop
-confirmation (or explicit `indeterminate`), and matching aigc-lite
-Run/Step/ActionReceipt IDs. A runner should replay the scenario under the same
-seed/config and produce a machine-readable report with success rate, failure
-taxonomy, latency distribution, and unresolved-stop count. The report must
-distinguish simulator assertions from a real Nav2/Gazebo graph and never treat
-an unconfirmed stop as success or permission for another motion.
+The optional package ships a fixed, bounded nine-trial navigation scenario.
+It covers baseline arrival, goal rejection, navigation failure, sparse
+feedback, transport loss, localization loss, confirmed and unconfirmed cancel,
+and action timeout. The scenario freezes map identity, initial/goal poses,
+arrival tolerance, seed, injected fault, expected receipt, and safety
+assertions. The seed is reserved for future stochastic backends; v1's
+simulator does not use randomness. This evaluation does not require ROS 2:
 
-This remains an acceptance target, not a claim that the current simulator or
-unit tests measure physical stop distance or hardware safety. Device-side
-e-stop and protective interlocks remain outside this bridge.
+```bash
+aigc-lite-ros2-eval run --output navigation-report.json
+aigc-lite-ros2-eval replay \
+  --report navigation-report.json --output navigation-replay.json
+```
+
+`run --scenario path/to/scenario.json` selects a different versioned scenario;
+without it, the installed wheel's `navigation_v1.json` is used.
+
+The runner refuses to overwrite either output and exits nonzero on a failed
+trial contract or replay mismatch. The report contains a portable evaluation
+Run ID, ordered Step traces, action receipts, before/after observations,
+feedback, stop confirmation, failure taxonomy, success/contract rates, latency
+distribution, package/backend versions, and SHA-256 scenario/report/replay
+digests. The replay compares deterministic behavior and runtime version, not
+UUIDs or wall-clock latency. Digests are integrity checks, not signatures or
+proof of the report author's identity. Keep these
+generated JSON files as runtime evidence; do not commit them.
+
+The version fields do not prove the exact source tree or installed dependency
+bytes; that requires a locked environment and independently retained build
+provenance.
+
+In this fault matrix only the baseline and sparse-feedback trials are expected
+to reach the goal: task success is 2/9, while all nine safety/behavior
+contracts should pass. A failed physical task is not a failed evaluation when
+the injected fault is handled as specified.
+
+An `indeterminate` stop keeps the simulator motion slot occupied. A second
+goal must fail with `robot_busy` until a simulator-only operator control
+confirms stop; that control is deliberately absent from MCP. In the normal
+outbound MCP path, aigc-lite's existing Tool Catalog records tool invocations
+as Run/Step entries. The standalone evaluator's portable Run/Step trace is not
+automatically imported into the central workspace ledger.
+
+This is **simulator acceptance**, not a Nav2/Gazebo or real-robot acceptance
+claim. A separate sourced ROS graph is still needed to measure goal IDs,
+feedback/TF trajectories, stop distance, fault injection and recovery under
+Nav2. Hardware e-stop and protective interlocks remain outside this bridge.
 
 ## Safety boundary
 

@@ -41,17 +41,27 @@ class SimulatorBackend:
         map_id: str = "default-map",
         travel_seconds: float = 0.2,
         outcome: str = "success",
+        initial_pose: Pose2D | None = None,
     ) -> None:
         if travel_seconds <= 0:
             raise ValueError("travel_seconds must be positive")
-        if outcome not in {"success", "failure", "indeterminate"}:
+        if outcome not in {
+            "success",
+            "failure",
+            "indeterminate",
+            "goal_rejected",
+            "feedback_stall",
+            "transport_loss",
+            "localization_loss",
+            "cancel_unconfirmed",
+        }:
             raise ValueError("invalid simulator outcome")
         self.robot_id = robot_id
         self.map_id = map_id
         self.travel_seconds = travel_seconds
         self.outcome = outcome
         self.environment = ExecutionEnvironment.SIMULATION
-        self._pose = Pose2D(0.0, 0.0, 0.0)
+        self._pose = initial_pose or Pose2D(0.0, 0.0, 0.0, frame_id=map_id)
         self._navigation_status = "idle"
         self._emergency_stop_engaged = False
         self._localized = True
@@ -182,6 +192,16 @@ class SimulatorBackend:
         deadline = asyncio.get_running_loop().time() + request.action_timeout_seconds
         distance = hypot(request.goal.x - start.x, request.goal.y - start.y)
 
+        if self.outcome == "goal_rejected":
+            return await self._finish(
+                active,
+                status=PhysicalActionStatus.FAILED,
+                started_at=started_at,
+                stop_confirmed=True,
+                error_code="navigation_goal_rejected",
+                error_message="The simulator rejected the navigation goal before motion.",
+            )
+
         for index in range(1, steps + 1):
             remaining_time = deadline - asyncio.get_running_loop().time()
             if remaining_time <= 0:
@@ -208,6 +228,22 @@ class SimulatorBackend:
                     error_message="The simulator confirmed that motion stopped.",
                     started_at=started_at,
                 )
+            if self.outcome in {"transport_loss", "localization_loss"} and index == 5:
+                if self.outcome == "localization_loss":
+                    async with self._lock:
+                        self._localized = False
+                return await self._finish(
+                    active,
+                    status=PhysicalActionStatus.INDETERMINATE,
+                    started_at=started_at,
+                    stop_confirmed=False,
+                    error_code=(
+                        "transport_lost"
+                        if self.outcome == "transport_loss"
+                        else "localization_lost"
+                    ),
+                    error_message="The simulator cannot confirm that physical motion stopped.",
+                )
             progress = index / steps
             pose = Pose2D(
                 x=start.x + (request.goal.x - start.x) * progress,
@@ -221,7 +257,8 @@ class SimulatorBackend:
                 progress=progress,
                 distance_remaining=max(0.0, distance * (1.0 - progress)),
             )
-            active.feedback.append(feedback)
+            if self.outcome != "feedback_stall" or index <= 2:
+                active.feedback.append(feedback)
             async with self._lock:
                 if self._active is active:
                     self._pose = pose
@@ -259,6 +296,15 @@ class SimulatorBackend:
         error_message: str,
         started_at: str | None = None,
     ) -> PhysicalActionReceipt:
+        if self.outcome == "cancel_unconfirmed":
+            return await self._finish(
+                active,
+                status=PhysicalActionStatus.INDETERMINATE,
+                started_at=started_at or active.request.requested_at,
+                stop_confirmed=False,
+                error_code="cancel_confirmation_timeout",
+                error_message="Cancellation was requested but the simulator did not confirm stop.",
+            )
         return await self._finish(
             active,
             status=PhysicalActionStatus.CANCELLED,
@@ -281,7 +327,7 @@ class SimulatorBackend:
         async with self._lock:
             if active.result.done():
                 return active.result.result()
-            if self._active is active:
+            if self._active is active and stop_confirmed:
                 self._active = None
             self._navigation_status = (
                 "idle"
@@ -315,6 +361,37 @@ class SimulatorBackend:
             self._latest = receipt
             active.result.set_result(receipt)
             return receipt
+
+    async def confirm_stopped(self, action_id: str) -> PhysicalActionReceipt:
+        """Simulator-only operator reconciliation; never exposed as an MCP capability."""
+
+        async with self._lock:
+            current = self._receipts.get(action_id)
+            if (
+                self._active is None
+                or self._active.action_id != action_id
+                or current is None
+                or current.status is not PhysicalActionStatus.INDETERMINATE
+                or current.stop_confirmed is not False
+            ):
+                raise RobotBridgeError(
+                    "reconciliation_not_applicable", "No indeterminate action owns the motion slot."
+                )
+            self._active = None
+            self._navigation_status = "idle"
+            updated = replace(
+                current,
+                status=PhysicalActionStatus.CANCELLED,
+                stop_confirmed=True,
+                completed_at=utc_now(),
+                observation_after=self._state_unlocked().as_dict(),
+                error_code="simulator_operator_stop_confirmed",
+                error_message="A simulator-only operator control confirmed stop.",
+                metadata={**current.metadata, "reconciled_by": "simulator_operator_control"},
+            )
+            self._receipts[action_id] = updated
+            self._latest = updated
+            return updated
 
     async def cancel_action(
         self,

@@ -145,6 +145,37 @@ def test_simulator_preserves_indeterminate_terminal_state() -> None:
     assert result.payload["error"]["code"] == "robot_state_indeterminate"
 
 
+def test_indeterminate_simulator_motion_blocks_until_explicit_reconciliation() -> None:
+    async def run():
+        backend = SimulatorBackend(travel_seconds=0.01, outcome="indeterminate")
+        service = RobotCapabilityService(backend)
+        first = await service.invoke(
+            "robot_navigate_to",
+            {"idempotency_key": "unknown-motion-001", "x": 1, "y": 0, "yaw": 0},
+        )
+        blocked = await service.invoke(
+            "robot_navigate_to",
+            {"idempotency_key": "second-motion-001", "x": 2, "y": 0, "yaw": 0},
+        )
+        uncertain_state = await backend.get_state()
+        reconciled = await backend.confirm_stopped(first.payload["action_id"])
+        backend.outcome = "success"
+        resumed = await service.invoke(
+            "robot_navigate_to",
+            {"idempotency_key": "second-motion-001", "x": 2, "y": 0, "yaw": 0},
+        )
+        return first, blocked, uncertain_state, reconciled, resumed
+
+    first, blocked, uncertain_state, reconciled, resumed = asyncio.run(run())
+    assert first.payload["stop_confirmed"] is False
+    assert blocked.failed and blocked.payload["error"]["code"] == "robot_busy"
+    assert uncertain_state.navigation_status == "unknown"
+    assert uncertain_state.active_action_id == first.payload["action_id"]
+    assert reconciled.stop_confirmed is True
+    assert reconciled.metadata["reconciled_by"] == "simulator_operator_control"
+    assert resumed.payload["status"] == "succeeded"
+
+
 def test_bridge_projects_policy_through_remote_mcp_catalog() -> None:
     backend = SimulatorBackend(robot_id="sim-mcp", travel_seconds=0.01)
     settings = BridgeSettings(robot_id="sim-mcp", api_key="bridge-secret")
@@ -248,10 +279,7 @@ def test_bridge_projects_policy_through_remote_mcp_catalog() -> None:
     assert consumed == [("robot-operator-a", "robot_navigate_to")]
     assert result.metadata["authorization"]["grant_id"] == "grant-robot-1"
     assert result.metadata["authorization"]["status"] == "consumed"
-    assert (
-        result.metadata["authorization"]["target"]
-        == "provider:robot/robot:sim-mcp"
-    )
+    assert result.metadata["authorization"]["target"] == "provider:robot/robot:sim-mcp"
     assert json.loads(result.content)["status"] == "succeeded"
     assert result.metadata["extensions"]["capability"]["physical_risk"] == "high"
     assert result.artifacts[0].metadata["mcp_content_type"] == "structured_content"

@@ -46,14 +46,25 @@ class BridgeSettings:
         if backend not in {"simulator", "nav2"}:
             raise RuntimeError("AIGC_LITE_ROS2_BACKEND must be simulator or nav2")
         outcome = os.getenv("AIGC_LITE_ROS2_SIM_OUTCOME", "success").strip().lower()
-        if outcome not in {"success", "failure", "indeterminate"}:
-            raise RuntimeError(
-                "AIGC_LITE_ROS2_SIM_OUTCOME must be success, failure, or indeterminate"
+        if outcome not in {
+            "success",
+            "failure",
+            "indeterminate",
+            "goal_rejected",
+            "feedback_stall",
+            "transport_loss",
+            "localization_loss",
+            "cancel_unconfirmed",
+        }:
+            raise RuntimeError("AIGC_LITE_ROS2_SIM_OUTCOME is not a supported simulator fault")
+        environment_value = (
+            os.getenv(
+                "AIGC_LITE_ROS2_ENVIRONMENT",
+                "simulation" if backend == "simulator" else "hardware",
             )
-        environment_value = os.getenv(
-            "AIGC_LITE_ROS2_ENVIRONMENT",
-            "simulation" if backend == "simulator" else "hardware",
-        ).strip().lower()
+            .strip()
+            .lower()
+        )
         try:
             environment = ExecutionEnvironment(environment_value)
         except ValueError as exc:
