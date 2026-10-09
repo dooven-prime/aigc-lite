@@ -93,6 +93,9 @@ class _Nav2Action:
     provider_action_id: str
     started_at: str
     feedback: list[ActionFeedback] = field(default_factory=list)
+    cancel_reason: str | None = None
+    cancel_message: str | None = None
+    cancel_requested_at: str | None = None
 
 
 @dataclass(slots=True)
@@ -301,9 +304,7 @@ class Nav2Backend:
                 del feedback_values[:-32]
 
         try:
-            goal_future = self._action_client.send_goal_async(
-                goal, feedback_callback=on_feedback
-            )
+            goal_future = self._action_client.send_goal_async(goal, feedback_callback=on_feedback)
         except BaseException:
             async with self._lock:
                 self._dispatching = False
@@ -469,8 +470,8 @@ class Nav2Backend:
             stop_confirmed = True
         elif result.status == goal_status.STATUS_CANCELED:
             status = PhysicalActionStatus.CANCELLED
-            error_code = "action_cancelled"
-            error_message = "Nav2 confirmed action cancellation."
+            error_code = active.cancel_reason or "action_cancelled"
+            error_message = active.cancel_message or "Nav2 confirmed action cancellation."
             stop_confirmed = True
         elif result.status == goal_status.STATUS_ABORTED:
             status = PhysicalActionStatus.FAILED
@@ -499,6 +500,10 @@ class Nav2Backend:
         error_message: str,
         timeout_seconds: float,
     ) -> PhysicalActionReceipt:
+        if active.cancel_requested_at is None:
+            active.cancel_reason = error_code
+            active.cancel_message = error_message
+            active.cancel_requested_at = utc_now()
         try:
             await _await_ros_future(active.goal_handle.cancel_goal_async(), timeout=timeout_seconds)
             return await asyncio.wait_for(self._wait_for_action(active), timeout_seconds)
@@ -524,9 +529,7 @@ class Nav2Backend:
             return receipt
 
     def _ensure_action_reconciliation(self, active: _Nav2Action) -> None:
-        self._track_reconciliation(
-            active.action_id, self._reconcile_active_result(active)
-        )
+        self._track_reconciliation(active.action_id, self._reconcile_active_result(active))
 
     async def _reconcile_active_result(self, active: _Nav2Action) -> None:
         try:
@@ -589,6 +592,7 @@ class Nav2Backend:
                 "action_name": self.action_name,
                 "map_id": self.map_id,
                 "nav2_status": nav2_status,
+                "cancel_requested_at": active.cancel_requested_at,
             },
         )
         async with self._lock:

@@ -20,6 +20,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff==0.16.5"]
 [project.scripts]
 aigc-lite-ros2 = "aigc_lite_ros2.__main__:main"
 aigc-lite-ros2-eval = "aigc_lite_ros2.eval_cli:main"
+aigc-lite-nav2-graph-eval = "aigc_lite_ros2.nav2_graph_eval:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

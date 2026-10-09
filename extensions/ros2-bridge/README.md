@@ -176,10 +176,63 @@ outbound MCP path, aigc-lite's existing Tool Catalog records tool invocations
 as Run/Step entries. The standalone evaluator's portable Run/Step trace is not
 automatically imported into the central workspace ledger.
 
-This is **simulator acceptance**, not a Nav2/Gazebo or real-robot acceptance
-claim. A separate sourced ROS graph is still needed to measure goal IDs,
-feedback/TF trajectories, stop distance, fault injection and recovery under
-Nav2. Hardware e-stop and protective interlocks remain outside this bridge.
+This is **deterministic backend acceptance**, not a Nav2/Gazebo or real-robot
+acceptance claim. The separate live-graph path below observes real Nav2 Action
+and TF behavior. Hardware e-stop and protective interlocks remain outside this
+bridge.
+
+## Narrow live Nav2/Gazebo graph acceptance
+
+`aigc-lite-nav2-graph-eval` is a separate, operator-run Jazzy/TurtleBot3
+integration path. It targets the packaged `tb3_sandbox` map and a fixed
+`(-2.0, -0.5)` start; it is **not** a generic ROS graph crawler or a hardware
+test. Use a fresh ROS domain that contains only the simulation launched for
+this evaluation. The evaluator requires `LOCALHOST` discovery and no
+`ROS_STATIC_PEERS`, in addition to a non-default domain; those settings narrow
+discovery but do not prove that no hardware is attached locally. In WSL Ubuntu,
+open two terminals:
+
+```bash
+# Terminal 1: start a fresh, headless graph.
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=87  # choose an unused non-default domain
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+ros2 launch nav2_bringup tb3_simulation_launch.py use_rviz:=False headless:=True
+```
+
+```bash
+# Terminal 2: run promptly after launch, before Nav2 bringup times out on TF.
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=87
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+export AIGC_LITE_ROS2_ENVIRONMENT=simulation
+cd /mnt/e/Documents/PycharmProjects/aigc-lite
+export PYTHONPATH="$PWD/extensions/ros2-bridge/src:$PYTHONPATH"
+python3 -m aigc_lite_ros2.nav2_graph_eval --domain-id 87 \
+  --output /tmp/nav2-preflight.json
+python3 -m aigc_lite_ros2.nav2_graph_eval --domain-id 87 \
+  --execute-motion --output /tmp/nav2-evaluation.json
+```
+
+Preflight observes an advancing `/clock`, the Gazebo bridge, `use_sim_time`
+on AMCL, navigator and robot-state publisher, active AMCL, then publishes the
+fixed initial pose. It requires `map→base_link` TF and an active
+`NavigateToPose` Action server before any goal. If Nav2 already aborted
+bringup before the initial pose arrived, restart the graph; a late initial pose
+does not retroactively make that run valid. The `--execute-motion` flag is
+required for the three motion trials: short arrival, explicit cancellation,
+and a one-second action timeout. A failed receipt or unconfirmed stop blocks
+later goals. Cancel and timeout additionally require two TF poses one second
+apart with no more than 0.25 m drift and no active action.
+
+The non-overwriting JSON report contains actual ROS goal IDs, action receipts,
+ordered Step traces, TF/clock/lifecycle observations, success/failure counts,
+and hashes of the map, Nav2 parameters, world, robot description, and bridge
+source files. Runtime reports belong outside Git. ROS Action cancellation and
+TF drift in simulation are evidence of this graph's behavior, not proof of
+hardware stopping distance, physical safety, or graph isolation; the operator
+must ensure no robot shares that ROS domain. The graph evaluator does not
+automatically import its report into aigc-lite's central Run ledger.
 
 ## Safety boundary
 

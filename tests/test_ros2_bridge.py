@@ -469,6 +469,40 @@ def test_nav2_indeterminate_stop_keeps_motion_slot_until_terminal_result() -> No
     assert backend._receipts[active.action_id] == terminal
 
 
+def test_nav2_cancelled_receipt_preserves_timeout_cause() -> None:
+    from aigc_lite_ros2 import nav2
+
+    async def run():
+        backend = _nav2_backend_for_reconciliation_test()
+        result_future = asyncio.get_running_loop().create_future()
+        result_future.set_result(SimpleNamespace(status=2))
+        request = NavigationRequest(
+            idempotency_key="timeout-cause-001",
+            goal=Pose2D(1, 2, 0),
+            action_timeout_seconds=1,
+        )
+        active = nav2._Nav2Action(
+            action_id="action-timeout-cause",
+            request=request,
+            before=await backend.get_state(),
+            goal_handle=SimpleNamespace(),
+            result_future=result_future,
+            provider_action_id="nav2-goal-timeout-cause",
+            started_at="2026-10-09T00:00:00+00:00",
+            cancel_reason="action_timeout",
+            cancel_message="Navigation timed out and cancellation was requested.",
+            cancel_requested_at="2026-10-09T00:00:01+00:00",
+        )
+        backend._active = active
+        return await backend._wait_for_action(active)
+
+    receipt = asyncio.run(run())
+    assert receipt.status is PhysicalActionStatus.CANCELLED
+    assert receipt.error_code == "action_timeout"
+    assert receipt.stop_confirmed is True
+    assert receipt.metadata["cancel_requested_at"] == "2026-10-09T00:00:01+00:00"
+
+
 def test_remote_tool_cannot_lower_provider_policy() -> None:
     backend = SimulatorBackend(travel_seconds=0.01)
     settings = BridgeSettings()
