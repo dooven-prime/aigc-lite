@@ -698,6 +698,10 @@ class PostgresQualificationRepositoryMixin:
         }
         with self.engine.begin() as connection:
             connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"{tenant_id}:{admission['claim_revision_id']}"},
+            )
+            connection.execute(
                 text(
                     "INSERT INTO knowledge_admission_receipts(id, tenant_id, "
                     "contract_version, qualification_receipt_id, qualification_receipt_hash, "

@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DatabaseError, IntegrityError
 
 from app.adapters.research_import import OpenAIMathReleaseAdapter
 from app.config import settings
@@ -35,7 +35,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
     repository = PostgresRepository(POSTGRES_URL)
     repository.init()
-    assert repository.schema_revision() == "0021_math_release_candidates"
+    assert repository.schema_revision() == "0022_verified_invalidations"
     workspace_id = f"contract-{uuid4()}"
     repository.create_tenant("PostgreSQL contract", workspace_id)
     context = RequestContext(request_id="postgres-contract", workspace_id=workspace_id)
@@ -292,6 +292,54 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
         )
         is None
     )
+    notice_id = str(uuid4())
+    repository.record_notice_verification(
+        workspace_id,
+        {
+            "id": notice_id,
+            "source_repository": "openai/math",
+            "source_commit": "a" * 40,
+            "source_path": "history.md",
+            "source_artifact_id": str(uuid4()),
+            "source_hash": "1" * 64,
+            "verification_method": "https_pinned_commit_sha256",
+            "verification_hash": "2" * 64,
+            "requested_by": "contract-admin",
+            "verified_at": now,
+        },
+    )
+    assert repository.get_notice_verification(workspace_id, notice_id) is not None
+    decision = repository.apply_invalidation_decision(
+        workspace_id,
+        {
+            "id": str(uuid4()),
+            "notice_verification_id": notice_id,
+            "target_claim_revision_id": claim_id,
+            "target_claim_semantic_hash": "a" * 64,
+            "target_receipt_id": receipt_id,
+            "target_attempt_id": None,
+            "target_scope": "receipt",
+            "reason_code": "RECEIPT_DEFECT",
+            "evidence_artifact_ids": [],
+            "evidence_artifact_hashes": {},
+            "policy_id": "invalidation.pinned-source-admin.v1",
+            "policy_hash": "3" * 64,
+            "rationale": "PostgreSQL atomic invalidation contract.",
+            "decided_by": "contract-admin",
+            "effect_state": "stale",
+            "decision_hash": "4" * 64,
+            "decided_at": now,
+        },
+    )
+    assert decision["affected_binding_ids"] == [admission["current_use_binding"]["id"]]
+    assert repository.get_current_use_binding(workspace_id, claim_id, "contract.profile.v1")[
+        "state"
+    ] == "stale"
+    with pytest.raises(DatabaseError, match="invalidated qualification"):
+        repository.upsert_current_use_binding(
+            workspace_id,
+            {**admission["current_use_binding"], "state": "current"},
+        )
     with engine.connect() as connection:
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         enforcement_columns = {
@@ -314,7 +362,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
                 )
             )
         }
-    assert revision == "0021_math_release_candidates"
+    assert revision == "0022_verified_invalidations"
     assert {
         "signature_verified",
         "enforcement_request_id",

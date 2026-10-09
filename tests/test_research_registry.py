@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 from app import database, main
 from app.core.artifacts import ArtifactDraft, ArtifactKind
 from app.core.contracts import RequestContext
-from app.core.errors import InvalidEvidenceError
-from app.core.qualification import ValidationModality
+from app.core.errors import InvalidEvidenceError, ResourceNotFoundError
+from app.core.qualification import MathTheoremCandidateDraft, ValidationModality
 from app.core.research import (
     ClaimPromotionStage,
     ClaimRelationDraft,
@@ -21,6 +21,7 @@ from app.core.research import (
 from app.repository import SQLiteRepository
 from app.services.artifacts import ArtifactService
 from app.services.evidence import EvidenceService
+from app.services.qualification import QualificationService
 from app.services.research_registry import ResearchRegistryService
 from app.tenancy import Tenant
 
@@ -95,6 +96,49 @@ def _service(repository: SQLiteRepository) -> ResearchRegistryService:
         artifact_service=ArtifactService(repository_provider=provider),
         evidence_service=EvidenceService(provider),
     )
+
+
+def test_read_only_explorer_spans_profiles_without_promoting_candidates(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "research-explorer.db")
+    repository.init()
+    provider = lambda: repository  # noqa: E731
+    service = _service(repository)
+    qualification = QualificationService(provider)
+    context = RequestContext(request_id="explorer", workspace_id="workspace-a")
+    frontier = service.import_frontier(
+        context, source_name="Frontier fixture", registry_bytes=_registry()
+    )
+    theorem = qualification.register_math_theorem(
+        context,
+        MathTheoremCandidateDraft(
+            claim_key="THM-EXPLORER",
+            name="Theorem fixture",
+            statement="For every integer n, n equals n.",
+            scope="Integers.",
+        ),
+    )["claim"]
+
+    assert [item["profile"] for item in service.dashboard(context)["cases"]] == [
+        "research.frontier"
+    ]
+    explorer = service.explorer(context)
+    assert {item["profile"] for item in explorer["cases"]} == {
+        "research.frontier", "math.theorem"
+    }
+    theorem_case = repository.get_research_case(
+        context.workspace_id, theorem["research_case_id"]
+    )
+    selected = service.explorer(context, research_case_id=theorem_case["id"])
+    assert [item["id"] for item in selected["claims"]] == [theorem["id"]]
+    assert selected["case"]["profile"] == "math.theorem"
+    assert selected["claims"][0]["semantic_hash"] == theorem["semantic_hash"]
+    assert qualification.claim_status(context, theorem["id"])["receipts"] == []
+    assert frontier["case"]["id"] != theorem_case["id"]
+
+    other = RequestContext(request_id="other", workspace_id="workspace-b")
+    assert service.explorer(other)["cases"] == []
+    with pytest.raises(ResourceNotFoundError):
+        service.explorer(other, research_case_id=theorem_case["id"])
 
 
 def test_frontier_import_builds_searchable_claim_registry(tmp_path) -> None:
@@ -400,6 +444,38 @@ def test_research_registry_http_import_is_workspace_scoped(tmp_path, monkeypatch
             assert imported.json()["statistics"]["claims"] == 2
             assert listed.status_code == 200
             assert listed.json()["case"]["name"] == "Frontier API"
+            importers = client.get("/api/research/importers")
+            assert importers.status_code == 200
+            assert {item["importer_id"] for item in importers.json()} == {
+                "frontier.registry", "openai.math"
+            }
+            assert client.get("/api/research/importers/openai.math/1").json()[
+                "target_surface"
+            ] == "catalogue_candidate_only"
+            assert client.get("/api/research/importers/openai.math/2").status_code == 422
+            theorem = main.qualification_service.register_math_theorem(
+                RequestContext("api-explorer", "workspace-a", "admin-a"),
+                MathTheoremCandidateDraft(
+                    claim_key="THM-API-EXPLORER",
+                    name="API theorem candidate",
+                    statement="For all integers n, n equals n.",
+                    scope="Integers.",
+                ),
+            )["claim"]
+            explorer = client.get("/api/research/explorer")
+            assert explorer.status_code == 200
+            assert {item["profile"] for item in explorer.json()["cases"]} == {
+                "research.frontier", "math.theorem"
+            }
+            exact = client.get(
+                "/api/research/explorer",
+                params={"research_case_id": theorem["research_case_id"]},
+            )
+            assert exact.status_code == 200
+            assert exact.json()["claims"][0]["id"] == theorem["id"]
+            assert client.get("/api/research-registry").json()["case"]["profile"] == (
+                "research.frontier"
+            )
             exported = client.get(
                 f"/api/research-registry/cases/{imported.json()['case']['id']}/assurance-bundle"
             )

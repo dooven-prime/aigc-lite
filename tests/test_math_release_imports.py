@@ -17,6 +17,7 @@ from app.profiles.math_theorem import PROFILE_ID
 from app.repository import SQLiteRepository
 from app.services.math_release_imports import MathReleaseImportService
 from app.services.qualification import QualificationService
+from app.services.research_registry import ResearchRegistryService
 from app.tenancy import Tenant, current_tenant
 
 COMMIT = "a" * 40
@@ -97,6 +98,7 @@ def test_candidate_import_is_atomic_idempotent_and_not_qualified(tmp_path) -> No
     assert QualificationService(lambda: repository).qualified_search(
         context, "Candidate theorem", PROFILE_ID
     ) == []
+    assert ResearchRegistryService(lambda: repository).explorer(context)["cases"] == []
     with repository._connect() as db:
         for table in (
             "research_claim_revisions",

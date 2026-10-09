@@ -151,3 +151,39 @@ AuthorizationGrant，workflow 的 `release_ready` 不再冒充 authority。验�
 `independent=true`、没有重叠依据的记录会显示为 `undetermined`，不会被升级成独立验证。
 导出前还会递归刷新每个 current-use binding；依赖资格已经换版或变 stale 时，Bundle 保存污染后的
 状态并阻断 authority，而不是把数据库中尚未惰性刷新的旧 `current` 投影成可执行权。
+
+## Verified Invalidation Decision
+
+撤回公告、失败审查和本地资格失效是不同的事件。第一版仅支持 `openai/math` 的固定 40 位
+commit 中的 `history.md`：workspace 管理员调用
+`POST /api/qualification/invalidation-notices/verify` 提交 `source_commit`，服务端从固定的
+`raw.githubusercontent.com/openai/math/{commit}/history.md` 获取内容，保存带 SHA-256 的 Artifact，
+并写入不可变的 `NoticeVerification`。这只核对 HTTPS 来源及该 commit 路径下的实际字节；**不验证
+Git tree 签名，也不自动判定公告中的数学结论与本地 ClaimRevision 对应**。
+
+第二次、独立的管理员请求 `POST /api/qualification/invalidation-decisions` 必须指定
+`notice_verification_id`、目标 `ClaimRevision` 与当前 semantic hash、作用范围、原因和理由：
+
+```json
+{
+  "notice_verification_id": "<verified-notice-id>",
+  "target_claim_revision_id": "<exact-old-revision-id>",
+  "target_claim_semantic_hash": "<64-hex-semantic-hash>",
+  "target_scope": "claim_revision",
+  "reason_code": "WITHDRAWN_UPSTREAM_CONSTRUCTION",
+  "rationale": "Pinned withdrawal notice names the invalid construction.",
+  "evidence_artifact_ids": []
+}
+```
+
+管理员也可将 `RECEIPT_DEFECT` 限定到一个 `receipt`，或将 `PROOF_INVALIDATED` 限定到
+`proof_attempt`，后者必须同时指定它实际被选用的 receipt 与 attempt。服务校验同一 workspace、
+revision semantic hash、receipt 归属、attempt 在冻结 closure 中且确为该 receipt 选中的证明。
+决定和当前 binding 的 `STALE`/`REVOKED` 变更在同一事务中提交；硬依赖通过资格读取递归变 stale，
+但仅更换引文不构成硬依赖。数据库还阻止已失效的 receipt/revision 重新绑定为 `CURRENT`。
+
+历史 QualificationReceipt 保持原判决不变；其是否可用于**现在**的知识检索或授权，应看 binding
+与 `GET /api/qualification/claims/{claim_id}/invalidation-decisions`。修订命题是新 revision，
+必须有新证据、新评估和显式 Knowledge Admission。普通 `FAILED` review 不能自行撤销资格。
+本版仍由管理员人工完成公告到精确 claim 的语义映射；没有自动解析整个撤稿目录，也没有把这两个
+新记录纳入离线 Assurance Bundle。

@@ -95,6 +95,14 @@ class RequestContext:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatAttachment:
+    """Small, untrusted text attached to one chat turn."""
+
+    name: str
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
 class ChatCommand:
     """Request to run the existing bounded chat/agent use case."""
 
@@ -103,6 +111,7 @@ class ChatCommand:
     requested_model: str | None = None
     session_id: str | None = None
     capability_set_id: str | None = None
+    attachments: tuple[ChatAttachment, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

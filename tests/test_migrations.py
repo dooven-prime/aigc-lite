@@ -63,7 +63,7 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "last_latency_ms",
         "last_tool_count",
     } <= columns
-    assert revision == "0021_math_release_candidates"
+    assert revision == "0022_verified_invalidations"
     assert {
         "artifacts",
         "citations",
@@ -89,6 +89,8 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "qualification_evaluations",
         "qualification_receipts",
         "knowledge_admission_receipts",
+        "notice_verifications",
+        "invalidation_decisions",
         "evidence_edges",
         "current_use_bindings",
         "authorization_grants",
@@ -194,7 +196,7 @@ def test_repository_repairs_unreleased_sqlite_revision_alias(tmp_path) -> None:
         revision = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-    assert revision == "0021_math_release_candidates"
+    assert revision == "0022_verified_invalidations"
 
 
 def test_knowledge_admission_migration_does_not_silently_grandfather_bindings(

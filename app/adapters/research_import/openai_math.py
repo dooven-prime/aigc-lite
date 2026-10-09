@@ -70,6 +70,13 @@ class OpenAIMathReleaseAdapter:
 
     importer_id = "openai.math"
     version = 1
+    display_name = "OpenAI mathematics catalogue"
+    description = "Import a pinned catalogue manifest without creating theorem claims."
+    source_format = "fixed-commit CONTENTS.md + lean/formalization.yaml"
+    target_surface = "catalogue_candidate_only"
+    preview_endpoint = "/api/research/math-release-imports/preview"
+    commit_endpoint = "/api/research/math-release-imports"
+    importer_contract = CONTRACT_VERSION
 
     def fetch(self, source_commit: str) -> tuple[bytes, bytes]:
         self._validate_commit(source_commit)

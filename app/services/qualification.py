@@ -146,7 +146,8 @@ class MathTheoremVerifier:
         kernel_attempts = [
             item
             for item in attempts
-            if item["payload"].get("validation_modality") == ValidationModality.KERNEL_CHECK.value
+            if not item["payload"].get("invalidated_by")
+            and item["payload"].get("validation_modality") == ValidationModality.KERNEL_CHECK.value
             and item["payload"].get("outcome") == "passed"
             and item["payload"].get("verifier_lineage", {}).get("runtime_derived") is True
             and str(
@@ -157,7 +158,8 @@ class MathTheoremVerifier:
         alignment_attempts = [
             item
             for item in attempts
-            if item["payload"].get("validation_modality") == ValidationModality.EXPERT_REVIEW.value
+            if not item["payload"].get("invalidated_by")
+            and item["payload"].get("validation_modality") == ValidationModality.EXPERT_REVIEW.value
             and item["payload"].get("outcome") == "passed"
             and not item["payload"].get("verifier_lineage", {}).get("model_route")
         ]
@@ -440,6 +442,7 @@ class MathProjectVerifier(MathTheoremVerifier):
             item
             for item in closure.nodes
             if item["node_type"] == "verification_attempt"
+            and not item["payload"].get("invalidated_by")
             and item["payload"].get("validation_modality") == ValidationModality.KERNEL_CHECK.value
             and item["payload"].get("verifier_lineage", {}).get("runtime_derived") is True
             and str(
@@ -481,6 +484,7 @@ class MathProjectVerifier(MathTheoremVerifier):
         source_attempts = [
             item for item in closure.nodes
             if item["node_type"] == "verification_attempt"
+            and not item["payload"].get("invalidated_by")
             and item["payload"].get("validation_modality") == ValidationModality.EXACT_REPLAY.value
             and item["payload"].get("outcome") == "passed"
             and item["payload"].get("verifier_lineage", {}).get("principal_id")
@@ -596,6 +600,7 @@ class MathProjectVerifier(MathTheoremVerifier):
             item
             for item in closure.nodes
             if item["node_type"] == "verification_attempt"
+            and not item["payload"].get("invalidated_by")
             and item["payload"].get("validation_modality") == ValidationModality.EXPERT_REVIEW.value
             and item["payload"].get("outcome") == "passed"
             and not item["payload"].get("verifier_lineage", {}).get("model_route")
@@ -708,6 +713,39 @@ class QualificationService:
         self._evidence = evidence_service or EvidenceService(repository_provider)
         self._registry = registry or create_default_verifier_registry()
         self._gate = QualificationGate(self._registry)
+
+    def claim_status(self, context: RequestContext, claim_id: str) -> dict:
+        """Read a revision's separate qualification and current-use histories.
+
+        Refreshing a binding applies existing dependency taint rules; it never
+        creates a qualification, admission, or authorization.
+        """
+        repository = self._repository_provider()
+        claim = repository.get_research_claim(context.workspace_id, claim_id)
+        if claim is None:
+            raise ResourceNotFoundError("research_claim", claim_id)
+        receipts = repository.list_qualification_receipts(context.workspace_id, claim_id)
+        evaluations = repository.list_qualification_evaluations(
+            context.workspace_id, claim_id
+        )
+        profiles = {item["profile_id"] for item in receipts}
+        profiles.update(item["profile_id"] for item in evaluations)
+        bindings = []
+        for profile_id in sorted(profiles):
+            binding = repository.get_current_use_binding(
+                context.workspace_id, claim_id, profile_id
+            )
+            if binding is not None:
+                bindings.append(self._refresh_binding(context, binding))
+        return {
+            "claim": claim,
+            "evaluations": evaluations,
+            "receipts": receipts,
+            "knowledge_admissions": repository.list_knowledge_admission_receipts(
+                context.workspace_id, claim_id
+            ),
+            "current_use_bindings": bindings,
+        }
 
     def list_profiles(self) -> list[dict[str, Any]]:
         return self._registry.list_profiles()
@@ -856,6 +894,22 @@ class QualificationService:
             raise ResourceNotFoundError("research_claim", claim_id)
         closure = self._build_closure(context, claim, profile_id)
         profile, decision = self._gate.evaluate(profile_id, closure)
+        claim_invalidations = [
+            item
+            for item in repository.list_invalidation_decisions(context.workspace_id, claim_id)
+            if item["target_scope"] == "claim_revision"
+        ]
+        if claim_invalidations:
+            decision = QualificationDecision(
+                verdict=QualificationVerdict.BLOCKED,
+                criteria=decision.criteria,
+                blockers=tuple(
+                    dict.fromkeys(
+                        (*decision.blockers, "claim_revision_invalidated")
+                    )
+                ),
+                evidence_vector=decision.evidence_vector,
+            )
         independence = self._independence_summary(closure)
         policy_hash = canonical_hash(
             {
@@ -1213,6 +1267,14 @@ class QualificationService:
                 )
             )
         attempts = repository.list_research_verification_attempts(context.workspace_id, claim["id"])
+        invalidated_attempts: dict[str, list[str]] = {}
+        for invalidation in repository.list_invalidation_decisions(
+            context.workspace_id, claim["id"]
+        ):
+            if invalidation["target_scope"] == "proof_attempt":
+                invalidated_attempts.setdefault(
+                    invalidation["target_attempt_id"], []
+                ).append(invalidation["id"])
         artifact_ids: set[str] = set()
         for attempt in attempts:
             artifact_ids.update(attempt.get("artifact_ids") or [])
@@ -1232,6 +1294,8 @@ class QualificationService:
                     "artifact_ids",
                 )
             }
+            if attempt["id"] in invalidated_attempts:
+                payload["invalidated_by"] = sorted(invalidated_attempts[attempt["id"]])
             nodes.append(
                 {
                     "node_type": "verification_attempt",
@@ -1401,6 +1465,14 @@ class QualificationService:
         repository = self._repository_provider()
         claim = repository.get_research_claim(context.workspace_id, receipt["claim_revision_id"])
         stale_reasons: list[str] = []
+        for invalidation in repository.list_invalidation_decisions(
+            context.workspace_id, receipt["claim_revision_id"]
+        ):
+            if (
+                invalidation["target_scope"] == "claim_revision"
+                or invalidation["target_receipt_id"] == receipt["id"]
+            ):
+                stale_reasons.append(f"invalidation_decision:{invalidation['id']}")
         if claim is None:
             stale_reasons.append("qualification_subject_missing")
         elif receipt["claim_semantic_hash"] != claim_semantic_hash(claim):

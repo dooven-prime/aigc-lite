@@ -10,6 +10,7 @@ from app import database, main, tenancy
 from app.core.contracts import ChatResult
 from app.ports.enforcement_repository import EnforcementRepository
 from app.ports.import_repository import ImportRepository
+from app.ports.invalidation_repository import InvalidationRepository
 from app.ports.qualification_repository import QualificationRepository
 from app.ports.research_repository import ResearchRepository
 from app.ports.review_repository import ReviewRepository
@@ -76,6 +77,10 @@ def test_current_http_surface_remains_available() -> None:
         "/api/enforcement/receipts/{receipt_id}/signature-verification",
         "/api/qualification/knowledge-admission-policies",
         "/api/qualification/knowledge-admissions",
+        "/api/qualification/invalidation-notices/verify",
+        "/api/qualification/invalidation-notices/{verification_id}",
+        "/api/qualification/invalidation-decisions",
+        "/api/qualification/claims/{claim_id}/invalidation-decisions",
         "/api/qualification/receipts/{receipt_id}/knowledge-admissions",
         "/mcp-legacy",
     } <= paths
@@ -96,6 +101,12 @@ def test_chat_capability_registry_is_exposed_as_read_only_metadata() -> None:
 
 
 def test_research_control_plane_is_owned_by_domain_router() -> None:
+    assert main.research_registry_service._frontier_adapter is (
+        main.research_import_registry.get("frontier.registry", 1)
+    )
+    assert main.math_release_import_service._adapter is (
+        main.research_import_registry.get("openai.math", 1)
+    )
     route_modules = {
         route.path: route.endpoint.__module__
         for route in main.research_router.routes
@@ -105,6 +116,9 @@ def test_research_control_plane_is_owned_by_domain_router() -> None:
         route_modules[path]
         for path in {
             "/api/research-registry",
+            "/api/research/explorer",
+            "/api/research/importers",
+            "/api/research/importers/{importer_id}/{version}",
             "/api/research-registry/import/frontier",
             "/api/decision-lab",
             "/api/qualification/math-theorems",
@@ -177,12 +191,14 @@ def test_execution_authority_evidence_is_owned_by_domain_router() -> None:
 def test_research_repository_domains_are_composed_into_compatibility_facade() -> None:
     assert ResearchRepository in Repository.__mro__
     assert QualificationRepository in Repository.__mro__
+    assert InvalidationRepository in Repository.__mro__
     assert ReviewRepository in Repository.__mro__
     assert ImportRepository in Repository.__mro__
     assert EnforcementRepository in Repository.__mro__
     domains = (
         (ResearchRepository, "app.repositories.research"),
         (QualificationRepository, "app.repositories.qualification"),
+        (InvalidationRepository, "app.repositories.invalidation"),
         (ReviewRepository, "app.repositories.review"),
         (ImportRepository, "app.repositories.conversation_imports"),
         (EnforcementRepository, "app.repositories.enforcement"),

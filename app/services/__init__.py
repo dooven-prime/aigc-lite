@@ -20,6 +20,7 @@ from .evidence import EvidenceService
 from .gateway import GatewayService
 from .http_poll import HTTPPollService
 from .memory import MemoryService
+from .research_import_registry import ResearchImportRegistry
 from .research_registry import ResearchRegistryService
 from .scheduler import SchedulerService
 from .task_runner import TaskRunner
@@ -45,6 +46,7 @@ __all__ = [
     "GatewayService",
     "HTTPPollService",
     "MemoryService",
+    "ResearchImportRegistry",
     "ResearchRegistryService",
     "SchedulerService",
     "TaskRunner",

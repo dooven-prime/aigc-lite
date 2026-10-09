@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -12,6 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..auth import current_admin_user
 from ..core.contracts import RequestContext
 from ..core.errors import InvalidEvidenceError
+from ..core.invalidation import (
+    InvalidationDecisionDraft,
+    InvalidationReason,
+    InvalidationScope,
+    NoticeVerificationDraft,
+)
 from ..core.kernel_verification import KernelBackendKind, KernelVerificationDraft
 from ..core.qualification import (
     AuthorizationGrantDraft,
@@ -32,8 +39,10 @@ from ..database import get_repository
 from ..services.assurance import AssuranceBundleService
 from ..services.decision_lab import DecisionLabService
 from ..services.evidence import EvidenceService
+from ..services.invalidation import InvalidationService
 from ..services.kernel_verification import KernelVerificationService
 from ..services.qualification import QualificationService
+from ..services.research_import_registry import ResearchImportRegistry
 from ..services.research_registry import ResearchRegistryService
 from ..services.verification_runner import VerificationRunner
 from ..tenancy import Tenant, current_tenant
@@ -125,6 +134,26 @@ class KnowledgeAdmissionRequest(BaseModel):
     rationale: str = Field(min_length=1, max_length=4_000)
 
 
+class NoticeVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+class InvalidationDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    notice_verification_id: str = Field(min_length=1, max_length=100)
+    target_claim_revision_id: str = Field(min_length=1, max_length=100)
+    target_claim_semantic_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target_scope: InvalidationScope
+    reason_code: InvalidationReason
+    rationale: str = Field(min_length=1, max_length=4_000)
+    target_receipt_id: str | None = Field(default=None, max_length=100)
+    target_attempt_id: str | None = Field(default=None, max_length=100)
+    evidence_artifact_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
 class KernelVerificationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -168,18 +197,27 @@ def create_research_router(
     decision_lab_service: DecisionLabService,
     evidence_service: EvidenceService,
     kernel_verification_service: KernelVerificationService,
+    invalidation_service: InvalidationService,
     qualification_service: QualificationService,
     research_registry_service: ResearchRegistryService,
     verification_runner: VerificationRunner,
     request_context_factory: RequestContextFactory,
+    import_registry: ResearchImportRegistry | None = None,
 ) -> APIRouter:
     """Build the research control plane router with explicit services."""
 
     router = APIRouter()
+    import_registry = import_registry or ResearchImportRegistry.builtins()
 
     def admin_context(http_request: Request, user: dict) -> RequestContext:
         return request_context_factory(
             http_request, Tenant(user["tenant_id"], user["tenant_id"])
+        )
+
+    def invalidation_context(http_request: Request, user: dict) -> RequestContext:
+        context = admin_context(http_request, user)
+        return replace(
+            context, scopes=context.scopes | {"qualification:invalidate"}
         )
 
     @router.get("/api/evidence/protocols")
@@ -215,6 +253,33 @@ def create_research_router(
             research_case_id=research_case_id,
             limit=limit,
         )
+
+    @router.get("/api/research/explorer")
+    async def research_explorer(
+        http_request: Request,
+        research_case_id: str | None = None,
+        limit: int = 2_000,
+        tenant: Tenant = Depends(current_tenant),
+    ) -> dict:
+        return research_registry_service.explorer(
+            request_context_factory(http_request, tenant),
+            research_case_id=research_case_id,
+            limit=max(1, min(limit, 2_000)),
+        )
+
+    @router.get("/api/research/importers")
+    async def research_importers(
+        _tenant: Tenant = Depends(current_tenant),
+    ) -> list[dict]:
+        return import_registry.list()
+
+    @router.get("/api/research/importers/{importer_id}/{version}")
+    async def research_importer(
+        importer_id: str,
+        version: int,
+        _tenant: Tenant = Depends(current_tenant),
+    ) -> dict:
+        return import_registry.describe(importer_id, version)
 
     @router.get("/api/qualification/profiles")
     async def qualification_profiles(
@@ -329,6 +394,89 @@ def create_research_router(
     ) -> dict:
         return qualification_service.get_receipt(
             request_context_factory(http_request, tenant), receipt_id
+        )
+
+    @router.get("/api/qualification/claims/{claim_id}/status")
+    async def qualification_claim_status(
+        claim_id: str,
+        http_request: Request,
+        tenant: Tenant = Depends(current_tenant),
+    ) -> dict:
+        return qualification_service.claim_status(
+            request_context_factory(http_request, tenant), claim_id
+        )
+
+    @router.post("/api/qualification/invalidation-notices/verify", status_code=201)
+    async def verify_invalidation_notice(
+        payload: NoticeVerificationRequest,
+        http_request: Request,
+        user: dict = Depends(current_admin_user),
+    ) -> dict:
+        result = invalidation_service.verify_notice(
+            invalidation_context(http_request, user),
+            NoticeVerificationDraft(source_commit=payload.source_commit),
+        )
+        get_repository().write_audit(
+            user["tenant_id"],
+            "qualification.invalidation_notice.verify",
+            "/api/qualification/invalidation-notices/verify",
+            {"verification_id": result["id"], "source_commit": payload.source_commit},
+            user_id=user["id"],
+        )
+        return result
+
+    @router.post("/api/qualification/invalidation-decisions", status_code=201)
+    async def decide_invalidation(
+        payload: InvalidationDecisionRequest,
+        http_request: Request,
+        user: dict = Depends(current_admin_user),
+    ) -> dict:
+        result = invalidation_service.decide(
+            invalidation_context(http_request, user),
+            InvalidationDecisionDraft(
+                notice_verification_id=payload.notice_verification_id,
+                target_claim_revision_id=payload.target_claim_revision_id,
+                target_claim_semantic_hash=payload.target_claim_semantic_hash,
+                target_scope=payload.target_scope,
+                reason_code=payload.reason_code,
+                rationale=payload.rationale,
+                evidence_artifact_ids=tuple(payload.evidence_artifact_ids),
+                target_receipt_id=payload.target_receipt_id,
+                target_attempt_id=payload.target_attempt_id,
+            ),
+        )
+        get_repository().write_audit(
+            user["tenant_id"],
+            "qualification.invalidation_decision.create",
+            "/api/qualification/invalidation-decisions",
+            {
+                "decision_id": result["id"],
+                "target_claim_revision_id": result["target_claim_revision_id"],
+                "target_scope": result["target_scope"],
+                "affected_binding_ids": result["affected_binding_ids"],
+            },
+            user_id=user["id"],
+        )
+        return result
+
+    @router.get("/api/qualification/invalidation-notices/{verification_id}")
+    async def get_invalidation_notice(
+        verification_id: str,
+        http_request: Request,
+        tenant: Tenant = Depends(current_tenant),
+    ) -> dict:
+        return invalidation_service.get_notice(
+            request_context_factory(http_request, tenant), verification_id
+        )
+
+    @router.get("/api/qualification/claims/{claim_id}/invalidation-decisions")
+    async def list_invalidation_decisions(
+        claim_id: str,
+        http_request: Request,
+        tenant: Tenant = Depends(current_tenant),
+    ) -> list[dict]:
+        return invalidation_service.list_decisions(
+            request_context_factory(http_request, tenant), claim_id
         )
 
     @router.get("/api/qualification/knowledge-admission-policies")

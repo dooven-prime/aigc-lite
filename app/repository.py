@@ -18,6 +18,7 @@ from .core.credentials import (
 )
 from .ports.enforcement_repository import EnforcementRepository
 from .ports.import_repository import ImportRepository
+from .ports.invalidation_repository import InvalidationRepository
 from .ports.math_release_repository import MathReleaseRepository
 from .ports.qualification_repository import QualificationRepository
 from .ports.research_repository import ResearchRepository
@@ -32,6 +33,10 @@ from .repositories.conversation_imports import (
 from .repositories.enforcement import (
     PostgresEnforcementRepositoryMixin,
     SQLiteEnforcementRepositoryMixin,
+)
+from .repositories.invalidation import (
+    PostgresInvalidationRepositoryMixin,
+    SQLiteInvalidationRepositoryMixin,
 )
 from .repositories.math_release import (
     PostgresMathReleaseRepositoryMixin,
@@ -57,6 +62,7 @@ if TYPE_CHECKING:
 class Repository(
     ResearchRepository,
     QualificationRepository,
+    InvalidationRepository,
     ReviewRepository,
     ImportRepository,
     MathReleaseRepository,
@@ -388,6 +394,7 @@ class SQLiteRepository(
     SQLiteImportRepositoryMixin,
     SQLiteMathReleaseRepositoryMixin,
     SQLiteEnforcementRepositoryMixin,
+    SQLiteInvalidationRepositoryMixin,
 ):
     """SQLite repository using short-lived connections for safe web requests."""
 
@@ -1606,6 +1613,7 @@ class PostgresRepository(
     PostgresImportRepositoryMixin,
     PostgresMathReleaseRepositoryMixin,
     PostgresEnforcementRepositoryMixin,
+    PostgresInvalidationRepositoryMixin,
 ):
     """PostgreSQL adapter with the same public methods as SQLiteRepository.
 

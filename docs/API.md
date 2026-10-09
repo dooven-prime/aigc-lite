@@ -27,6 +27,8 @@ configuration, and deployment constraints are documented separately in
 - `GET /api/decision-lab`：查询 NanoJev 决策实验、概率分布与人工复核投影
 - `POST /api/decision-lab/import/nanojev`：管理员上传并验证冻结的 NanoJev bundle
 - `GET /api/research-registry`：查询 AI Frontier 研究案例、Claim Revision 与 Source Closure
+- `GET /api/research/explorer?research_case_id=...`：跨 profile 只读浏览已冻结的 research case、ClaimRevision 和证据轨迹；不包含仅存储在候选目录中的数学 family
+- `GET /api/research/importers` 与 `GET /api/research/importers/{importer_id}/{version}`：列出版本化导入适配器的格式、目标存储层和专用入口；不提供万能提交接口
 - `GET /api/research-registry/claims/{claim_id}`：读取单条研究主张及其来源定位和 blocker
 - `POST /api/research-registry/claims/{claim_id}/relations`：管理员登记 supports/refutes/depends_on/qualifies 类型化关系；`.../relations/{relation_id}/withdraw` 保留理由地撤回关系
 - `POST /api/research-registry/claims/{claim_id}/verification-attempts`：管理员登记摘要与 Artifact 绑定的验证尝试及 Receipt
@@ -39,7 +41,12 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/qualification/math-theorems`：冻结 theorem 候选；只完成存储准入，不授予资格或权限
 - `POST /api/qualification/claims/{claim_id}/kernel-verifications`：用服务端配置的 Lean/Coq 可执行文件验证冻结 proof，并写入 Run/Step/Artifact/Receipt/Attempt
 - `POST /api/qualification/claims/{claim_id}/evaluations`：按指定 Profile 运行确定性 Qualification Gate
+- `GET /api/qualification/claims/{claim_id}/status`：按精确 revision 查看评估、历史 Receipt、知识准入和当前绑定；读取时会按现有规则刷新依赖失效状态，不会创建资格或授权
 - `GET /api/qualification/receipts/{receipt_id}`：读取不可变、可携带的资格证书
+- `POST /api/qualification/invalidation-notices/verify`：管理员从固定 OpenAI math commit 获取 `history.md`，校验并保存来源字节；不改变资格
+- `GET /api/qualification/invalidation-notices/{verification_id}`：读取已核对的来源记录
+- `POST /api/qualification/invalidation-decisions`：管理员对精确 revision/receipt/attempt 作版本化本地失效决定，原子更新受影响的 current binding
+- `GET /api/qualification/claims/{claim_id}/invalidation-decisions`：追查旧 receipt 当前失效的决定与证据
 - `GET /api/qualification/knowledge-admission-policies`：列出服务端持有的知识准入 policy
 - `POST /api/qualification/receipts/{receipt_id}/knowledge-admissions`：管理员显式准入一张仍有效的资格证书，并原子更新 current knowledge binding
 - `GET /api/qualification/knowledge-admissions`：读取不可变知识准入历史，可按 `claim_id` 过滤
@@ -103,6 +110,15 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 `POST /api/chat` 与 `/api/chat/stream` 可传 `capability_set_id`。省略时固定选择
 `chat.read-only.v1`：调用方即使是 workspace admin，传给模型 Tool Catalog 的 scope 也会被清空，
 且只保留 low-risk、read-only、non-destructive、closed-world 的 local/workspace tool。
+
+两种 Chat 请求均可附带至多 4 个 `.txt`/`.md` UTF-8 文本附件：
+`attachments: [{"name":"notes.md","content":"..."}]`。单文件上限 16 KiB，总计
+32 KiB。附件只在本轮作为不可信输入使用，并保存为关联该 Run、Session 的 candidate-only
+Artifact；不会调用 `/api/knowledge/upload`，不会自动进入知识索引或取得 qualification。
+`/api/chat/stream` 以 POST SSE 返回增量 `{"content":"..."}`，头部提供
+`X-Run-Id` 和 `X-Session-Id`；取消使用 `POST /api/runs/{run_id}/cancel`。
+当前流式端点是模型增量输出，不执行同步 `/api/chat` 的 Agent Tool Catalog
+调用循环；前端的流式聊天因此不是工具调用模式。两条路径的执行能力不可等同。
 
 `chat.delegated.v1` 必须由拥有 `tools:write` 的已认证调用方显式选择；它不会因为 prompt、RAG
 文档或模型输出而自动启用。该集合只是允许工具进入候选面：每个远程 MCP tool，以及任何写入、

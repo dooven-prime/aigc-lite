@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .adapters.kernel_verification import KernelVerifierRegistry
+from .adapters.research_import import FrontierRegistryAdapter, OpenAIMathReleaseAdapter
 from .adapters.scheduling import TimeWheelScheduler
 from .api.configuration import create_configuration_router
 from .api.conversation_imports import create_conversation_import_router
@@ -36,7 +37,7 @@ from .auth import (
     verify_password,
 )
 from .config import settings
-from .core.contracts import ChatCommand, RequestContext
+from .core.contracts import ChatAttachment, ChatCommand, RequestContext
 from .core.errors import (
     AgentLimitError,
     AgentWallTimeLimitError,
@@ -98,12 +99,14 @@ from .services.enforcer import (
 from .services.evidence import EvidenceService
 from .services.gateway import GatewayService
 from .services.http_poll import HTTPPollService
+from .services.invalidation import InvalidationService
 from .services.kernel_verification import KernelVerificationService
 from .services.math_release_imports import MathReleaseImportService
 from .services.mcp_probe import MCPProbeService
 from .services.memory import MemoryService
 from .services.qualification import QualificationService
 from .services.readiness import ReadinessService
+from .services.research_import_registry import ResearchImportRegistry
 from .services.research_registry import ResearchRegistryService
 from .services.reviews import ReviewService
 from .services.scheduler import SchedulerService
@@ -159,15 +162,22 @@ evidence_service = EvidenceService()
 decision_lab_service = DecisionLabService(
     artifact_service=artifact_service, evidence_service=evidence_service
 )
+frontier_import_adapter = FrontierRegistryAdapter()
+math_release_adapter = OpenAIMathReleaseAdapter()
+research_import_registry = ResearchImportRegistry(
+    [frontier_import_adapter, math_release_adapter]
+)
 research_registry_service = ResearchRegistryService(
-    artifact_service=artifact_service, evidence_service=evidence_service
+    artifact_service=artifact_service,
+    evidence_service=evidence_service,
+    frontier_adapter=frontier_import_adapter,
 )
 review_service = ReviewService()
 conversation_import_registry = ConversationImportRegistry.builtins()
 conversation_import_service = ConversationImportService(
     registry=conversation_import_registry
 )
-math_release_import_service = MathReleaseImportService()
+math_release_import_service = MathReleaseImportService(adapter=math_release_adapter)
 kernel_verifier_registry = KernelVerifierRegistry.from_config(
     lean_executable=settings.lean_executable,
     coq_executable=settings.coq_executable,
@@ -185,6 +195,7 @@ assurance_bundle_service = AssuranceBundleService()
 qualification_service = QualificationService(
     artifact_service=artifact_service, evidence_service=evidence_service
 )
+invalidation_service = InvalidationService(artifact_service=artifact_service)
 verification_runner = VerificationRunner(
     gateway_service=gateway_service,
     research_registry_service=research_registry_service,
@@ -432,6 +443,11 @@ async def audit_requests(request: Request, call_next):
     return response
 
 
+class ChatAttachmentRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    content: str = Field(min_length=1, max_length=65536)
+
+
 class ChatRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=100_000)
     system: str = Field(default="You are a helpful assistant.", max_length=20_000)
@@ -443,6 +459,7 @@ class ChatRequest(BaseModel):
         max_length=100,
         pattern=r"^[a-z][a-z0-9_.-]*$",
     )
+    attachments: list[ChatAttachmentRequest] = Field(default_factory=list, max_length=4)
 
 
 class SessionRequest(BaseModel):
@@ -608,6 +625,10 @@ async def chat(
             requested_model=request.model,
             session_id=request.session_id,
             capability_set_id=request.capability_set_id,
+            attachments=tuple(
+                ChatAttachment(name=item.name, content=item.content)
+                for item in request.attachments
+            ),
         ),
         request_context(http_request, tenant),
     )
@@ -631,6 +652,10 @@ async def chat_stream(
             requested_model=request.model,
             session_id=request.session_id,
             capability_set_id=request.capability_set_id,
+            attachments=tuple(
+                ChatAttachment(name=item.name, content=item.content)
+                for item in request.attachments
+            ),
         ),
         request_context(http_request, tenant),
     )
@@ -873,8 +898,10 @@ research_router = create_research_router(
     decision_lab_service=decision_lab_service,
     evidence_service=evidence_service,
     kernel_verification_service=kernel_verification_service,
+    invalidation_service=invalidation_service,
     qualification_service=qualification_service,
     research_registry_service=research_registry_service,
+    import_registry=research_import_registry,
     verification_runner=verification_runner,
     request_context_factory=request_context,
 )

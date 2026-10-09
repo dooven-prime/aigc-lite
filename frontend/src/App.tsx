@@ -27,7 +27,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Send,
   Settings,
   Shield,
   Upload,
@@ -36,11 +35,14 @@ import {
   XCircle,
 } from "lucide-react";
 import { Models } from "./views/Models";
+import { QualificationFlow } from "./views/QualificationFlow";
+import { ResearchImports } from "./views/ResearchImports";
+import { Chat } from "./views/Chat";
 
 type Session = { id: string; title: string; messages?: Message[] };
 type Message = { role: string; content: string };
 type User = { id: string; tenant_id: string; email: string; name: string; role: string };
-type Panel = "chat" | "search" | "runs" | "decisions" | "research" | "knowledge" | "admin" | "models";
+type Panel = "chat" | "search" | "runs" | "decisions" | "research" | "imports" | "qualification" | "knowledge" | "admin" | "models";
 type Api = (path: string, init?: RequestInit) => Promise<any>;
 
 type SearchKind = "message" | "document" | "run_step" | "artifact" | "citation" | "decision_case" | "research_claim";
@@ -199,10 +201,11 @@ export function App() {
   const [panel, setPanel] = useState<Panel>("chat");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [session, setSession] = useState<Session | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [chatGeneration, setChatGeneration] = useState(0);
   const [runJump, setRunJump] = useState<RunJump | null>(null);
   const [decisionJump, setDecisionJump] = useState<DecisionJump | null>(null);
   const [researchJump, setResearchJump] = useState<ResearchJump | null>(null);
+  const [qualificationJump, setQualificationJump] = useState<ResearchJump | null>(null);
 
   const api = async (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
@@ -224,8 +227,13 @@ export function App() {
   const logout = () => { localStorage.removeItem("aigc-lite-token"); setToken(""); setUser(null); setSessions([]); setSession(null); };
   if (!token || !user) return <Login onLogin={(next) => { localStorage.setItem("aigc-lite-token", next); setToken(next); }} />;
 
-  const openSession = async (id: string) => setSession(await api(`/api/sessions/${id}`));
-  const createSession = async () => { const next = await api("/api/sessions", { method: "POST", body: JSON.stringify({}) }); setSessions([next, ...sessions]); setSession({ ...next, messages: [] }); setPanel("chat"); };
+  const openSession = async (id: string) => { setSession(await api(`/api/sessions/${id}`)); setChatGeneration(value => value + 1); };
+  const createSession = () => { setSession(null); setChatGeneration(value => value + 1); setPanel("chat"); };
+  const commitChatSession = async (id: string) => {
+    const [detail, recent] = await Promise.all([api(`/api/sessions/${id}`), api("/api/sessions")]);
+    setSession(detail);
+    setSessions(recent);
+  };
   const openSessionFromSearch = async (id: string) => { await openSession(id); setPanel("chat"); };
   const openRunFromSearch = (result: SearchResult, target: "run" | "step" | "artifact") => {
     if (!result.run_id) return;
@@ -245,30 +253,23 @@ export function App() {
     setResearchJump({ key: Date.now(), claimId });
     setPanel("research");
   };
+  const openQualification = (claimId: string) => {
+    setQualificationJump({ key: Date.now(), claimId });
+    setPanel("qualification");
+  };
   const openRunById = (runId: string, stepId?: string, artifactId?: string) => {
     setRunJump({ key: Date.now(), runId, stepId, artifactId });
     setPanel("runs");
   };
-  const send = async (prompt: string) => {
-    if (!prompt.trim()) return;
-    setLoading(true);
-    try {
-      const data = await api("/api/chat", { method: "POST", body: JSON.stringify({ prompt, session_id: session?.id }) });
-      const id = data.session_id as string;
-      setSession((current) => ({ id, title: current?.title || prompt.slice(0, 30), messages: [...(current?.messages || []), { role: "user", content: prompt }, { role: "assistant", content: data.content }] }));
-      setSessions(await api("/api/sessions"));
-    } finally { setLoading(false); }
-  };
-
   return <div className="app-shell">
     <nav className="sidebar">
       <div className="brand"><div className="brand-mark"><Bot size={18} /></div><div><strong>aigc-lite</strong><small>{user.name}</small></div></div>
       <button className="primary new-button" onClick={createSession}><Plus size={16} />New conversation</button>
-      <div className="nav-group"><button className={panel === "chat" ? "nav active" : "nav"} onClick={() => setPanel("chat")}><Bot size={16} />Workspace</button><button className={panel === "search" ? "nav active" : "nav"} onClick={() => setPanel("search")}><Search size={16} />Search</button><button className={panel === "runs" ? "nav active" : "nav"} onClick={() => { setRunJump(null); setPanel("runs"); }}><ListTree size={16} />Runs</button><button className={panel === "decisions" ? "nav active" : "nav"} onClick={() => { setDecisionJump(null); setPanel("decisions"); }}><Braces size={16} />Decisions</button><button className={panel === "research" ? "nav active" : "nav"} onClick={() => { setResearchJump(null); setPanel("research"); }}><Microscope size={16} />Research</button><button className={panel === "knowledge" ? "nav active" : "nav"} onClick={() => setPanel("knowledge")}><BookOpen size={16} />Knowledge</button><button className={panel === "models" ? "nav active" : "nav"} onClick={() => setPanel("models")}><Settings size={16} />Models</button>{user.role === "admin" && <button className={panel === "admin" ? "nav active" : "nav"} onClick={() => setPanel("admin")}><Shield size={16} />Administration</button>}</div>
+      <div className="nav-group"><button className={panel === "chat" ? "nav active" : "nav"} onClick={() => setPanel("chat")}><Bot size={16} />Workspace</button><button className={panel === "search" ? "nav active" : "nav"} onClick={() => setPanel("search")}><Search size={16} />Search</button><button className={panel === "runs" ? "nav active" : "nav"} onClick={() => { setRunJump(null); setPanel("runs"); }}><ListTree size={16} />Runs</button><button className={panel === "decisions" ? "nav active" : "nav"} onClick={() => { setDecisionJump(null); setPanel("decisions"); }}><Braces size={16} />Decisions</button><button className={panel === "research" ? "nav active" : "nav"} onClick={() => { setResearchJump(null); setPanel("research"); }}><Microscope size={16} />Research</button><button className={panel === "imports" ? "nav active" : "nav"} onClick={() => setPanel("imports")}><Upload size={16} />Research imports</button><button className={panel === "qualification" ? "nav active" : "nav"} onClick={() => setPanel("qualification")}><Shield size={16} />Qualification</button><button className={panel === "knowledge" ? "nav active" : "nav"} onClick={() => setPanel("knowledge")}><BookOpen size={16} />Knowledge</button><button className={panel === "models" ? "nav active" : "nav"} onClick={() => setPanel("models")}><Settings size={16} />Models</button>{user.role === "admin" && <button className={panel === "admin" ? "nav active" : "nav"} onClick={() => setPanel("admin")}><Shield size={16} />Administration</button>}</div>
       {panel === "chat" && <><div className="section-label">Recent conversations</div><div className="session-list">{sessions.map(item => <button className={item.id === session?.id ? "session active" : "session"} key={item.id} onClick={() => void openSession(item.id)}>{item.title}</button>)}</div></>}
       <button className="logout" onClick={logout}><LogOut size={15} />Sign out</button>
     </nav>
-    <main className="content">{panel === "chat" && <Chat session={session} loading={loading} onSend={send} onCreate={createSession} />}{panel === "search" && <WorkspaceSearch api={api} onOpenRun={openRunFromSearch} onOpenDecision={openDecision} onOpenResearch={openResearchClaim} onOpenSession={openSessionFromSearch} />}{panel === "runs" && <RunExplorer api={api} target={runJump} />}{panel === "decisions" && <DecisionLab api={api} target={decisionJump} isAdmin={user.role === "admin"} onOpenRun={openRunById} />}{panel === "research" && <ResearchRegistry api={api} target={researchJump} isAdmin={user.role === "admin"} onOpenRun={openRunById} />}{panel === "knowledge" && <Knowledge api={api} />}{panel === "models" && <Models api={api} isAdmin={user.role === "admin"} />}{panel === "admin" && <Admin api={api} />}</main>
+    <main className="content">{panel === "chat" && <Chat key={chatGeneration} session={session} token={token} onCommitted={commitChatSession} />}{panel === "search" && <WorkspaceSearch api={api} onOpenRun={openRunFromSearch} onOpenDecision={openDecision} onOpenResearch={openResearchClaim} onOpenSession={openSessionFromSearch} />}{panel === "runs" && <RunExplorer api={api} target={runJump} />}{panel === "decisions" && <DecisionLab api={api} target={decisionJump} isAdmin={user.role === "admin"} onOpenRun={openRunById} />}{panel === "research" && <ResearchRegistry api={api} target={researchJump} onOpenRun={openRunById} onOpenQualification={openQualification} />}{panel === "imports" && <ResearchImports api={api} isAdmin={user.role === "admin"} onOpenClaim={openResearchClaim} />}{panel === "qualification" && <QualificationFlow api={api} target={qualificationJump} isAdmin={user.role === "admin"} onOpenResearch={openResearchClaim} onOpenRun={openRunById} />}{panel === "knowledge" && <Knowledge api={api} />}{panel === "models" && <Models api={api} isAdmin={user.role === "admin"} />}{panel === "admin" && <Admin api={api} />}</main>
   </div>;
 }
 
@@ -277,8 +278,6 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
   const submit = async (event: FormEvent) => { event.preventDefault(); setError(""); try { const response = await fetch(`/api/auth/${register ? "register" : "login"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(register ? { email, password, name, workspace_name: workspace } : { email, password }) }); const data = await response.json(); if (!response.ok) throw new Error(data.detail); onLogin(data.access_token); } catch (e) { setError(e instanceof Error ? e.message : "Unable to sign in"); } };
   return <div className="auth-page"><form className="auth-card" onSubmit={submit}><div className="brand centered"><div className="brand-mark"><Bot size={20} /></div><div><strong>aigc-lite</strong><small>AI workspace</small></div></div><h1>{register ? "Create your workspace" : "Welcome back"}</h1>{register && <input placeholder="Workspace name" value={workspace} onChange={e => setWorkspace(e.target.value)} required />}{register && <input placeholder="Your name" value={name} onChange={e => setName(e.target.value)} required />}<input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required /><input type="password" placeholder="Password, 8+ characters" minLength={8} value={password} onChange={e => setPassword(e.target.value)} required />{error && <div className="error">{error}</div>}<button className="primary" type="submit"><LogIn size={16} />{register ? "Create account" : "Sign in"}</button><button className="text-button" type="button" onClick={() => setRegister(!register)}>{register ? "Already have an account? Sign in" : "Create a new workspace"}</button></form></div>;
 }
-
-function Chat({ session, loading, onSend, onCreate }: { session: Session | null; loading: boolean; onSend: (text: string) => Promise<void>; onCreate: () => Promise<void> }) { const [prompt, setPrompt] = useState(""); const submit = async (event: FormEvent) => { event.preventDefault(); const next = prompt; setPrompt(""); await onSend(next); }; return <div className="chat-view"><header className="topbar"><div><span className="eyebrow">WORKSPACE</span><h1>{session?.title || "Start a conversation"}</h1></div><span className="status-dot">Ready</span></header><div className="messages">{!session && <div className="empty"><div className="empty-icon"><Bot size={24} /></div><h2>What are you working on?</h2><p>Ask a question, analyze a document, or connect a tool.</p><button className="secondary" onClick={onCreate}><Plus size={15} />New conversation</button></div>}{session?.messages?.map((message, index) => <div className={message.role === "user" ? "message user" : "message assistant"} key={`${index}-${message.role}`}><div className="message-label">{message.role === "user" ? "You" : "aigc-lite"}</div><div>{message.content}</div></div>)}{loading && <div className="message assistant"><div className="message-label">aigc-lite</div><div className="typing">Thinking...</div></div>}</div><form className="composer" onSubmit={submit}><textarea value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="Ask anything..." rows={2} /><button className="send" disabled={loading || !prompt.trim()} aria-label="Send"><Send size={17} /></button></form></div>; }
 
 function WorkspaceSearch({
   api,
@@ -946,7 +945,7 @@ function DecisionQuestion({ questionId, question, answer }: { questionId: string
   return <article className="decision-question"><div className="decision-question-heading"><div><span className="kind-chip">{question.type}</span><h3>{question.instructions || questionId}</h3></div><code>{questionId}</code></div><div className="probability-list">{probabilities.sort((left, right) => right[1] - left[1]).map(([key, probability]) => <div className={probability === maximum ? "probability-row leading" : "probability-row"} key={key}><div><span>{label(key)}</span><strong>{formatPercent(probability)}</strong></div><div className="probability-track"><span style={{ width: `${Math.max(0, Math.min(1, probability)) * 100}%` }} /></div></div>)}</div><div className="decision-answer"><span>Projected value</span><strong>{metadataValue(answer.value ?? answer.choice ?? answer.level ?? "—")}</strong></div></article>;
 }
 
-function ResearchRegistry({ api, target, isAdmin, onOpenRun }: { api: Api; target: ResearchJump | null; isAdmin: boolean; onOpenRun: (runId: string, stepId?: string, artifactId?: string) => void }) {
+function ResearchRegistry({ api, target, onOpenRun, onOpenQualification }: { api: Api; target: ResearchJump | null; onOpenRun: (runId: string, stepId?: string, artifactId?: string) => void; onOpenQualification: (claimId: string) => void }) {
   const [dashboard, setDashboard] = useState<ResearchDashboard | null>(null);
   const [claimDetail, setClaimDetail] = useState<ResearchClaim | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(target?.claimId || null);
@@ -954,11 +953,7 @@ function ResearchRegistry({ api, target, isAdmin, onOpenRun }: { api: Api; targe
   const [claimType, setClaimType] = useState("all");
   const [closure, setClosure] = useState("all");
   const [loading, setLoading] = useState(true);
-  const [importing, setImporting] = useState(false);
   const [error, setError] = useState("");
-  const [sourceName, setSourceName] = useState("AI Frontier Claim Registry");
-  const [registryFile, setRegistryFile] = useState<File | null>(null);
-  const [ledgerFile, setLedgerFile] = useState<File | null>(null);
 
   const load = async (researchCaseId?: string, preferredClaimId?: string) => {
     setLoading(true);
@@ -970,7 +965,7 @@ function ResearchRegistry({ api, target, isAdmin, onOpenRun }: { api: Api; targe
         caseId = claim.research_case_id;
       }
       const suffix = caseId ? `?research_case_id=${encodeURIComponent(caseId)}` : "";
-      const value = await api(`/api/research-registry${suffix}`) as ResearchDashboard;
+      const value = await api(`/api/research/explorer${suffix}`) as ResearchDashboard;
       setDashboard(value);
       const preferred = preferredClaimId || selectedId;
       setSelectedId(preferred && value.claims.some(item => item.id === preferred) ? preferred : value.claims[0]?.id || null);
@@ -982,26 +977,6 @@ function ResearchRegistry({ api, target, isAdmin, onOpenRun }: { api: Api; targe
   };
 
   useEffect(() => { void load(undefined, target?.claimId); }, [target?.key]);
-
-  const importRegistry = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!registryFile) return;
-    setImporting(true);
-    setError("");
-    const body = new FormData();
-    body.set("source_name", sourceName);
-    body.set("registry_file", registryFile);
-    if (ledgerFile) body.set("source_ledger_file", ledgerFile);
-    try {
-      const value = await api("/api/research-registry/import/frontier", { method: "POST", body }) as ResearchDashboard;
-      setDashboard(value);
-      setSelectedId(value.claims[0]?.id || null);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Import failed");
-    } finally {
-      setImporting(false);
-    }
-  };
 
   const claims = dashboard?.claims || [];
   const types = Object.keys(dashboard?.statistics.claim_types || {});
@@ -1036,27 +1011,17 @@ function ResearchRegistry({ api, target, isAdmin, onOpenRun }: { api: Api; targe
 
   return <section className="panel decision-lab research-registry">
     <header className="topbar decision-topbar">
-      <div><span className="eyebrow">VERIFIABLE RESEARCH</span><h1>Claim Explorer</h1><p className="topbar-copy">Inspect claim relations, verification receipts, promotion gates, and epistemic boundaries.</p></div>
+      <div><span className="eyebrow">VERIFIABLE RESEARCH · READ ONLY</span><h1>Research Explorer</h1><p className="topbar-copy">Browse frozen ClaimRevisions across profiles. Storage, qualification and current use remain separate.</p></div>
       <button className="secondary refresh-button" onClick={() => void load(researchCase?.id)} disabled={loading}><RefreshCw size={15} className={loading ? "spin" : ""} />Refresh</button>
     </header>
 
-    {isAdmin && <details className="decision-import research-import">
-      <summary><Upload size={15} /><span>Import an AI Frontier Claim Registry</span><small>Structural validation only; no source is fetched automatically.</small></summary>
-      <form onSubmit={importRegistry}>
-        <label><span>Registry name</span><input value={sourceName} onChange={event => setSourceName(event.target.value)} required /></label>
-        <ResearchFile label="claim-registry.json" accept="application/json,.json" file={registryFile} required onChange={setRegistryFile} />
-        <ResearchFile label="public-source-ledger.md" accept="text/markdown,.md" file={ledgerFile} onChange={setLedgerFile} />
-        <button className="primary" type="submit" disabled={importing || !registryFile}>{importing ? <LoaderCircle className="spin" size={15} /> : <Upload size={15} />}{importing ? "Validating…" : "Validate & freeze"}</button>
-      </form>
-    </details>}
-
     {error && <div className="decision-error"><AlertCircle size={17} />{error}</div>}
     {loading && !dashboard && <LoadingState label="Loading research claims" />}
-    {!loading && dashboard && !researchCase && <div className="decision-empty"><Microscope size={30} /><h2>No research registry yet</h2><p>Import a versioned AI Frontier Claim Registry to inspect claims and their declared source closure.</p></div>}
+    {!loading && dashboard && !researchCase && <div className="decision-empty"><Microscope size={30} /><h2>No research cases yet</h2><p>Registered research ClaimRevisions will appear here. Candidate-only catalogues stay in Research imports until an exact claim is frozen.</p></div>}
     {researchCase && protocol && stats && <>
       <div className="decision-protocol-bar">
-        <label><span>Registry</span><select value={researchCase.id} onChange={event => void load(event.target.value)}>{dashboard?.cases.map(item => <option key={item.id} value={item.id}>{item.name} · {item.registry_version}</option>)}</select></label>
-        <div><StatusBadge status={researchCase.status} /><code>{researchCase.registry_id}</code><span>{researchCase.as_of_date || formatDate(researchCase.created_at)}</span></div>
+        <label><span>Case · profile</span><select value={researchCase.id} onChange={event => void load(event.target.value)}>{dashboard?.cases.map(item => <option key={item.id} value={item.id}>{item.name} · {item.profile} · {item.registry_version}</option>)}</select></label>
+        <div><StatusBadge status={researchCase.status} /><code>{researchCase.profile}</code><span>{researchCase.as_of_date || formatDate(researchCase.created_at)}</span></div>
       </div>
       <div className="decision-overview research-overview">
         <div><span>Claims</span><strong>{stats.claims}</strong></div>
@@ -1074,18 +1039,14 @@ function ResearchRegistry({ api, target, isAdmin, onOpenRun }: { api: Api; targe
           <div className="decision-case-list research-claim-list">{visibleClaims.map(item => <button type="button" key={item.id} className={item.id === selected?.id ? "decision-row active" : "decision-row"} onClick={() => setSelectedId(item.id)}><span className={`decision-state ${item.closure_status}`} /><span><strong>{item.claim_key}</strong><small>{humanize(item.claim_type)} · {humanize(item.promotion_stage)}</small></span><em>r{item.revision_number}</em></button>)}</div>
         </aside>
         <main className="decision-detail-shell">
-          {selected ? <ResearchClaimDetail key={selected.id} claim={claimDetail?.id === selected.id ? claimDetail : selected} claims={claims} researchCase={researchCase} protocol={protocol} api={api} isAdmin={isAdmin} onChanged={refreshSelected} onOpenRun={onOpenRun} /> : <div className="decision-empty"><GitBranch size={27} /><h2>Select a claim</h2><p>Relations, verification attempts, promotion gates, and source closure will appear here.</p></div>}
+          {selected ? <ResearchClaimDetail key={selected.id} claim={claimDetail?.id === selected.id ? claimDetail : selected} claims={claims} researchCase={researchCase} protocol={protocol} api={api} isAdmin={false} onChanged={refreshSelected} onOpenRun={onOpenRun} onOpenQualification={onOpenQualification} /> : <div className="decision-empty"><GitBranch size={27} /><h2>Select a claim</h2><p>Relations, verification attempts, promotion gates, and source closure will appear here.</p></div>}
         </main>
       </div>
     </>}
   </section>;
 }
 
-function ResearchFile({ label, accept, file, required = false, onChange }: { label: string; accept: string; file: File | null; required?: boolean; onChange: (file: File | null) => void }) {
-  return <label className="decision-file"><span>{label}{required ? " *" : ""}</span><input type="file" accept={accept} required={required} onChange={event => onChange(event.target.files?.[0] || null)} /><small>{file ? `${file.name} · ${formatBytes(file.size)}` : "Not selected"}</small></label>;
-}
-
-function ResearchClaimDetail({ claim, claims, researchCase, protocol, api, isAdmin, onChanged, onOpenRun }: { claim: ResearchClaim; claims: ResearchClaim[]; researchCase: ResearchCase; protocol: EvidenceProtocol; api: Api; isAdmin: boolean; onChanged: () => Promise<void>; onOpenRun: (runId: string, stepId?: string, artifactId?: string) => void }) {
+function ResearchClaimDetail({ claim, claims, researchCase, protocol, api, isAdmin, onChanged, onOpenRun, onOpenQualification }: { claim: ResearchClaim; claims: ResearchClaim[]; researchCase: ResearchCase; protocol: EvidenceProtocol; api: Api; isAdmin: boolean; onChanged: () => Promise<void>; onOpenRun: (runId: string, stepId?: string, artifactId?: string) => void; onOpenQualification: (claimId: string) => void }) {
   const receipt = protocol.receipts.find(item => item.id === researchCase.receipt_id);
   const relations = claim.relations || [];
   const attempts = claim.verification_attempts || [];
@@ -1193,6 +1154,7 @@ function ResearchClaimDetail({ claim, claims, researchCase, protocol, api, isAdm
       <div className="research-status-pair"><StatusBadge status={claim.promotion_stage} /><StatusBadge status={claim.closure_status} /></div>
     </div>
     <p className="decision-state-text research-statement">{claim.statement}</p>
+    {claim.claim_type === "MATHEMATICAL_THEOREM" && <button className="secondary" type="button" onClick={() => onOpenQualification(claim.id)}><Shield size={14} />Open qualification flow</button>}
     <p className="research-scope"><strong>Declared scope</strong>{claim.scope}</p>
     <div className="decision-facts research-facts">
       <div><span>Uncertainty</span><strong>{humanize(claim.status_axes.uncertainty || "unknown")}</strong></div>

@@ -51,6 +51,36 @@ def _services(tmp_path):
     return repository, artifacts, research, qualification
 
 
+def test_claim_status_keeps_candidate_qualification_and_admission_separate(tmp_path) -> None:
+    _repository, _artifacts, _research, qualification = _services(tmp_path)
+    context = RequestContext(
+        request_id="qualification-status",
+        workspace_id="workspace-a",
+        principal_id="reviewer-a",
+    )
+    claim = qualification.register_math_theorem(
+        context,
+        MathTheoremCandidateDraft(
+            claim_key="THM-STATUS",
+            name="Status projection",
+            statement="For every integer n, n = n.",
+            scope="Integers.",
+        ),
+    )["claim"]
+    candidate = qualification.claim_status(context, claim["id"])
+    assert candidate["claim"]["semantic_hash"] == claim["semantic_hash"]
+    assert candidate["evaluations"] == []
+    assert candidate["receipts"] == []
+    assert candidate["knowledge_admissions"] == []
+    assert candidate["current_use_bindings"] == []
+
+    qualification.evaluate(context, claim["id"], PROFILE_ID)
+    evaluated = qualification.claim_status(context, claim["id"])
+    assert evaluated["evaluations"][0]["verdict"] == QualificationVerdict.UNRESOLVED
+    assert evaluated["receipts"] == []
+    assert evaluated["current_use_bindings"] == []
+
+
 def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -> None:
     repository, artifacts, research, qualification = _services(tmp_path)
     context = RequestContext(
@@ -658,6 +688,11 @@ def test_refresh_binding_propagates_transitive_dependency_staleness() -> None:
     }
 
     class DependencyRepository:
+        def list_invalidation_decisions(self, tenant_id, claim_id):
+            assert tenant_id == "workspace-a"
+            assert claim_id in claims
+            return []
+
         def get_qualification_receipt(self, tenant_id, receipt_id):
             assert tenant_id == "workspace-a"
             return receipts.get(receipt_id)
