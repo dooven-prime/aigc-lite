@@ -2,5 +2,6 @@
 
 from .frontier import FrontierRegistryAdapter
 from .openai_math import OpenAIMathReleaseAdapter
+from .rime_consumer import RimeConsumerWitnessAdapter
 
-__all__ = ["FrontierRegistryAdapter", "OpenAIMathReleaseAdapter"]
+__all__ = ["FrontierRegistryAdapter", "OpenAIMathReleaseAdapter", "RimeConsumerWitnessAdapter"]

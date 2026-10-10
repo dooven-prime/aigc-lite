@@ -54,6 +54,7 @@ ROS 2 扩展同样不能只证明调用过 Nav2：可说服人的验收需包括
 - 不可变 Policy Proposal、服务端 Permission Diff、独立 Enforcer Adapter 与 Ed25519 验签后的 Enforcement Receipt 账本；
 - preview/commit 型 Conversation Import Registry，保留外部消息分支与来源 Artifact，并只进入 candidate search；
 - 固定 commit 的 OpenAI 数学目录 candidate-only 导入；保留 family、manuscript 与来源 hash，不自动生成资格或知识绑定；
+- RIME Event-Anchored Consumer 的有限数据 witness 三路重放 Case；逐前缀核对并仅记录 candidate 证据；
 - 可离线校验的 Assurance Bundle；
 - 独立安装的 ROS 2/Nav2 capability provider，核心不依赖 ROS 2。
 
@@ -135,6 +136,7 @@ Fernet master key。所有变量、MiniMax 示例和租户配置见
 | [Conversation Imports](docs/CONVERSATION_IMPORTS.md) | ChatGPT/DeepSeek preview、不可变批次、原始 Artifact 与 candidate-only 搜索 |
 | [Math Release Import](docs/MATH_RELEASE_IMPORT.md) | 固定 commit 的数学目录快照、family/manuscript 候选映射与零 silent promotion 边界 |
 | [Math Project 003](docs/MATH_PROJECT_003.md) | 单条 Claim 的源码快照、只读补丁闭包、编译缓存审计与资格边界 |
+| [RIME Consumer Case](docs/RIME_CONSUMER_CASE.md) | 冻结规范下的日志、森林、placed-UFE 有限 witness 重放与不自动晋升边界 |
 | [Configuration](docs/CONFIGURATION.md) | 完整环境变量、模型、租户、MCP 与 formal kernel 配置 |
 | [Production](docs/PRODUCTION.md) | 生产启动保护、备份恢复和已知运维限制 |
 | [Threat Model](docs/THREAT_MODEL.md) | 两个 authority plane、三层 enforcement、系统假设和未实现边界 |

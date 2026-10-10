@@ -447,7 +447,7 @@ def test_research_registry_http_import_is_workspace_scoped(tmp_path, monkeypatch
             importers = client.get("/api/research/importers")
             assert importers.status_code == 200
             assert {item["importer_id"] for item in importers.json()} == {
-                "frontier.registry", "openai.math"
+                "frontier.registry", "openai.math", "rime.event-anchored-consumer"
             }
             assert client.get("/api/research/importers/openai.math/1").json()[
                 "target_surface"

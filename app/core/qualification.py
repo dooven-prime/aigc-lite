@@ -36,6 +36,7 @@ class EvidenceAxisState(StrEnum):
 class ValidationModality(StrEnum):
     KERNEL_CHECK = "kernel_check"
     EXACT_REPLAY = "exact_replay"
+    LOGICAL_ENTAILMENT = "logical_entailment"
     NUMERICAL_EQUIVALENCE = "numerical_equivalence"
     INDEPENDENT_RECOMPUTATION = "independent_recomputation"
     EXPERT_REVIEW = "expert_review"

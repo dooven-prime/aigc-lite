@@ -146,16 +146,24 @@ class SigningAdapter:
             "arguments_digest": request.arguments_digest,
             "decision": self.decision,
             "outcome": self.outcome,
-            "observed_effects": [
-                {"domain": "network", "resource": "api.example.test:443"}
-            ],
-            "denied_effects": [],
-            "credential_bindings": [
-                {
+            "observed_effects": (
+                [{"domain": "network", "resource": "api.example.test:443"}]
+                if self.decision == "allow" else []
+            ),
+            "denied_effects": (
+                [] if self.decision == "allow" else [{
+                    "domain": "network",
+                    "resource": request.execution_envelope.get("arguments", {}).get(
+                        "endpoint", "unapproved-endpoint"
+                    ),
+                }]
+            ),
+            "credential_bindings": (
+                [{
                     "credential_reference": "encrypted-db://credential/example",
                     "endpoint": "api.example.test:443",
-                }
-            ],
+                }] if self.decision == "allow" else []
+            ),
             "image_digest": "sha256:" + "c" * 64,
             "toolchain_digest": None,
             "sandbox_id": "sandbox-1",
@@ -578,6 +586,75 @@ def test_tool_catalog_routes_bound_tool_only_through_external_enforcer(
     assert repository.list_enforcement_dispatches(
         context.workspace_id, state="terminal"
     )[0]["binding_id"] == binding.binding_id
+
+
+def test_signed_network_denial_blocks_budget_escape_without_local_fallback(
+    tmp_path,
+) -> None:
+    """A bound tool cannot spend through an unapproved provider endpoint."""
+    class Provider:
+        provider_id = "budget-escape-provider"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_tools(self):
+            return [ToolSpec(
+                name="budget_escape_canary",
+                native_name="budget_escape_canary",
+                description="A synthetic provider call used only by this test.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"endpoint": {"type": "string"}},
+                    "required": ["endpoint"],
+                },
+                source=ToolSource.LOCAL,
+                provider_id=self.provider_id,
+            )]
+
+        async def call_tool(self, native_name, arguments):
+            self.calls += 1
+            return ToolProviderResult(content='{"unsafe_local_fallback":true}')
+
+    private_key = Ed25519PrivateKey.generate()
+    adapter = SigningAdapter(private_key, decision="deny", outcome="denied")
+    repository, enforcement, external, _keys = _services(
+        tmp_path, adapter, private_key
+    )
+    context, proposal, run, _step = _proposal_and_run(repository, enforcement)
+    binding = ExternalToolExecutionBinding(
+        binding_id="budget-escape-binding",
+        workspace_id=context.workspace_id,
+        provider_id="budget-escape-provider",
+        native_name="budget_escape_canary",
+        adapter_id=adapter.adapter_id,
+        proposal_id=proposal["id"],
+        policy_hash=proposal["candidate_policy_hash"],
+    )
+    router = ExternalToolExecutionRouter(
+        registry=ExternalToolExecutionBindingRegistry([binding]),
+        enforcer_service=external,
+        repository_provider=lambda: repository,
+    )
+    provider = Provider()
+    catalog = ToolCatalog([provider], external_tool_executor=router)
+    endpoint = "https://unapproved.example.test/v1/chat"
+
+    async def invoke():
+        session = await catalog.open(context, run_id=run["id"])
+        return await session.invoke("budget_escape_canary", json.dumps({"endpoint": endpoint}))
+
+    result = asyncio.run(invoke())
+    assert result.failed is True
+    assert json.loads(result.content) == {"error": "external_enforcement_denied"}
+    assert provider.calls == 0
+    assert len(adapter.requests) == 1
+    receipt = repository.list_enforcement_receipts(context.workspace_id)[0]
+    assert receipt["signature_verified"] is True
+    assert receipt["decision"] == "deny"
+    assert receipt["outcome"] == "denied"
+    assert receipt["denied_effects"] == [{"domain": "network", "resource": endpoint}]
+    assert receipt["arguments_digest"] == adapter.requests[0].arguments_digest
 
 
 def test_tool_catalog_blocks_reentry_while_external_state_is_indeterminate(

@@ -41,6 +41,7 @@ from ..profiles.math_theorem import (
     KERNEL_CERTIFICATE_VERSION,
     MATH_FORMAL_PROFILE,
 )
+from ..profiles.propositional_entailment import PropositionalABVerifier
 from ..redaction import redact, redact_record_text
 from ..repository import Repository
 from .artifacts import ArtifactService
@@ -694,6 +695,7 @@ def create_default_verifier_registry() -> DomainVerifierRegistry:
     registry = DomainVerifierRegistry()
     registry.register(MathTheoremVerifier())
     registry.register(MathProjectVerifier())
+    registry.register(PropositionalABVerifier())
     return registry
 
 
@@ -1554,7 +1556,7 @@ class QualificationService:
         if plan_id and plan is None:
             raise ResourceNotFoundError("research_verification_plan", plan_id)
         route = run.get("selected_model") if run else None
-        if route and route.startswith("kernel/"):
+        if route and route.startswith(("kernel/", "checker/")):
             route = None
         provider = None
         family = None

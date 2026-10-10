@@ -44,6 +44,27 @@ POST /api/qualification/receipts/{qualification_receipt_id}/knowledge-admissions
 知识”。数据库拒绝任何没有匹配 KnowledgeAdmissionReceipt 的 current knowledge binding。历史 binding
 升级后会变为 stale，必须显式重新 admission，不进行静默回填。
 
+### 最小逻辑蕴含反例
+
+`logic.propositional.ab.v1` 是 adversarial suite 使用的窄领域 Profile，不是自然语言推理引擎。
+它只接受冻结的两个 A/B 命题前提 Artifact、各自的字节与语法核查，以及绑定精确
+`ClaimRevision` 的四行真值表证书。通过来源与前提核查，只说明前提记录在该测试合同中有效；
+并不说明它们在现实世界中为真，更不说明它们蕴含目标结论。
+
+回归用例以 `E1: A⇒B`、`E2: B` 尝试资格化 `C: A`。`A=False, B=True` 同时满足两前提
+而否定结论；Gate 返回 `BLOCKED / premises_do_not_entail_claim`，保留证据和失败记录，不签发
+QualificationReceipt，也不建立 CurrentUseBinding。若缺少精确的 checker 证书，则返回
+`UNRESOLVED / insufficient_entailment_evidence`。反模型仅证明“这些前提不蕴含 C”，**不是**
+“C 在实际世界中为假”。正对照改用 `E1: A⇒B, E2: A, C: B`：每条前提单独都不蕴含 B，
+两条合起来才蕴含；它可获资格 Receipt，但仍不会自动进入 qualified search。
+当前实现只提供领域 verifier 与测试夹具，没有任意公式证明服务或公开的 checker 执行入口。
+`logic.propositional.ab.v1` 的四行真值表、反模型和双前提规则由回归测试固定，Profile 元数据
+hash 也已 pin；若改变可接受的公式或裁决语义，应另开 Profile／policy 版本，而不是静默扩张 v1。
+这不是 checker 源码签名或独立代码鉴真。最小支持集尚未作为证书字段，不能把所有引用的
+Evidence 自动计成必要贡献。HTTP 尝试记录入口使用已登录 session 派生的用户 ID，忽略伪造
+系统身份的请求头，并拒绝请求体里的 `verifier_lineage`；这只验证当前公开传输边界，不能保护
+同进程任意代码执行或恶意内部插件直接伪造 `RequestContext`。
+
 执行 grant 的 `scope / conditions / budget` 不是说明性 metadata。Tool Catalog 在 provider dispatch
 之前，用服务端派生的具体 invocation 逐项匹配，并只按匹配到的 grant ID 原子消费：
 

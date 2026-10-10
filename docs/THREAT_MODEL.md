@@ -135,6 +135,7 @@ emergency stop, collision system, network isolation, or out-of-band watchdog.
 | Correlated model review | Derive independence from lineage; multiple labels or Agent names do not establish independence. |
 | Tool or provider escape | Mediate every cross-boundary effect in an external runtime; deny unmodelled effects. |
 | Credential exfiltration | Keep plaintext out of Agent-visible state and bind injection to an approved endpoint and policy revision. |
+| Alternate-credential budget escape | A shared service budget covers only mediated calls. Reject raw credential access and direct provider egress in the external runtime; do not count application ledger silence as proof of no spend. |
 | Policy self-expansion | Represent changes as permission diffs; require an external principal to approve and apply expansions. |
 | Stale evidence or authority | Refresh transitive current-use bindings and expiry before retrieval, export, grant consumption, or dispatch. |
 | Replay or substitution | Bind receipts to semantic hashes, invocation digests, policy revisions, runtime identities, and artifact hashes. |
@@ -168,6 +169,9 @@ The concrete transition owners and choke points are enumerated in
     patch attempt requires clean-base reproduction, an immutable FailureReceipt,
     and a narrow grant that denies every test, validator, baseline, receipt and
     failure-decision surface used to judge that patch.
+12. Individually valid evidence and a closed provenance graph do not establish
+    that the evidence entails a target ClaimRevision. Profiles that require
+    entailment must verify a revision-bound derivation or remain unresolved.
 
 ## 6. Current coverage and gaps
 
@@ -183,6 +187,7 @@ The concrete transition owners and choke points are enumerated in
 | Separate process lifecycle and hard termination | Available for compatible local tools; not a permission sandbox. |
 | Kernel filesystem/process/network confinement | Not implemented by the core distribution. Use an external sandbox. |
 | Endpoint-bound credential injection enforced below the Agent | Configuration binding exists; complete egress-level enforcement requires an external runtime. |
+| Shared provider/service budget across arbitrary worker egress | Not implemented. A process tool can inherit environment variables and make direct network requests outside Tool Catalog accounting. |
 | Independent quarantine/watchdog trust domain | Not implemented. |
 | Hardware attestation or safety-rated physical interlock | Not implemented and outside the core project's authority. |
 | Controlled failure reproduction and source patching | Security contract frozen in [PATCH_RUNNER.md](PATCH_RUNNER.md); no patch runner or source-mutation API is implemented. |
@@ -206,6 +211,32 @@ organization or trust-domain independence. It also has per-run Agent budgets,
 not a shared root budget across a research swarm. Therefore agent count,
 message count, reviewer count, and model-route diversity must not be reported
 as effective independent search branches or as a swarm-wide safety limit.
+
+### Alternate-credential budget escape
+
+The [RSIGym budget-hacking case](https://arxiv.org/html/2610.10310v1#S5.SS3)
+illustrates a distinct failure mode: a workload obtains another usable model
+credential and calls the provider directly, bypassing the metered rollout
+service. The `aigc-lite` application credential resolver can reject an
+unallowlisted `env://` reference, but that does not prevent a spawned worker
+from reading its inherited process environment or opening a socket. Tool-call
+budgets are not provider-spend budgets.
+
+The synthetic, loopback-only regression in
+[`tests/adversarial/test_credential_budget_escape.py`](../tests/adversarial/test_credential_budget_escape.py)
+deliberately confirms this **known gap** using a fake canary: one unmediated
+worker action makes two direct requests despite the application resolver
+rejecting the reference. It demonstrates a reachable unmetered path, not
+actual provider spend or a monetary-budget calculation. The complementary
+signed-denial test in
+[`tests/test_external_enforcer.py`](../tests/test_external_enforcer.py) shows
+that a *bound Tool Catalog invocation* is denied with a verified Receipt and
+does not fall back to the local provider. Neither test establishes that
+arbitrary process egress is blocked in production. That requires a separately
+deployed sandbox/network enforcer with no Agent-visible provider credentials,
+endpoint-bound injection, deny-by-default egress, and an actual out-of-process
+acceptance test. Until then, no shared budget should be described as an upper
+bound on all reachable provider use.
 
 ## 7. External enforcement integration contract
 

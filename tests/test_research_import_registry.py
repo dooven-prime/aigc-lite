@@ -1,6 +1,10 @@
 import pytest
 
-from app.adapters.research_import import FrontierRegistryAdapter, OpenAIMathReleaseAdapter
+from app.adapters.research_import import (
+    FrontierRegistryAdapter,
+    OpenAIMathReleaseAdapter,
+    RimeConsumerWitnessAdapter,
+)
 from app.core.errors import InvalidEvidenceError
 from app.services.research_import_registry import ResearchImportRegistry
 
@@ -8,14 +12,17 @@ from app.services.research_import_registry import ResearchImportRegistry
 def test_builtin_importers_are_versioned_and_admission_bounded() -> None:
     registry = ResearchImportRegistry.builtins()
     values = {item["importer_id"]: item for item in registry.list()}
-    assert set(values) == {"frontier.registry", "openai.math"}
+    assert set(values) == {"frontier.registry", "openai.math", "rime.event-anchored-consumer"}
     assert values["frontier.registry"]["target_surface"] == "research_claim_candidate"
     assert values["frontier.registry"]["preview_endpoint"] is None
     assert values["openai.math"]["target_surface"] == "catalogue_candidate_only"
+    assert values["rime.event-anchored-consumer"]["target_surface"] == "research_claim_candidate"
     assert values["openai.math"]["preview_endpoint"] == (
         "/api/research/math-release-imports/preview"
     )
-    assert all(item["version"] == 1 for item in values.values())
+    assert values["frontier.registry"]["version"] == 1
+    assert values["openai.math"]["version"] == 1
+    assert values["rime.event-anchored-consumer"]["version"] == 2
     assert all(not item["qualification_granted"] for item in values.values())
     assert all(not item["knowledge_admitted"] for item in values.values())
     assert registry.describe("openai.math", 1) == values["openai.math"]
@@ -30,4 +37,5 @@ def test_registry_holds_actual_adapters_not_generic_upload_routes() -> None:
     registry = ResearchImportRegistry.builtins()
     assert isinstance(registry.get("frontier.registry", 1), FrontierRegistryAdapter)
     assert isinstance(registry.get("openai.math", 1), OpenAIMathReleaseAdapter)
+    assert isinstance(registry.get("rime.event-anchored-consumer", 2), RimeConsumerWitnessAdapter)
     assert not hasattr(registry, "commit")

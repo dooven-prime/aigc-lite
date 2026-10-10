@@ -63,6 +63,8 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/research/math-release-imports/preview`：管理员预览固定 `openai/math` commit 的 family/manuscript 目录，不写入数据
 - `POST /api/research/math-release-imports`：管理员提交相同 commit 与 `expected_preview_hash`，原子保存原始目录 Artifact 和 candidate-only manifest
 - `GET /api/research/math-release-imports` 与 `GET /api/research/math-release-imports/{import_id}`：查询目录快照；详情可显式传 `include_families=true`，不代表数学资格
+- `GET /api/research/rime-consumer/contract`：读取固定上游 commit 的完整合同包清单、manifest/checker 摘要和有限重放上界；当前提交修订为 `aigc-lite.rime.consumer-replay.v2`
+- `POST /api/research/rime-consumer/witnesses`：管理员提交纯数据 witness；逐前缀三路重放并写入新的 Case/Run/Artifact/VerificationAttempt，保持 candidate-only；可用 `prior_case_id` 关联同一数学 witness 的旧 Case，但不追溯修复其来源；格式见 [RIME Consumer Case](RIME_CONSUMER_CASE.md)
 - `POST /api/enforcement/policy-proposals`：管理员提交 base/candidate execution policy；服务端冻结两份 snapshot 并确定性计算 `PermissionDiff`，不批准或应用策略
 - `GET /api/enforcement/policy-proposals` 与 `GET /api/enforcement/policy-proposals/{proposal_id}`：查询 workspace 的不可变策略提案与扩权/收权明细
 - `GET /api/enforcement/issuers`：列出主机代码注册、能够签发 enforcement evidence 的 backend identity；请求不能注册 issuer

@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..adapters.research_import import FrontierRegistryAdapter, OpenAIMathReleaseAdapter
+from ..adapters.research_import import (
+    FrontierRegistryAdapter,
+    OpenAIMathReleaseAdapter,
+    RimeConsumerWitnessAdapter,
+)
 from ..core.errors import InvalidEvidenceError
 
 
@@ -40,7 +44,7 @@ class ResearchImportRegistry:
 
     @classmethod
     def builtins(cls) -> ResearchImportRegistry:
-        return cls([FrontierRegistryAdapter(), OpenAIMathReleaseAdapter()])
+        return cls([FrontierRegistryAdapter(), OpenAIMathReleaseAdapter(), RimeConsumerWitnessAdapter()])
 
     def get(self, importer_id: str, version: int) -> ResearchImporter:
         try:

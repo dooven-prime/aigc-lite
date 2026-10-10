@@ -19,7 +19,11 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .adapters.kernel_verification import KernelVerifierRegistry
-from .adapters.research_import import FrontierRegistryAdapter, OpenAIMathReleaseAdapter
+from .adapters.research_import import (
+    FrontierRegistryAdapter,
+    OpenAIMathReleaseAdapter,
+    RimeConsumerWitnessAdapter,
+)
 from .adapters.scheduling import TimeWheelScheduler
 from .api.configuration import create_configuration_router
 from .api.conversation_imports import create_conversation_import_router
@@ -27,6 +31,7 @@ from .api.enforcement import create_enforcement_router
 from .api.math_release_imports import create_math_release_import_router
 from .api.research import create_research_router
 from .api.reviews import create_review_router
+from .api.rime_consumer import create_rime_consumer_router
 from .audit import record_request
 from .auth import (
     create_login_session,
@@ -109,6 +114,7 @@ from .services.readiness import ReadinessService
 from .services.research_import_registry import ResearchImportRegistry
 from .services.research_registry import ResearchRegistryService
 from .services.reviews import ReviewService
+from .services.rime_consumer_case import RimeConsumerCaseService
 from .services.scheduler import SchedulerService
 from .services.task_runner import TaskRunner
 from .services.tool_catalog import create_default_tool_catalog
@@ -164,8 +170,9 @@ decision_lab_service = DecisionLabService(
 )
 frontier_import_adapter = FrontierRegistryAdapter()
 math_release_adapter = OpenAIMathReleaseAdapter()
+rime_consumer_adapter = RimeConsumerWitnessAdapter()
 research_import_registry = ResearchImportRegistry(
-    [frontier_import_adapter, math_release_adapter]
+    [frontier_import_adapter, math_release_adapter, rime_consumer_adapter]
 )
 research_registry_service = ResearchRegistryService(
     artifact_service=artifact_service,
@@ -178,6 +185,7 @@ conversation_import_service = ConversationImportService(
     registry=conversation_import_registry
 )
 math_release_import_service = MathReleaseImportService(adapter=math_release_adapter)
+rime_consumer_case_service = RimeConsumerCaseService(adapter=rime_consumer_adapter)
 kernel_verifier_registry = KernelVerifierRegistry.from_config(
     lean_executable=settings.lean_executable,
     coq_executable=settings.coq_executable,
@@ -917,6 +925,10 @@ math_release_import_router = create_math_release_import_router(
     import_service=math_release_import_service,
     request_context_factory=request_context,
 )
+rime_consumer_router = create_rime_consumer_router(
+    service=rime_consumer_case_service,
+    request_context_factory=request_context,
+)
 enforcement_router = create_enforcement_router(
     enforcement_service=enforcement_service,
     external_enforcer_service=external_enforcer_service,
@@ -928,6 +940,7 @@ app.include_router(research_router)
 app.include_router(review_router)
 app.include_router(conversation_import_router)
 app.include_router(math_release_import_router)
+app.include_router(rime_consumer_router)
 app.include_router(enforcement_router)
 
 
