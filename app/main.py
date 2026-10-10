@@ -25,6 +25,7 @@ from .adapters.research_import import (
     RimeConsumerWitnessAdapter,
 )
 from .adapters.scheduling import TimeWheelScheduler
+from .api.citation_extraction import create_citation_extraction_router
 from .api.configuration import create_configuration_router
 from .api.conversation_imports import create_conversation_import_router
 from .api.enforcement import create_enforcement_router
@@ -86,6 +87,7 @@ from .mcp import build_transport_apps, call_local_tool, create_mcp_server, handl
 from .services.artifacts import ArtifactService
 from .services.assurance import AssuranceBundleService
 from .services.chat_capabilities import ChatCapabilityPolicy
+from .services.citation_extraction import CitationExtractionService
 from .services.conversation_import_registry import ConversationImportRegistry
 from .services.conversation_imports import ConversationImportService
 from .services.credentials import CredentialService
@@ -126,6 +128,7 @@ from .tenancy import Tenant, _role_scopes, current_tenant
 PACKAGED_UI = Path(__file__).parent / "static"
 logger = logging.getLogger(__name__)
 artifact_service = ArtifactService()
+citation_extraction_service = CitationExtractionService(artifact_service)
 chat_capability_policy = ChatCapabilityPolicy()
 enforcement_issuer_registry = EnforcementIssuerRegistry()
 enforcement_service = EnforcementService(
@@ -925,6 +928,10 @@ math_release_import_router = create_math_release_import_router(
     import_service=math_release_import_service,
     request_context_factory=request_context,
 )
+citation_extraction_router = create_citation_extraction_router(
+    service=citation_extraction_service,
+    request_context_factory=request_context,
+)
 rime_consumer_router = create_rime_consumer_router(
     service=rime_consumer_case_service,
     request_context_factory=request_context,
@@ -940,6 +947,7 @@ app.include_router(research_router)
 app.include_router(review_router)
 app.include_router(conversation_import_router)
 app.include_router(math_release_import_router)
+app.include_router(citation_extraction_router)
 app.include_router(rime_consumer_router)
 app.include_router(enforcement_router)
 

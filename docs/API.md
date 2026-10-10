@@ -61,6 +61,7 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/conversation-imports`：管理员用相同文件和 `expected_preview_hash` 原子提交 Artifact、不可变 ImportBatch 与完整消息图
 - `GET /api/conversation-imports` 与 `GET /api/conversation-imports/{batch_id}`：查询 workspace 导入批次；详情可显式传 `include_messages=true`
 - `POST /api/research/math-release-imports/preview`：管理员预览固定 `openai/math` commit 的 family/manuscript 目录，不写入数据
+- `POST /api/research/citation-extractions/preview` 与 `POST /api/research/citation-extractions`：管理员上传 PDF，先预览再以相同 `preview_hash` 提交 `CitationExtractionProposal.v1`；只保存带逐页原文锚点的 candidate Artifact，书目无法核定时弃答，不写资格/知识/授权。格式和重放见 [Citation Extraction](CITATION_EXTRACTION.md)
 - `POST /api/research/math-release-imports`：管理员提交相同 commit 与 `expected_preview_hash`，原子保存原始目录 Artifact 和 candidate-only manifest
 - `GET /api/research/math-release-imports` 与 `GET /api/research/math-release-imports/{import_id}`：查询目录快照；详情可显式传 `include_families=true`，不代表数学资格
 - `GET /api/research/rime-consumer/contract`：读取固定上游 commit 的完整合同包清单、manifest/checker 摘要和有限重放上界；当前提交修订为 `aigc-lite.rime.consumer-replay.v2`

@@ -54,6 +54,7 @@ ROS 2 扩展同样不能只证明调用过 Nav2：可说服人的验收需包括
 - 不可变 Policy Proposal、服务端 Permission Diff、独立 Enforcer Adapter 与 Ed25519 验签后的 Enforcement Receipt 账本；
 - preview/commit 型 Conversation Import Registry，保留外部消息分支与来源 Artifact，并只进入 candidate search；
 - 固定 commit 的 OpenAI 数学目录 candidate-only 导入；保留 family、manuscript 与来源 hash，不自动生成资格或知识绑定；
+- PDF CitationExtractionProposal.v1 预览/提交；原文锚点与书目匹配分层，语义关系仅是提议，见[合同与固定来源测试](docs/CITATION_EXTRACTION.md)及[盲评协议](docs/CITATION_BLIND_EVAL.md)；
 - RIME Event-Anchored Consumer 的有限数据 witness 三路重放 Case；逐前缀核对并仅记录 candidate 证据；
 - 可离线校验的 Assurance Bundle；
 - 独立安装的 ROS 2/Nav2 capability provider，核心不依赖 ROS 2。

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Citation Gold 标注助手</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #15202b; background: #f4f6f8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { background: #14293d; color: white; padding: 14px 20px; }
+    header h1 { font-size: 1.2rem; margin: 0 0 5px; }
+    header p { margin: 0; font-size: .85rem; opacity: .9; }
+    main { display: grid; grid-template-columns: minmax(430px, 1.2fr) minmax(360px, 1fr); gap: 12px; padding: 12px; }
+    section { background: white; border: 1px solid #d9e0e6; border-radius: 8px; padding: 12px; min-width: 0; }
+    .controls, .inline { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    label { font-size: .85rem; font-weight: 600; }
+    select, input, textarea, button { font: inherit; }
+    select, input, textarea { border: 1px solid #aebbc6; border-radius: 5px; padding: 7px; }
+    button { border: 0; border-radius: 5px; background: #145f8d; color: white; padding: 8px 11px; cursor: pointer; }
+    button.secondary { color: #154d70; background: #e4edf3; }
+    button.danger { background: #9d3d3d; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    iframe { width: 100%; height: 69vh; border: 1px solid #ccd7e0; margin-top: 10px; }
+    textarea { width: 100%; min-height: 70px; resize: vertical; }
+    pre { white-space: pre-wrap; overflow: auto; height: 18vh; border: 1px solid #d6dfe6; background: #fafbfc; padding: 9px; }
+    .small { font-size: .8rem; color: #536676; }
+    .warn { color: #873c20; background: #fff3e9; padding: 7px; border-radius: 5px; }
+    .card { border: 1px solid #d7e0e7; border-radius: 5px; padding: 8px; margin: 7px 0; }
+    .card code { display: block; overflow-wrap: anywhere; white-space: pre-wrap; margin-top: 5px; }
+    #message { min-height: 1.4em; font-weight: 600; }
+    #recordList { max-height: 25vh; overflow: auto; }
+    @media (max-width: 850px) { main { grid-template-columns: 1fr; } iframe { height: 55vh; } }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Citation Gold 标注助手</h1>
+  <p>逐页查看冻结 PDF；人工发现引用后，复制可见文字并确认候选锚点。这里不显示、也不运行提取器预测。</p>
+</header>
+<main>
+  <section>
+    <div class="controls">
+      <label for="paper">论文</label><select id="paper"></select>
+      <label for="page">页</label><input id="page" type="number" min="1" value="1" style="width:75px">
+      <button id="load" class="secondary">打开页</button>
+      <span id="progress" class="small"></span>
+    </div>
+    <iframe id="pdf" title="冻结 PDF 页面"></iframe>
+    <p class="small">先看 PDF 原页。下方是冻结的 pypdf 文本，可选择一段再点“使用选中文本”；偏移由工具计算。</p>
+    <pre id="extracted"></pre>
+    <div class="inline">
+      <button id="useSelection" class="secondary">使用选中文本</button>
+      <button id="reviewPage">标记本页已完整检查</button>
+    </div>
+  </section>
+  <section>
+    <label for="quote">人工看到的整处引用文字</label>
+    <textarea id="quote" placeholder="从 PDF 或上方提取文本复制；不要只抄作者名的一小段"></textarea>
+    <div class="inline">
+      <label for="style">引用风格</label>
+      <select id="style"><option value="author_year">author_year</option><option value="numeric">numeric</option><option value="other">other</option></select>
+      <button id="match">查找文本锚点</button>
+    </div>
+    <p class="small">匹配只用你选的文字和冻结文本；会容忍换行与行末断词。请逐个看上下文，不能盲选第一个。</p>
+    <div id="candidates"></div>
+    <div class="card">
+      <label><input id="unmapped" type="checkbox"> 确认确实无法可靠映射到提取文本</label>
+      <textarea id="reason" placeholder="具体原因；若工具给出了候选但都不对，请以 rejected_candidates: 开头说明" style="min-height:55px"></textarea>
+    </div>
+    <button id="add">保存这处引用</button>
+    <p id="message" aria-live="polite"></p>
+    <h3>本页已记录</h3>
+    <div id="recordList"></div>
+    <p class="warn">只有人工检查完论文的每一页并逐页标记，草稿才会写入 <code>exhaustive: true</code>。空白页也须标记。多作品引用当前只计一次 occurrence；书目身份另行标注。</p>
+  </section>
+</main>
+<script>
+  const token = '__LOCAL_TOKEN__';
+  const $ = id => document.getElementById(id);
+  let state, paper, page, candidates = [];
+  async function request(path, body) {
+    const response = await fetch(path, body === undefined ? {} : {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Annotation-Token': token},
+      body: JSON.stringify(body)
+    });
+    const value = await response.json();
+    if (!response.ok) throw new Error(value.error || '请求失败');
+    return value;
+  }
+  function message(value, error = false) { $('message').textContent = value; $('message').style.color = error ? '#a12828' : '#17683e'; }
+  function selectedPaper() { return state.papers.find(item => item.paper_id === paper); }
+  function refreshProgress() {
+    const item = selectedPaper();
+    $('progress').textContent = `已检查 ${item.reviewed_pages.length}/${item.page_count} 页；已记 ${item.occurrences.length} 处`;
+    $('page').max = item.page_count;
+    $('reviewPage').textContent = item.reviewed_pages.includes(page) ? '撤销本页完成标记' : '标记本页已完整检查';
+    $('reviewPage').className = item.reviewed_pages.includes(page) ? 'secondary' : '';
+  }
+  function renderRecords() {
+    const target = $('recordList'); target.replaceChildren();
+    const items = selectedPaper().occurrences.filter(item => item.page === page);
+    for (const item of items) {
+      const box = document.createElement('div'); box.className = 'card';
+      const label = document.createElement('div');
+      label.textContent = `${item.style} · ${item.anchor ? `锚点 ${item.anchor.start}–${item.anchor.end}` : '未映射'}`;
+      const quote = document.createElement('code'); quote.textContent = item.visual_quote;
+      const remove = document.createElement('button'); remove.className = 'danger'; remove.textContent = '删除';
+      remove.onclick = () => execute(async () => {
+        await request('/api/delete', {paper_id: paper, annotation_id: item.annotation_id});
+        await refreshState(); message('已删除；本页需重新确认完整检查。');
+      });
+      box.append(label, quote, remove); target.append(box);
+    }
+    if (!items.length) target.textContent = '本页尚无记录；零引用页也可以完成检查。';
+  }
+  function renderCandidates() {
+    const target = $('candidates'); target.replaceChildren();
+    if (!candidates.length) { target.textContent = '未找到自动匹配；可从上方提取文本直接选择原文再试。'; return; }
+    candidates.forEach((candidate, index) => {
+      const label = document.createElement('label'); label.className = 'card'; label.style.display = 'block';
+      const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'candidate'; radio.value = index;
+      const title = document.createElement('span'); title.textContent = ` 候选 ${index + 1} · ${candidate.anchor.start}–${candidate.anchor.end}`;
+      const context = document.createElement('code'); context.textContent = candidate.context;
+      label.append(radio, title, context); target.append(label);
+    });
+  }
+  async function refreshState() {
+    state = await request('/api/state'); refreshProgress(); renderRecords();
+  }
+  async function loadPage() {
+    paper = $('paper').value; page = Number($('page').value);
+    const result = await request(`/api/page/${encodeURIComponent(paper)}/${page}`);
+    $('pdf').src = `/pdf/${encodeURIComponent(paper)}#page=${page}`;
+    $('extracted').textContent = result.text;
+    $('quote').value = ''; candidates = []; $('candidates').replaceChildren();
+    $('unmapped').checked = false; $('reason').value = '';
+    refreshProgress(); renderRecords(); message('');
+  }
+  async function execute(fn) { try { await fn(); } catch (error) { message(error.message, true); } }
+  $('load').onclick = () => execute(loadPage);
+  $('paper').onchange = () => execute(async () => { $('page').value = 1; await loadPage(); });
+  $('useSelection').onclick = () => {
+    const selection = window.getSelection();
+    if (!selection || !selection.toString().trim() || !$('extracted').contains(selection.anchorNode)) {
+      message('请先在提取文本区域选择一处引用。', true); return;
+    }
+    $('quote').value = selection.toString(); message('已填入选中文本；仍需核对 PDF 可见内容。');
+  };
+  $('match').onclick = () => execute(async () => {
+    candidates = await request('/api/matches', {paper_id: paper, page, visual_quote: $('quote').value});
+    renderCandidates(); message(`找到 ${candidates.length} 处候选，请核对上下文。`);
+  });
+  $('add').onclick = () => execute(async () => {
+    const checked = document.querySelector('input[name="candidate"]:checked');
+    const unmapped = $('unmapped').checked;
+    if (!unmapped && !checked) throw new Error('请选择一个锚点；确实无法映射时需说明原因。');
+    await request('/api/occurrences', {
+      paper_id: paper, page, visual_quote: $('quote').value, style: $('style').value,
+      candidate_index: unmapped ? null : Number(checked.value),
+      unmappable_reason: unmapped ? $('reason').value : null
+    });
+    await refreshState(); candidates = []; renderCandidates(); $('quote').value = '';
+    $('unmapped').checked = false; $('reason').value = '';
+    message('已保存；完成本页后请标记已完整检查。');
+  });
+  $('reviewPage').onclick = () => execute(async () => {
+    const reviewed = !selectedPaper().reviewed_pages.includes(page);
+    await request('/api/review-page', {paper_id: paper, page, reviewed});
+    await refreshState(); message(reviewed ? '本页已标记完整检查。' : '已撤销本页完成标记。');
+  });
+  execute(async () => {
+    state = await request('/api/state');
+    for (const item of state.papers) {
+      const option = document.createElement('option'); option.value = item.paper_id; option.textContent = item.paper_id;
+      $('paper').append(option);
+    }
+    await loadPage();
+  });
+</script>
+</body>
+</html>
