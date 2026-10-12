@@ -220,8 +220,10 @@ task was an auditable build-output sidecar contract that keeps all frozen
 source bytes immutable; neither making the dependency tree generally writable
 nor accepting a cached trace as proof is an acceptable shortcut.
 
-A further local cold replay on 2026-10-12 used that sidecar, the same frozen
-source and patch closure, and a fresh build-work directory. It compiled all
+A further local cold replay on 2026-10-12 used an **earlier writable widget
+facade policy**, the same frozen source and patch closure, and a fresh
+build-work directory. The facade was external to the read-only source, but
+this was not yet the final file-only output policy. It compiled all
 8,529 Mathlib modules and the frozen challenge, then entered the OAI solution
 dependency build. At the 7,200-second Comparator wall-clock limit it had not
 completed `Nonvanishing.lean`; the process group was terminated. The receipt
@@ -232,11 +234,14 @@ outputs were sealed separately as a content-addressed **diagnostic** cache,
 not as verification evidence. Raw receipts, logs, and cache bytes stay outside
 this repository. Local formal replay success remains **not observed**.
 
+A subsequent policy revision allowed only the `.hash` sidecar file to be
+writable, denied unlisted widget outputs, and passed a local Lake target probe.
 A second Ubuntu host independently fetched handoff commit `5d7794b`, the
 pinned source and dependency commits, and the tool sources. Its 15-check
 sandbox audit passed, and its cold replay used a separate ledger and build-work
-tree. At the same 7,200-second limit it was still compiling Mathlib: the
-challenge, statement comparison, and kernel check did not finish. Its own
+tree **under that final file-only policy**. At the same 7,200-second limit it
+was still compiling Mathlib: the challenge, statement comparison, and kernel
+check did not finish. Its own
 receipt and gate independently record `UNRESOLVED`, no QualificationReceipt,
 and no current-use binding. Source and patch closure remained unchanged and
 the Comparator process group was gone after termination. This is a **completed

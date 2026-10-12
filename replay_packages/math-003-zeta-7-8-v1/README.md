@@ -10,15 +10,18 @@ review is a separate candidate and is not an input to this replay.
 **Current limitation (2026-10-12):** no successful full-project replay, locally
 or externally, has yet been registered. The first local challenge build
 stopped when ProofWidgets tried to write a `.hash` sidecar in a read-only
-dependency. The narrow file-only output mount below resolved that fault: a
-subsequent cold run built the frozen challenge and reached the OAI solution
-dependencies, but exhausted its 7,200-second wall-clock budget before
+dependency. An initial **writable widget facade outside the frozen source**
+resolved that fault for a subsequent local cold run. That run built the frozen
+challenge and reached the OAI solution dependencies, but exhausted its
+7,200-second wall-clock budget before
 `Nonvanishing.lean` finished. Statement comparison and kernel checking remain
 undetermined; the local gate issued no qualification receipt. Its build outputs
 were sealed only as diagnostic cache data. Never use cached artifacts as a
-substitute for replay. A second Ubuntu host fetched handoff commit `5d7794b`
-and all pinned inputs independently; its own 7,200-second cold replay timed
-out during Mathlib compilation. That host's gate also remained `UNRESOLVED`.
+substitute for replay. The final **file-only** policy below subsequently passed
+the local widget target probe and a 15-check audit on a second Ubuntu host.
+That host fetched handoff commit `5d7794b` and all pinned inputs independently;
+its 7,200-second cold replay under the final policy timed out during Mathlib
+compilation. Its gate also remained `UNRESOLVED`.
 Neither attempt establishes full-project formal verification or independent
 organizational review.
 
