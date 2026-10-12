@@ -232,11 +232,17 @@ outputs were sealed separately as a content-addressed **diagnostic** cache,
 not as verification evidence. Raw receipts, logs, and cache bytes stay outside
 this repository. Local formal replay success remains **not observed**.
 
-A second Ubuntu host independently fetched the published handoff revision,
-the pinned source and dependency commits, and the tool sources. Its sandbox
-audit passed, and its own cold replay uses a separate ledger and build-work
-tree. This is a cross-host execution attempt, not yet a completed external
-reverification or an authenticated independent trust domain.
+A second Ubuntu host independently fetched handoff commit `5d7794b`, the
+pinned source and dependency commits, and the tool sources. Its 15-check
+sandbox audit passed, and its cold replay used a separate ledger and build-work
+tree. At the same 7,200-second limit it was still compiling Mathlib: the
+challenge, statement comparison, and kernel check did not finish. Its own
+receipt and gate independently record `UNRESOLVED`, no QualificationReceipt,
+and no current-use binding. Source and patch closure remained unchanged and
+the Comparator process group was gone after termination. This is a **completed
+cross-host attempt**, not a successful full-project replay or an authenticated
+independent verifier trust domain. Hardware capacity, especially 11 GiB RAM
+and swap pressure, limited this host's cold-build throughput.
 
 The CLI now accepts the audited `--patched-closure-root` and a fresh
 `--build-work-root` for the authoritative `bwrap-v1` replay, and refuses an

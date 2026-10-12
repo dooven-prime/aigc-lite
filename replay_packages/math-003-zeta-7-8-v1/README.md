@@ -7,8 +7,8 @@ before running it. There is no expected `PASS` asserted by this package: the
 outcome must be observed on each execution. The RIME `11/12` RTheta paper
 review is a separate candidate and is not an input to this replay.
 
-**Current limitation (2026-10-12):** no successful full-project replay or
-external re-execution has yet been registered. The first local challenge build
+**Current limitation (2026-10-12):** no successful full-project replay, locally
+or externally, has yet been registered. The first local challenge build
 stopped when ProofWidgets tried to write a `.hash` sidecar in a read-only
 dependency. The narrow file-only output mount below resolved that fault: a
 subsequent cold run built the frozen challenge and reached the OAI solution
@@ -16,7 +16,11 @@ dependencies, but exhausted its 7,200-second wall-clock budget before
 `Nonvanishing.lean` finished. Statement comparison and kernel checking remain
 undetermined; the local gate issued no qualification receipt. Its build outputs
 were sealed only as diagnostic cache data. Never use cached artifacts as a
-substitute for replay.
+substitute for replay. A second Ubuntu host fetched handoff commit `5d7794b`
+and all pinned inputs independently; its own 7,200-second cold replay timed
+out during Mathlib compilation. That host's gate also remained `UNRESOLVED`.
+Neither attempt establishes full-project formal verification or independent
+organizational review.
 
 An external operator should use their own Linux host, clean directory, own
 workspace ledger, and their own source retrieval. Copying our SQLite database,
@@ -186,7 +190,8 @@ identifier for the external execution. Do **not** merge it into a local Run or
 call it independent validation merely because the host differs: operator,
 organization, trust-domain and signing identity need their own authentication.
 
-This package can be retrieved and attempted by another operator once the
-containing `aigc-lite` revision is published. Until an actual outside run is
-returned and authenticated, `external_independent_reverification` remains
-**not observed**.
+This package is published for another operator to retrieve and attempt. The
+cross-host run above is a real execution but was conducted on a user-controlled
+host, did not finish the Comparator chain, and did not authenticate a separate
+verifier organization. `external_independent_reverification` remains **not
+observed**.
