@@ -61,8 +61,9 @@ async def current_user(
     if not session:
         raise HTTPException(status_code=401, detail="Login required")
     user = get_repository().get_user(session["user_id"])
-    if not user:
+    if not user or user["tenant_id"] != session["tenant_id"]:
         raise HTTPException(status_code=401, detail="User session is invalid")
+    request.state.auth_token_hash = token_hash(token)
     request.state.user_id = user["id"]
     request.state.tenant_id = user["tenant_id"]
     request.state.scopes = _role_scopes(user["role"])

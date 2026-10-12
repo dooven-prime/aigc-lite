@@ -75,9 +75,14 @@ key without the matching database is not useful.
 - `/health` is dependency-free liveness. Use `/ready` for database connectivity,
   exact Alembic head, and scheduler loop state; it returns 503 on a failed check
   without exposing database exception text.
-- Login-specific lockout, logout, session revocation, password change, and
-  expired-session cleanup APIs are not yet complete.
-- Scheduler execution is process-local and does not claim multi-worker leasing.
+- Current-session logout/revocation is available. Login-specific lockout,
+  all-session revocation, password change, and expired-session cleanup APIs
+  are not yet complete.
+- Scheduler wakeups may run on multiple workers, but each due occurrence has one
+  durable firing identity and owner lease. Expired/interrupted firings become
+  `indeterminate` and are not automatically replayed. Inspect the admin
+  `/api/schedules/{task_id}/firings` endpoint before manual reconciliation;
+  arbitrary external targets do not have exactly-once side effects.
 - Python thread tools cannot be forcibly terminated; use process mode or an
   external sandbox where hard cancellation is required.
 - Endpoint validation and disabled redirects reduce credential confusion but

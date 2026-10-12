@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -174,3 +174,109 @@ async def stream_chat(
                     yield delta["content"]
     except (httpx.HTTPError, json.JSONDecodeError, IndexError, TypeError) as exc:
         raise UpstreamRequestError(f"LLM stream failed: {exc}") from exc
+
+
+async def stream_completion(
+    messages: list[dict[str, Any]],
+    model: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    provider: dict[str, Any] | None = None,
+    *,
+    on_delta: Callable[[str], Awaitable[None]],
+) -> dict[str, Any]:
+    """Stream one model turn, assembling tool calls before the shared Agent loop acts."""
+    api_key, base_url, values = _provider_connection(provider)
+    payload: dict[str, Any] = {
+        "model": model or values.get("model") or settings.llm_model,
+        "messages": messages,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        **_provider_payload(base_url),
+    }
+    if tools:
+        payload.update(tools=tools, tool_choice="auto")
+    content: list[str] = []
+    calls: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] = {}
+    done = False
+    try:
+        async with (
+            httpx.AsyncClient(
+                base_url=base_url, timeout=settings.llm_timeout, follow_redirects=False
+            ) as client,
+            client.stream(
+                "POST", "/chat/completions", json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+            ) as response,
+        ):
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                item = line[6:]
+                if item == "[DONE]":
+                    done = True
+                    break
+                data = json.loads(item)
+                if not isinstance(data, dict):
+                    raise UpstreamResponseError("LLM returned an invalid stream event")
+                if isinstance(data.get("usage"), dict):
+                    usage = data["usage"]
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if not isinstance(choice, dict) or not isinstance(choice.get("delta"), dict):
+                    raise UpstreamResponseError("LLM returned an invalid stream delta")
+                if choice.get("finish_reason") == "length":
+                    raise UpstreamResponseError("LLM truncated a streamed model turn")
+                delta = choice["delta"]
+                fragment = delta.get("content")
+                if fragment is not None:
+                    if not isinstance(fragment, str):
+                        raise UpstreamResponseError("LLM returned invalid text content")
+                    if fragment:
+                        content.append(fragment)
+                        await on_delta(fragment)
+                for part in delta.get("tool_calls") or []:
+                    if not isinstance(part, dict) or type(part.get("index")) is not int:
+                        raise UpstreamResponseError("LLM returned an invalid tool-call index")
+                    index = part["index"]
+                    if index < 0 or index > 255:
+                        raise UpstreamResponseError("LLM returned an invalid tool-call index")
+                    call = calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    for field in ("id", "type"):
+                        piece = part.get(field)
+                        if piece is not None:
+                            if not isinstance(piece, str):
+                                raise UpstreamResponseError("LLM returned an invalid tool call")
+                            if field == "type" and piece != "function":
+                                raise UpstreamResponseError("LLM returned an unsupported tool call")
+                            if field == "id":
+                                call[field] += piece
+                                if len(call[field]) > 256:
+                                    raise UpstreamResponseError("LLM tool-call identity is too long")
+                    function = part.get("function") or {}
+                    if not isinstance(function, dict):
+                        raise UpstreamResponseError("LLM returned an invalid tool call")
+                    for field in ("name", "arguments"):
+                        piece = function.get(field)
+                        if piece is not None:
+                            if not isinstance(piece, str):
+                                raise UpstreamResponseError("LLM returned an invalid tool call")
+                            call["function"][field] += piece
+                            if len(call["function"][field]) > (
+                                256 if field == "name" else 65_536
+                            ):
+                                raise UpstreamResponseError("LLM tool-call payload is too long")
+    except (httpx.HTTPError, json.JSONDecodeError, IndexError, TypeError) as exc:
+        raise UpstreamRequestError(f"LLM stream failed: {exc}") from exc
+    if not done:
+        raise UpstreamResponseError("LLM stream ended before completion")
+    ordered = [calls[index] for index in sorted(calls)]
+    if any(not call["id"] or not call["function"]["name"] for call in ordered):
+        raise UpstreamResponseError("LLM returned an incomplete tool call")
+    return {
+        "role": "assistant", "content": "".join(content),
+        "tool_calls": ordered, "_usage": usage,
+    }

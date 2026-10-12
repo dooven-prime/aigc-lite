@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from ..adapters.credentials import EncryptedCredentialProvider
-from ..agent import build_messages, run_agent
+from ..agent import run_agent
 from ..audit import usage_from_response
 from ..config import settings
 from ..core.artifacts import ArtifactDraft, ArtifactKind
@@ -32,9 +32,10 @@ from ..core.errors import (
     ProviderNotConfiguredError,
     ResourceNotFoundError,
     RunNotActiveError,
+    UpstreamResponseError,
 )
 from ..database import get_repository
-from ..providers import stream_chat
+from ..providers import stream_completion
 from ..repository import Repository
 from .artifacts import ArtifactService
 from .chat_capabilities import ChatCapabilityPolicy
@@ -43,8 +44,8 @@ from .tool_catalog import ToolCatalog, create_default_tool_catalog
 AgentRunner = Callable[..., Awaitable[str]]
 RepositoryProvider = Callable[[], Repository]
 UsageRecorder = Callable[[dict, str, str, dict | None], None]
-MessageBuilder = Callable[..., list[dict]]
 StreamRunner = Callable[..., AsyncIterator[str]]
+_MAX_STREAM_BYTES = 2 * 1024 * 1024
 
 
 class _ActiveRunRegistry:
@@ -87,8 +88,7 @@ class GatewayService:
         repository_provider: RepositoryProvider = get_repository,
         agent_runner: AgentRunner = run_agent,
         usage_recorder: UsageRecorder = usage_from_response,
-        message_builder: MessageBuilder = build_messages,
-        stream_runner: StreamRunner = stream_chat,
+        stream_runner: StreamRunner | None = None,
         tool_catalog: ToolCatalog | None = None,
         active_runs: _ActiveRunRegistry | None = None,
         artifact_service: ArtifactService | None = None,
@@ -97,7 +97,6 @@ class GatewayService:
         self._repository_provider = repository_provider
         self._agent_runner = agent_runner
         self._usage_recorder = usage_recorder
-        self._message_builder = message_builder
         self._stream_runner = stream_runner
         self._tool_catalog = tool_catalog or create_default_tool_catalog(
             repository_provider
@@ -300,7 +299,7 @@ class GatewayService:
     async def stream_chat(
         self, command: ChatCommand, context: RequestContext
     ) -> ChatStreamResult:
-        """Start a stream whose final content is persisted as one model step."""
+        """Stream model deltas while using the same bounded Agent/tool loop as chat."""
         self._validate_attachments(command.attachments)
         capability = self._chat_capability_policy.resolve(
             context, command.capability_set_id
@@ -335,9 +334,27 @@ class GatewayService:
         model_prompt = self._attachment_prompt(
             command, context, run["id"], session["id"]
         )
-        messages = self._message_builder(
-            model_prompt, command.system, history, context.workspace_id
-        )
+        sequence = 0
+        events: asyncio.Queue[dict[str, Any] | BaseException | None] = asyncio.Queue()
+
+        def record_step(step: AgentStepRecord) -> None:
+            nonlocal sequence
+            sequence += 1
+            stored_step = repository.append_run_step(
+                context.workspace_id, run["id"], sequence, step.kind.value,
+                step.name, step.status.value, step.input_content,
+                step.output_content,
+                {**step.metadata, "chat_capability": capability_metadata, "stream": True},
+            )
+            if step.artifacts or step.citations:
+                self._artifact_service.record_tool_result(
+                    context, run_id=run["id"], step_id=stored_step["id"],
+                    artifacts=step.artifacts, citations=step.citations,
+                )
+            events.put_nowait({
+                "event": "step", "sequence": sequence, "kind": step.kind.value,
+                "name": step.name, "status": step.status.value,
+            })
 
         def record_usage(usage: dict) -> None:
             pricing = model_config or {
@@ -348,19 +365,51 @@ class GatewayService:
                 usage, selected_model, context.workspace_id, pricing
             )
 
-        async def chunks() -> AsyncIterator[str]:
-            collected: list[str] = []
-            task = asyncio.current_task()
-            if task is not None:
-                self._active_runs.register(context.workspace_id, run["id"], task)
+        async def execute() -> None:
+            turn = 0
+            stream_bytes = 0
+
+            async def model_completion(messages, model, tools, selected_provider):
+                nonlocal turn
+                turn += 1
+
+                async def on_delta(content: str) -> None:
+                    nonlocal stream_bytes
+                    stream_bytes += len(content.encode())
+                    if stream_bytes > _MAX_STREAM_BYTES:
+                        raise UpstreamResponseError("LLM stream exceeds the output size limit")
+                    events.put_nowait({"content": content, "turn": turn})
+
+                if self._stream_runner is not None:
+                    # Legacy injectable text-only stream used by local adapters/tests.
+                    parts = []
+                    async for part in self._stream_runner(
+                        messages, model, selected_provider, record_usage
+                    ):
+                        parts.append(part)
+                        await on_delta(part)
+                    return {"role": "assistant", "content": "".join(parts)}
+                return await stream_completion(
+                    messages, model, tools, selected_provider, on_delta=on_delta
+                )
+
             try:
                 try:
                     async with asyncio.timeout(settings.max_agent_run_seconds):
-                        async for chunk in self._stream_runner(
-                            messages, model_name, provider, record_usage
-                        ):
-                            collected.append(chunk)
-                            yield chunk
+                        tool_session = await self._tool_catalog.open(
+                            capability.context, access_policy=capability,
+                            run_id=run["id"],
+                        )
+                        content = await run_agent(
+                            model_prompt, command.system, model_name,
+                            settings.max_agent_steps, history, context.workspace_id,
+                            provider=provider, usage_callback=record_usage,
+                            step_callback=record_step,
+                            available_tools=tool_session.model_schemas(),
+                            tool_invoker=tool_session.invoke,
+                            max_tool_calls=settings.max_agent_tool_calls,
+                            model_completion=model_completion,
+                        )
                 except TimeoutError as exc:
                     error = AgentWallTimeLimitError(settings.max_agent_run_seconds)
                     self._record_terminal_run(
@@ -370,7 +419,7 @@ class GatewayService:
                         command,
                         selected_model,
                         error.code.value,
-                        1,
+                        sequence + 1,
                         RunStatus.LIMIT_REACHED,
                         StepStatus.FAILED,
                         {**error.metadata, "chat_capability": capability_metadata},
@@ -389,33 +438,18 @@ class GatewayService:
                         command,
                         selected_model,
                         exc.code.value,
-                        1,
+                        sequence + 1,
                         run_status,
                         StepStatus.FAILED,
                         {**exc.metadata, "chat_capability": capability_metadata},
                     )
                     raise
-                except (asyncio.CancelledError, GeneratorExit):
-                    repository.append_run_step(
-                        context.workspace_id,
-                        run["id"],
-                        1,
-                        StepKind.MODEL.value,
-                        selected_model,
-                        StepStatus.CANCELLED.value,
-                        command.prompt,
-                        "".join(collected),
-                        {
-                            "cancelled": True,
-                            "error_code": ErrorCode.AGENT_CANCELLED.value,
-                            "chat_capability": capability_metadata,
-                        },
-                    )
-                    repository.finish_run(
-                        context.workspace_id,
-                        run["id"],
-                        RunStatus.CANCELLED.value,
-                        ErrorCode.AGENT_CANCELLED.value,
+                except asyncio.CancelledError:
+                    self._record_terminal_run(
+                        repository, context, run["id"], command, selected_model,
+                        ErrorCode.AGENT_CANCELLED.value, sequence + 1,
+                        RunStatus.CANCELLED, StepStatus.CANCELLED,
+                        {"chat_capability": capability_metadata, "stream": True},
                     )
                     raise
                 except Exception:
@@ -426,39 +460,42 @@ class GatewayService:
                         command,
                         selected_model,
                         ErrorCode.INTERNAL_ERROR.value,
-                        1,
+                        sequence + 1,
                         RunStatus.FAILED,
                         StepStatus.FAILED,
                         {"chat_capability": capability_metadata},
                     )
                     raise
 
-                content = "".join(collected)
                 repository.add_message(
                     context.workspace_id, session["id"], "assistant", content
-                )
-                repository.append_run_step(
-                    context.workspace_id,
-                    run["id"],
-                    1,
-                    StepKind.MODEL.value,
-                    selected_model,
-                    StepStatus.SUCCEEDED.value,
-                    command.prompt,
-                    content,
-                    {
-                        "stream": True,
-                        "chat_capability": capability_metadata,
-                    },
                 )
                 repository.finish_run(
                     context.workspace_id, run["id"], RunStatus.SUCCEEDED.value
                 )
+            except BaseException as exc:
+                events.put_nowait(exc)
             finally:
-                if task is not None:
-                    self._active_runs.unregister(
-                        context.workspace_id, run["id"], task
-                    )
+                current = asyncio.current_task()
+                if current is not None:
+                    self._active_runs.unregister(context.workspace_id, run["id"], current)
+                events.put_nowait(None)
+
+        async def chunks() -> AsyncIterator[dict[str, Any]]:
+            worker = asyncio.create_task(execute(), name=f"stream-chat:{run['id']}")
+            self._active_runs.register(context.workspace_id, run["id"], worker)
+            try:
+                while True:
+                    item = await events.get()
+                    if item is None:
+                        break
+                    if isinstance(item, BaseException):
+                        raise item
+                    yield item
+            finally:
+                if not worker.done():
+                    worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
 
         return ChatStreamResult(
             session_id=session["id"], run_id=run["id"], chunks=chunks()

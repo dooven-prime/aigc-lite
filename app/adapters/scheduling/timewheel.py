@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from ...core.contracts import RequestContext
 from ...core.errors import ApplicationError, ResourceNotFoundError
@@ -152,12 +153,15 @@ class TimeWheelScheduler:
         tick_seconds: float = 1.0,
         reconcile_seconds: float = 5.0,
         max_concurrency: int = 4,
+        lease_seconds: int = 60,
         clock=lambda: datetime.now(UTC),
     ) -> None:
         if not math.isfinite(reconcile_seconds) or reconcile_seconds <= 0:
             raise ValueError("reconcile_seconds must be positive")
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be positive")
+        if lease_seconds < 3:
+            raise ValueError("lease_seconds must be at least 3")
         self._scheduler_service = scheduler_service
         self._task_runner = task_runner
         self._tick_seconds = float(tick_seconds)
@@ -165,6 +169,8 @@ class TimeWheelScheduler:
         self._clock = clock
         self._index = TimeWheelIndex(tick_seconds)
         self._max_concurrency = max_concurrency
+        self._lease_seconds = lease_seconds
+        self._owner = str(uuid4())
         self._semaphore: asyncio.Semaphore | None = None
         self._loop_task: asyncio.Task[None] | None = None
         self._inflight: dict[str, asyncio.Task[None]] = {}
@@ -230,6 +236,9 @@ class TimeWheelScheduler:
             raise
 
     async def _reconcile(self, now: datetime) -> None:
+        expired = self._scheduler_service.reconcile_expired(now=now)
+        if expired:
+            logger.warning("Scheduled firings require reconciliation", extra={"count": expired})
         await self.dispatch_due(now=now)
         self._index.rebuild(self._scheduler_service.recover_active(), now=now)
 
@@ -264,29 +273,45 @@ class TimeWheelScheduler:
         self._inflight[task.id] = worker
 
     async def _execute(self, task: ScheduledTask) -> None:
-        accepted = False
-        cancelled_by_shutdown = False
+        firing_id: str | None = None
+        outcome = "succeeded"
+        error_kind: str | None = None
+        heartbeat: asyncio.Task[None] | None = None
         try:
             semaphore = self._semaphore
             if semaphore is None:  # pragma: no cover - workers only exist while started
                 return
             async with semaphore:
-                accepted = True
-                await self._task_runner.run(task)
+                firing_id = self._scheduler_service.claim(
+                    task, owner=self._owner, now=self._clock(),
+                    lease_seconds=self._lease_seconds,
+                )
+                if firing_id is None:
+                    return
+                heartbeat = asyncio.create_task(self._renew_lease(firing_id))
+                await self._task_runner.run(replace(task, execution_id=firing_id))
         except asyncio.CancelledError:
-            cancelled_by_shutdown = self._stopping
-            if cancelled_by_shutdown:
-                raise
+            outcome = "indeterminate"
+            error_kind = "cancelled_during_execution"
+            raise
         except Exception:
+            outcome = "failed"
+            error_kind = "target_failed"
             logger.exception(
                 "Scheduled target failed",
                 extra={"scheduled_task_id": task.id, "target": task.target},
             )
         finally:
             try:
-                if accepted and not cancelled_by_shutdown:
+                if heartbeat is not None:
+                    heartbeat.cancel()
+                    await asyncio.gather(heartbeat, return_exceptions=True)
+                if firing_id is not None and self._scheduler_service.finish_firing(
+                    firing_id, owner=self._owner, state=outcome,
+                    now=self._clock(), error_kind=error_kind,
+                ) and outcome != "indeterminate":
                     context = RequestContext(
-                        request_id=f"schedule-ack:{task.id}",
+                        request_id=f"schedule-ack:{firing_id}",
                         workspace_id=task.workspace_id,
                         principal_id="system:scheduler",
                     )
@@ -301,3 +326,13 @@ class TimeWheelScheduler:
                 )
             finally:
                 self._inflight.pop(task.id, None)
+
+    async def _renew_lease(self, firing_id: str) -> None:
+        while True:
+            await asyncio.sleep(self._lease_seconds / 3)
+            if not self._scheduler_service.renew(
+                firing_id, owner=self._owner, now=self._clock(),
+                lease_seconds=self._lease_seconds,
+            ):
+                logger.error("Scheduled firing lease renewal lost", extra={"firing_id": firing_id})
+                return

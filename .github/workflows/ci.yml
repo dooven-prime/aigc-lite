@@ -20,6 +20,7 @@ jobs:
       - run: pip install pip-audit
       - run: python -m pip_audit --local --skip-editable
       - run: ruff check app tests extensions/ros2-bridge/src
+      - run: python -m compileall -q app
       - run: pytest
   frontend:
     runs-on: ubuntu-latest
@@ -92,6 +93,15 @@ jobs:
         with:
           python-version: "3.12"
       - run: docker build -t aigc-lite:ci .
+      - name: Reject insecure public startup
+        run: |
+          if docker run --rm aigc-lite:ci > insecure-startup.log 2>&1; then
+            cat insecure-startup.log
+            echo "Insecure public container unexpectedly started"
+            exit 1
+          fi
+          grep -q 'Unsafe non-loopback startup refused' insecure-startup.log
+          grep -q 'AIGC_LITE_AUTH_SECRET' insecure-startup.log
       - name: Start hardened container and smoke HTTP/UI
         run: |
           AUTH_SECRET=$(python -c 'import secrets; print(secrets.token_urlsafe(48))')

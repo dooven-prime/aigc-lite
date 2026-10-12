@@ -7,7 +7,9 @@ from collections.abc import Callable
 CandidateLoader = Callable[[str, int], list[dict]]
 
 
-def rank_lexical(rows: list[dict], query: str, limit: int) -> list[dict]:
+def rank_lexical(
+    rows: list[dict], query: str, limit: int, *, max_results: int = 50
+) -> list[dict]:
     """Apply the stable public result projection to lexical candidates."""
     terms = [term.casefold() for term in query.split() if term.strip()]
     if not terms:
@@ -38,7 +40,7 @@ def rank_lexical(rows: list[dict], query: str, limit: int) -> list[dict]:
             }
         )
     ranked.sort(key=lambda item: (item["score"], item["created_at"]), reverse=True)
-    return ranked[: max(1, min(limit, 50))]
+    return ranked[: max(1, min(limit, max_results))]
 
 
 class LexicalSearchBackend:

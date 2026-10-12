@@ -147,7 +147,7 @@ class VerificationRunner:
         self.validate_task_payload(task.payload)
         return await self.execute(
             RequestContext(
-                request_id=f"schedule:{task.id}:{uuid4()}",
+                request_id=f"schedule:{task.id}:{task.execution_id or uuid4()}",
                 workspace_id=task.workspace_id,
                 principal_id="system:scheduler",
             ),

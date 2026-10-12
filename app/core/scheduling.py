@@ -58,3 +58,4 @@ class ScheduledTask:
     last_run_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    execution_id: str | None = None

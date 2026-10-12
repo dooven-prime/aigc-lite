@@ -12,6 +12,7 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/auth/register`：按部署 signup 策略注册 workspace 与用户
 - `POST /api/auth/login`：创建登录 session
 - `GET /api/auth/me`：读取当前登录身份和角色
+- `POST /api/auth/logout`：撤销当前 bearer 登录 session（其他 session 不受影响）
 - `GET|POST /api/sessions`：创建和列出会话
 - `GET /api/sessions/{session_id}`：读取当前租户会话及消息
 - `POST /api/chat`：同步 Agent 对话
@@ -66,6 +67,8 @@ configuration, and deployment constraints are documented separately in
 - `GET /api/research/math-release-imports` 与 `GET /api/research/math-release-imports/{import_id}`：查询目录快照；详情可显式传 `include_families=true`，不代表数学资格
 - `GET /api/research/rime-consumer/contract`：读取固定上游 commit 的完整合同包清单、manifest/checker 摘要和有限重放上界；当前提交修订为 `aigc-lite.rime.consumer-replay.v2`
 - `POST /api/research/rime-consumer/witnesses`：管理员提交纯数据 witness；逐前缀三路重放并写入新的 Case/Run/Artifact/VerificationAttempt，保持 candidate-only；可用 `prior_case_id` 关联同一数学 witness 的旧 Case，但不追溯修复其来源；格式见 [RIME Consumer Case](RIME_CONSUMER_CASE.md)
+- `GET /api/research/bio-in-vitro/contract`：读取限定体外观测 Profile、checker 摘要与未鉴真边界
+- `POST /api/research/bio-in-vitro/witnesses`：管理员提交已完成实验的配对测量数据；确定性重算并仅对精确数据内的均值阈值 Claim 求值，不自动纳入知识层或授权实验；格式见 [In-vitro Observation Case](BIO_IN_VITRO_CASE.md)
 - `POST /api/enforcement/policy-proposals`：管理员提交 base/candidate execution policy；服务端冻结两份 snapshot 并确定性计算 `PermissionDiff`，不批准或应用策略
 - `GET /api/enforcement/policy-proposals` 与 `GET /api/enforcement/policy-proposals/{proposal_id}`：查询 workspace 的不可变策略提案与扩权/收权明细
 - `GET /api/enforcement/issuers`：列出主机代码注册、能够签发 enforcement evidence 的 backend identity；请求不能注册 issuer
@@ -78,6 +81,7 @@ configuration, and deployment constraints are documented separately in
 - `GET /api/enforcement/receipts/{receipt_id}/signature-verification`：使用当前 host-owned trust roots 重验已存签名；不改写历史验证结果
 - `GET|POST /api/schedules`：管理员创建或列出当前 workspace 的计划任务
 - `GET /api/schedules/{task_id}`：管理员读取计划任务详情
+- `GET /api/schedules/{task_id}/firings`：管理员读取最近 100 条持久化触发记录、lease 与不确定状态
 - `POST /api/schedules/{task_id}/pause|resume|cancel`：管理员控制后续触发
 - `GET /api/search?q=...`：搜索对话、导入候选消息、知识文档、执行步骤、产物、来源和研究主张
 - Decision Case 与 Research Claim 同样进入统一搜索，可跳转到对应工作台
@@ -118,10 +122,12 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 `attachments: [{"name":"notes.md","content":"..."}]`。单文件上限 16 KiB，总计
 32 KiB。附件只在本轮作为不可信输入使用，并保存为关联该 Run、Session 的 candidate-only
 Artifact；不会调用 `/api/knowledge/upload`，不会自动进入知识索引或取得 qualification。
-`/api/chat/stream` 以 POST SSE 返回增量 `{"content":"..."}`，头部提供
+`/api/chat/stream` 以 POST SSE 返回增量 `{"content":"...","turn":1}` 和脱敏的
+`{"event":"step","sequence":1,"kind":"tool","name":"...","status":"..."}`；头部提供
 `X-Run-Id` 和 `X-Session-Id`；取消使用 `POST /api/runs/{run_id}/cancel`。
-当前流式端点是模型增量输出，不执行同步 `/api/chat` 的 Agent Tool Catalog
-调用循环；前端的流式聊天因此不是工具调用模式。两条路径的执行能力不可等同。
+同步与流式端点共用有界 Agent Tool Catalog 循环、预算、Run/Step 和能力决策。
+`turn` 标识模型轮次；工具步骤事件不包含参数、结果或凭据。最终 `[DONE]` 只在成功时发送，
+错误使用现有 `{"error":"...","code":"..."}` 事件。
 
 `chat.delegated.v1` 必须由拥有 `tools:write` 的已认证调用方显式选择；它不会因为 prompt、RAG
 文档或模型输出而自动启用。该集合只是允许工具进入候选面：每个远程 MCP tool，以及任何写入、
@@ -139,8 +145,7 @@ Artifact；不会调用 `/api/knowledge/upload`，不会自动进入知识索引
 未知集合返回 404；调用方没有集合要求的 scope 时返回
 `403/chat_capability_not_allowed`，并且不会先创建 Session、Message 或 Run。每个已建立的 Chat
 Run 保存 `capability_set_id` 与 `capability_policy_hash`；Step metadata 同时保存实际生效的 scope。
-当前 stream 路径尚不运行工具循环，但同样解析并冻结 capability decision，避免两条入口产生无标识
-的权限语义。
+两条路径都解析并冻结同一 capability decision；stream token 不代替工具授权判定。
 
 Conversation import 的 preview/commit 闭包、支持格式与 candidate-only 边界见
 [CONVERSATION_IMPORTS.md](CONVERSATION_IMPORTS.md)。

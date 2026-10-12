@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
+import pypdf
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -299,6 +300,27 @@ def test_baseline_reports_truncation_at_occurrence_limit(tmp_path) -> None:
     assert len(preview["occurrences"]) == 200
     assert preview["occurrence_limit"] == 200
     assert preview["truncated"] is True
+
+
+def test_blind_eval_freezes_actual_pypdf_runtime_and_rejects_drift(tmp_path, monkeypatch) -> None:
+    pdf_dir = tmp_path / "pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "heldout.pdf").write_bytes(_pdf(["A citation [1].", "References", "[1] Source."]))
+    installed_version = pypdf.__version__
+    frozen_version = f"{installed_version}+freeze-test"
+    monkeypatch.setattr(pypdf, "__version__", frozen_version)
+    manifest = freeze(
+        {
+            "schema": "citation-blind-eval.v1",
+            "not_used_for_development": True,
+            "papers": [{"paper_id": "heldout", "source_uri": URI, "stratum": "synthetic"}],
+        },
+        pdf_dir,
+    )
+    assert manifest["pypdf_version"] == frozen_version
+    monkeypatch.setattr(pypdf, "__version__", installed_version)
+    with pytest.raises(ValueError, match="pypdf version changed after cohort freeze"):
+        seal(manifest, {}, pdf_dir)
 
 
 def test_blind_eval_seals_human_gold_before_running_and_scores_layers(tmp_path) -> None:

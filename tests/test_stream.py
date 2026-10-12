@@ -2,13 +2,22 @@ import asyncio
 import json
 import sqlite3
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import database, main
-from app.core.contracts import ChatCommand, RequestContext
-from app.core.errors import UpstreamRequestError
+from app.core.contracts import (
+    ChatCommand,
+    RequestContext,
+    ToolHints,
+    ToolProviderResult,
+    ToolSource,
+    ToolSpec,
+)
+from app.core.errors import AgentToolCallLimitError, UpstreamRequestError
 from app.repository import SQLiteRepository
 from app.services.gateway import GatewayService
+from app.services.tool_catalog import ToolCatalog
 
 
 async def fake_stream(_messages, _model=None, _provider=None, _usage_callback=None):
@@ -139,3 +148,114 @@ def test_stream_explicit_cancel_reaches_upstream_and_records_run(tmp_path) -> No
     assert detail["status"] == "cancelled"
     assert detail["error_code"] == "agent_cancelled"
     assert detail["steps"][0]["status"] == "cancelled"
+
+
+def test_stream_uses_bounded_agent_tool_loop_and_records_steps(tmp_path, monkeypatch) -> None:
+    repository = SQLiteRepository(tmp_path / "tool-stream.db")
+    repository.init()
+    calls: list[dict] = []
+
+    class LookupProvider:
+        provider_id = "test-lookup"
+
+        async def list_tools(self):
+            return [ToolSpec(
+                name="safe_lookup", native_name="safe_lookup", description="Read only",
+                input_schema={"type": "object"}, source=ToolSource.LOCAL,
+                provider_id=self.provider_id,
+                hints=ToolHints(read_only=True, destructive=False, idempotent=True, open_world=False),
+            )]
+
+        async def call_tool(self, name, arguments):
+            calls.append({"name": name, "arguments": arguments})
+            return ToolProviderResult(content='{"found":true}')
+
+    async def model_stream(messages, _model, tools, _provider, *, on_delta):
+        if len([item for item in messages if item["role"] == "tool"]) == 0:
+            assert any(item["function"]["name"] == "safe_lookup" for item in tools)
+            await on_delta("Checking")
+            return {
+                "role": "assistant", "content": "Checking",
+                "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "safe_lookup", "arguments": "{}"}}],
+                "_usage": {"prompt_tokens": 4, "completion_tokens": 2},
+            }
+        assert messages[-1]["role"] == "tool"
+        await on_delta("Found it")
+        return {"role": "assistant", "content": "Found it", "_usage": {"prompt_tokens": 6, "completion_tokens": 3}}
+
+    monkeypatch.setattr("app.services.gateway.stream_completion", model_stream)
+    service = GatewayService(
+        repository_provider=lambda: repository,
+        tool_catalog=ToolCatalog([LookupProvider()]),
+    )
+
+    async def run():
+        result = await service.stream_chat(ChatCommand(prompt="look up"), RequestContext(
+            request_id="stream-tool", workspace_id="workspace-a", principal_id="user-a",
+        ))
+        return result, [event async for event in result.chunks]
+
+    result, events = asyncio.run(run())
+    assert [event["content"] for event in events if "content" in event] == ["Checking", "Found it"]
+    assert [event["kind"] for event in events if event.get("event") == "step"] == ["model", "tool", "model"]
+    assert calls == [{"name": "safe_lookup", "arguments": {}}]
+    detail = repository.get_run("workspace-a", result.run_id)
+    assert detail["status"] == "succeeded"
+    assert [step["kind"] for step in detail["steps"]] == ["model", "tool", "model"]
+    assert detail["steps"][1]["metadata"]["tool_call_id"] == "call-1"
+    assert repository.get_session("workspace-a", result.session_id)["messages"][-1]["content"] == "Found it"
+
+
+def test_stream_rejects_unsolicited_tool_when_tool_budget_is_zero(tmp_path, monkeypatch) -> None:
+    repository = SQLiteRepository(tmp_path / "zero-tools.db")
+    repository.init()
+    monkeypatch.setattr("app.services.gateway.settings.max_agent_tool_calls", 0)
+
+    async def hostile_model(_messages, _model, tools, _provider, *, on_delta):
+        assert not tools
+        await on_delta("I will invoke a tool")
+        return {
+            "role": "assistant", "content": "I will invoke a tool",
+            "tool_calls": [{"id": "forged", "function": {"name": "workspace_status", "arguments": "{}"}}],
+        }
+
+    monkeypatch.setattr("app.services.gateway.stream_completion", hostile_model)
+    service = GatewayService(repository_provider=lambda: repository)
+
+    async def run():
+        result = await service.stream_chat(
+            ChatCommand(prompt="try"),
+            RequestContext(request_id="zero", workspace_id="workspace-a"),
+        )
+        with pytest.raises(AgentToolCallLimitError):
+            _ = [item async for item in result.chunks]
+        return repository.get_run("workspace-a", result.run_id)
+
+    detail = asyncio.run(run())
+    assert detail["status"] == "limit_reached"
+    assert [step["kind"] for step in detail["steps"]] == ["model", "agent"]
+
+
+def test_disconnected_stream_cancels_underlying_agent_run(tmp_path, monkeypatch) -> None:
+    repository = SQLiteRepository(tmp_path / "disconnect.db")
+    repository.init()
+
+    async def hanging_model(_messages, _model, _tools, _provider, *, on_delta):
+        await on_delta("partial")
+        await asyncio.Future()
+
+    monkeypatch.setattr("app.services.gateway.stream_completion", hanging_model)
+    service = GatewayService(repository_provider=lambda: repository)
+
+    async def run():
+        result = await service.stream_chat(
+            ChatCommand(prompt="wait"),
+            RequestContext(request_id="disconnect", workspace_id="workspace-a"),
+        )
+        assert (await anext(result.chunks))["content"] == "partial"
+        await result.chunks.aclose()
+        return repository.get_run("workspace-a", result.run_id)
+
+    detail = asyncio.run(run())
+    assert detail["status"] == "cancelled"
+    assert detail["error_code"] == "agent_cancelled"

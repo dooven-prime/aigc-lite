@@ -208,3 +208,87 @@ def test_shutdown_cancellation_leaves_schedule_due_for_restart(tmp_path) -> None
     stored = scheduler.get(_context(), scheduled.id)
     assert stored.status is ScheduleStatus.SCHEDULED
     assert stored.next_run_at == now
+
+
+def test_two_workers_claim_one_due_occurrence_once(tmp_path) -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    path = tmp_path / "shared-wheel.db"
+    first_repository = SQLiteRepository(path)
+    first_repository.init()
+    second_repository = SQLiteRepository(path)
+    first_service = SchedulerService(repository_provider=lambda: first_repository, clock=lambda: now)
+    second_service = SchedulerService(repository_provider=lambda: second_repository, clock=lambda: now)
+    scheduled = _scheduled(first_service, now)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    class SlowRunner:
+        async def run(self, task):
+            calls.append(task.execution_id)
+            started.set()
+            await release.wait()
+
+    first = TimeWheelScheduler(
+        scheduler_service=first_service, task_runner=SlowRunner(),
+        tick_seconds=3600, clock=lambda: now,
+    )
+    second = TimeWheelScheduler(
+        scheduler_service=second_service, task_runner=SlowRunner(),
+        tick_seconds=3600, clock=lambda: now,
+    )
+
+    async def scenario():
+        await first.start()
+        await started.wait()
+        await second.start()
+        await second.wait_idle()
+        assert len(calls) == 1
+        release.set()
+        await asyncio.gather(first.wait_idle(), second.wait_idle())
+        await asyncio.gather(first.stop(), second.stop())
+
+    asyncio.run(scenario())
+    assert len(calls) == 1
+    assert calls[0]
+    firing = first_repository.get_scheduled_firing(calls[0])
+    assert firing["state"] == "succeeded"
+    assert first_service.get(_context(), scheduled.id).status is ScheduleStatus.COMPLETED
+
+
+def test_cancelled_firing_is_not_silently_replayed_by_new_worker(tmp_path) -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    repository = SQLiteRepository(tmp_path / "indeterminate-wheel.db")
+    repository.init()
+    scheduler = SchedulerService(repository_provider=lambda: repository, clock=lambda: now)
+    scheduled = _scheduled(scheduler, now)
+    started = asyncio.Event()
+    firings: list[str] = []
+
+    class InterruptedRunner:
+        async def run(self, task):
+            firings.append(task.execution_id)
+            started.set()
+            await asyncio.Future()
+
+    first = TimeWheelScheduler(
+        scheduler_service=scheduler, task_runner=InterruptedRunner(),
+        tick_seconds=3600, clock=lambda: now,
+    )
+
+    async def scenario():
+        await first.start()
+        await started.wait()
+        await first.stop()
+        second = TimeWheelScheduler(
+            scheduler_service=SchedulerService(repository_provider=lambda: SQLiteRepository(repository.database_path), clock=lambda: now),
+            task_runner=InterruptedRunner(), tick_seconds=3600, clock=lambda: now,
+        )
+        await second.start()
+        await second.wait_idle()
+        await second.stop()
+
+    asyncio.run(scenario())
+    assert len(firings) == 1
+    assert repository.get_scheduled_firing(firings[0])["state"] == "indeterminate"
+    assert scheduler.get(_context(), scheduled.id).status is ScheduleStatus.SCHEDULED

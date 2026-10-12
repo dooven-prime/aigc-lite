@@ -206,6 +206,7 @@ export function App() {
   const [decisionJump, setDecisionJump] = useState<DecisionJump | null>(null);
   const [researchJump, setResearchJump] = useState<ResearchJump | null>(null);
   const [qualificationJump, setQualificationJump] = useState<ResearchJump | null>(null);
+  const [logoutError, setLogoutError] = useState("");
 
   const api = async (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers);
@@ -220,11 +221,19 @@ export function App() {
   const refresh = async () => {
     if (!token) return;
     try { setUser(await api("/api/auth/me")); setSessions(await api("/api/sessions")); }
-    catch { logout(); }
+    catch { clearLogin(); }
   };
   useEffect(() => { void refresh(); }, [token]);
 
-  const logout = () => { localStorage.removeItem("aigc-lite-token"); setToken(""); setUser(null); setSessions([]); setSession(null); };
+  const clearLogin = () => { localStorage.removeItem("aigc-lite-token"); setToken(""); setUser(null); setSessions([]); setSession(null); setLogoutError(""); };
+  const logout = async () => {
+    setLogoutError("");
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok && response.status !== 401) throw new Error("Session revocation failed");
+      clearLogin();
+    } catch { setLogoutError("Server session could not be revoked. Retry, or clear this browser only."); }
+  };
   if (!token || !user) return <Login onLogin={(next) => { localStorage.setItem("aigc-lite-token", next); setToken(next); }} />;
 
   const openSession = async (id: string) => { setSession(await api(`/api/sessions/${id}`)); setChatGeneration(value => value + 1); };
@@ -267,7 +276,8 @@ export function App() {
       <button className="primary new-button" onClick={createSession}><Plus size={16} />New conversation</button>
       <div className="nav-group"><button className={panel === "chat" ? "nav active" : "nav"} onClick={() => setPanel("chat")}><Bot size={16} />Workspace</button><button className={panel === "search" ? "nav active" : "nav"} onClick={() => setPanel("search")}><Search size={16} />Search</button><button className={panel === "runs" ? "nav active" : "nav"} onClick={() => { setRunJump(null); setPanel("runs"); }}><ListTree size={16} />Runs</button><button className={panel === "decisions" ? "nav active" : "nav"} onClick={() => { setDecisionJump(null); setPanel("decisions"); }}><Braces size={16} />Decisions</button><button className={panel === "research" ? "nav active" : "nav"} onClick={() => { setResearchJump(null); setPanel("research"); }}><Microscope size={16} />Research</button><button className={panel === "imports" ? "nav active" : "nav"} onClick={() => setPanel("imports")}><Upload size={16} />Research imports</button><button className={panel === "qualification" ? "nav active" : "nav"} onClick={() => setPanel("qualification")}><Shield size={16} />Qualification</button><button className={panel === "knowledge" ? "nav active" : "nav"} onClick={() => setPanel("knowledge")}><BookOpen size={16} />Knowledge</button><button className={panel === "models" ? "nav active" : "nav"} onClick={() => setPanel("models")}><Settings size={16} />Models</button>{user.role === "admin" && <button className={panel === "admin" ? "nav active" : "nav"} onClick={() => setPanel("admin")}><Shield size={16} />Administration</button>}</div>
       {panel === "chat" && <><div className="section-label">Recent conversations</div><div className="session-list">{sessions.map(item => <button className={item.id === session?.id ? "session active" : "session"} key={item.id} onClick={() => void openSession(item.id)}>{item.title}</button>)}</div></>}
-      <button className="logout" onClick={logout}><LogOut size={15} />Sign out</button>
+      {logoutError && <div className="error" role="alert">{logoutError}<button className="text-button" onClick={clearLogin}>Clear browser token only</button></div>}
+      <button className="logout" onClick={() => void logout()}><LogOut size={15} />Sign out</button>
     </nav>
     <main className="content">{panel === "chat" && <Chat key={chatGeneration} session={session} token={token} onCommitted={commitChatSession} />}{panel === "search" && <WorkspaceSearch api={api} onOpenRun={openRunFromSearch} onOpenDecision={openDecision} onOpenResearch={openResearchClaim} onOpenSession={openSessionFromSearch} />}{panel === "runs" && <RunExplorer api={api} target={runJump} />}{panel === "decisions" && <DecisionLab api={api} target={decisionJump} isAdmin={user.role === "admin"} onOpenRun={openRunById} />}{panel === "research" && <ResearchRegistry api={api} target={researchJump} onOpenRun={openRunById} onOpenQualification={openQualification} />}{panel === "imports" && <ResearchImports api={api} isAdmin={user.role === "admin"} onOpenClaim={openResearchClaim} />}{panel === "qualification" && <QualificationFlow api={api} target={qualificationJump} isAdmin={user.role === "admin"} onOpenResearch={openResearchClaim} onOpenRun={openRunById} />}{panel === "knowledge" && <Knowledge api={api} />}{panel === "models" && <Models api={api} isAdmin={user.role === "admin"} />}{panel === "admin" && <Admin api={api} />}</main>
   </div>;

@@ -1,7 +1,8 @@
 /** Parse the authenticated POST SSE response without assuming network chunk boundaries. */
 export async function consumeChatStream(
   response: Response,
-  onDelta: (content: string) => void,
+  onDelta: (content: string, turn: number) => void,
+  onStep?: (step: { kind: string; name: string; status: string }) => void,
 ): Promise<void> {
   if (!response.body) throw new Error("Streaming response has no body");
   const reader = response.body.getReader();
@@ -14,9 +15,12 @@ export async function consumeChatStream(
       .map(line => line.slice(5).trimStart()).join("\n");
     if (!data) return;
     if (data === "[DONE]") { finished = true; return; }
-    const value = JSON.parse(data) as { content?: unknown; error?: unknown };
+    const value = JSON.parse(data) as { content?: unknown; turn?: unknown; error?: unknown; event?: unknown; kind?: unknown; name?: unknown; status?: unknown };
     if (typeof value.error === "string") throw new Error(value.error);
-    if (typeof value.content === "string") onDelta(value.content);
+    if (typeof value.content === "string") onDelta(value.content, typeof value.turn === "number" ? value.turn : 1);
+    if (value.event === "step" && typeof value.kind === "string" && typeof value.name === "string" && typeof value.status === "string") {
+      onStep?.({ kind: value.kind, name: value.name, status: value.status });
+    }
   };
 
   try {
@@ -34,6 +38,7 @@ export async function consumeChatStream(
     }
     if (!finished) throw new Error("Stream ended before completion; check the Run before retrying");
   } finally {
+    if (!finished) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

@@ -74,6 +74,9 @@ def test_admin_schedule_api_controls_persistent_tasks(
         assert client.get(
             f"/api/schedules/{task_id}", headers=headers
         ).json() == task
+        assert client.get(
+            f"/api/schedules/{task_id}/firings", headers=headers
+        ).json() == []
 
         paused = client.post(
             f"/api/schedules/{task_id}/pause", headers=headers
@@ -153,6 +156,9 @@ def test_schedule_api_is_admin_only_tenant_scoped_and_validates_targets(
         _, beta_headers = _register(client, "beta@example.com", "Beta")
         assert client.get(
             f"/api/schedules/{task['id']}", headers=beta_headers
+        ).status_code == 404
+        assert client.get(
+            f"/api/schedules/{task['id']}/firings", headers=beta_headers
         ).status_code == 404
         assert client.get("/api/schedules", headers=beta_headers).json() == []
 

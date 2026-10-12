@@ -31,6 +31,8 @@ executable hash 的 kernel certificate、无 `sorry`/额外公理、current depe
 semantic-alignment review。资格与权力严格分账：发布或高风险执行仍需要独立、窄范围的
 `AuthorizationGrant(action, target, scope, budget, expiry, max_calls)`。原始候选进入 `/api/search`；
 知识使用面可走 `/api/qualification/search`，避免未资格化候选被下一轮 Agent 当成事实。
+该查询先刷新 current-use binding，再只在已准入 Claim 中做文本排序；普通候选的搜索排名
+不会挤掉可用的资格结果。
 
 ```json
 POST /api/qualification/receipts/{qualification_receipt_id}/knowledge-admissions

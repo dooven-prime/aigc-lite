@@ -5,7 +5,7 @@ import { consumeChatStream } from "./chatStream";
 type Message = { role: string; content: string };
 type Session = { id: string; title: string; messages?: Message[] };
 type Attachment = { name: string; content: string; size: number };
-type PendingTurn = { user: string; assistant: string };
+type PendingTurn = { user: string; assistant: string; turn: number };
 
 const MAX_FILE_BYTES = 16_384;
 const MAX_TOTAL_BYTES = 32_768;
@@ -22,6 +22,7 @@ export function Chat({ session, token, onCommitted }: {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [pending, setPending] = useState<PendingTurn | null>(null);
+  const [stepStatus, setStepStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [cancelling, setCancelling] = useState(false);
@@ -86,7 +87,8 @@ export function Chat({ session, token, onCommitted }: {
     if (busy || !prompt) return;
     const selected = attachments;
     const displayed = prompt + (selected.length ? `\n\n[Attached files: ${selected.map(file => file.name).join(", ")}]` : "");
-    setPending({ user: displayed, assistant: "" });
+    setPending({ user: displayed, assistant: "", turn: 0 });
+    setStepStatus("");
     setDraft("");
     setAttachments([]);
     setError("");
@@ -112,8 +114,13 @@ export function Chat({ session, token, onCommitted }: {
       }
       acceptedSessionId = response.headers.get("X-Session-Id");
       runRef.current = response.headers.get("X-Run-Id");
-      await consumeChatStream(response, content => {
-        setPending(current => current && { ...current, assistant: current.assistant + content });
+      await consumeChatStream(response, (content, turn) => {
+        setPending(current => current && {
+          ...current, assistant: (turn === current.turn ? current.assistant : "") + content,
+          turn,
+        });
+      }, step => {
+        if (step.kind === "tool") setStepStatus(`${step.name}: ${step.status}`);
       });
       if (!acceptedSessionId) throw new Error("Server did not identify the conversation");
       await onCommitted(acceptedSessionId);
@@ -137,11 +144,11 @@ export function Chat({ session, token, onCommitted }: {
   };
 
   return <div className="chat-view">
-    <header className="topbar"><div><span className="eyebrow">WORKSPACE</span><h1>{session?.title || "Start a conversation"}</h1></div><span className="status-dot">Model stream · no tools</span></header>
+    <header className="topbar"><div><span className="eyebrow">WORKSPACE</span><h1>{session?.title || "Start a conversation"}</h1></div><span className="status-dot">Bounded Agent stream</span></header>
     <div className="messages">
       {!session && !pending && <div className="empty"><div className="empty-icon"><Bot size={24} /></div><h2>What are you working on?</h2><p>Send a message to start a conversation. Text attachments stay with this Run, not the knowledge index.</p></div>}
       {session?.messages?.map((message, index) => <div className={message.role === "user" ? "message user" : "message assistant"} key={`${index}-${message.role}`}><div className="message-label">{message.role === "user" ? "You" : "aigc-lite"}</div><div>{message.content}</div></div>)}
-      {pending && <><div className="message user"><div className="message-label">You</div><div>{pending.user}</div></div><div className="message assistant" aria-live="polite"><div className="message-label">aigc-lite · {pending.assistant ? "Streaming" : "Thinking"}</div><div>{pending.assistant || "…"}</div></div></>}
+      {pending && <><div className="message user"><div className="message-label">You</div><div>{pending.user}</div></div><div className="message assistant" aria-live="polite"><div className="message-label">aigc-lite · {pending.assistant ? "Streaming" : "Thinking"}{stepStatus ? ` · ${stepStatus}` : ""}</div><div>{pending.assistant || "…"}</div></div></>}
       <div ref={bottomRef} />
     </div>
     <div className="chat-composer-wrap">

@@ -5,7 +5,7 @@ import pytest
 from httpx import AsyncClient, MockTransport, Request, Response
 
 from app import providers
-from app.core.errors import ErrorCode
+from app.core.errors import ErrorCode, UpstreamResponseError
 
 
 def _client_factory(transport: MockTransport):
@@ -146,6 +146,66 @@ data: [DONE]
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+
+
+def test_stream_completion_assembles_tool_call_fragments_and_usage(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def handler(request: Request) -> Response:
+        captured["payload"] = json.loads((await request.aread()).decode())
+        return Response(200, headers={"content-type": "text/event-stream"}, content="""\
+data: {"choices":[{"delta":{"content":"checking "}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_","type":"function","function":{"name":"safe_","arguments":"{\\\"q\\\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"1","function":{"name":"lookup","arguments":"\\\"x\\\"}"}}]}}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":3}}
+
+data: [DONE]
+
+""")
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _client_factory(MockTransport(handler)))
+    deltas: list[str] = []
+
+    async def on_delta(value: str) -> None:
+        deltas.append(value)
+
+    result = asyncio.run(providers.stream_completion(
+        [{"role": "user", "content": "hi"}], tools=[{"type": "function"}],
+        provider={"base_url": "https://upstream.test/v1", "api_key": "test-key"},
+        on_delta=on_delta,
+    ))
+    assert deltas == ["checking "]
+    assert captured["payload"]["tool_choice"] == "auto"
+    assert result["tool_calls"] == [{
+        "id": "call_1", "type": "function",
+        "function": {"name": "safe_lookup", "arguments": '{"q":"x"}'},
+    }]
+    assert result["_usage"] == {"prompt_tokens": 4, "completion_tokens": 3}
+
+
+def test_stream_completion_rejects_incomplete_tool_identity(monkeypatch) -> None:
+    async def handler(_request: Request) -> Response:
+        return Response(200, headers={"content-type": "text/event-stream"}, content="""\
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"safe_lookup","arguments":"{}"}}]}}]}
+
+data: [DONE]
+
+""")
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _client_factory(MockTransport(handler)))
+
+    async def on_delta(_value: str) -> None:
+        raise AssertionError("No text was expected")
+
+    with pytest.raises(UpstreamResponseError):
+        asyncio.run(providers.stream_completion(
+            [{"role": "user", "content": "hi"}],
+            provider={"base_url": "https://upstream.test/v1", "api_key": "test-key"},
+            on_delta=on_delta,
+        ))
 
 
 def test_minimax_requests_split_reasoning_from_final_content(monkeypatch) -> None:

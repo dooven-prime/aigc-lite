@@ -75,7 +75,7 @@ async def current_tenant(
         session = get_repository().get_auth_session(session_hash)
         if session:
             user = get_repository().get_user(session["user_id"])
-            if user:
+            if user and user["tenant_id"] == session["tenant_id"]:
                 check_rate_limit(user["tenant_id"])
                 request.state.user_id = user["id"]
                 request.state.tenant_id = user["tenant_id"]

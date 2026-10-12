@@ -105,6 +105,12 @@ class Repository(
 
     def get_auth_session(self, token_hash: str) -> dict | None: ...
 
+    def revoke_auth_session(self, token_hash: str, user_id: str) -> bool: ...
+
+    def search_qualified_claims(
+        self, tenant_id: str, profile_id: str, query: str, limit: int = 20
+    ) -> list[dict]: ...
+
     def save_model_config(self, tenant_id: str, values: dict[str, Any]) -> dict: ...
 
     def list_model_configs(self, tenant_id: str) -> list[dict]: ...
@@ -151,6 +157,21 @@ class Repository(
 
     def list_due_scheduled_tasks(self, due_at: str, limit: int = 100) -> list[dict]: ...
 
+    def claim_scheduled_firing(self, values: dict[str, str]) -> bool: ...
+
+    def renew_scheduled_firing(self, firing_id: str, owner: str, expires_at: str) -> bool: ...
+
+    def finish_scheduled_firing(
+        self, firing_id: str, owner: str, state: str,
+        finished_at: str, error_kind: str | None,
+    ) -> bool: ...
+
+    def get_scheduled_firing(self, firing_id: str) -> dict | None: ...
+
+    def list_scheduled_firings(self, tenant_id: str, task_id: str) -> list[dict]: ...
+
+    def expire_scheduled_firings(self, now: str) -> int: ...
+
     def set_scheduled_task_status(
         self,
         tenant_id: str,
@@ -166,6 +187,7 @@ class Repository(
         task_id: str,
         *,
         expected_next_run_at: str,
+        expected_status: str,
         status: str,
         last_run_at: str,
         next_run_at: str | None,
@@ -622,6 +644,14 @@ class SQLiteRepository(
             ).fetchone()
         return dict(row) if row else None
 
+    def revoke_auth_session(self, token_hash: str, user_id: str) -> bool:
+        with self._connect() as db:
+            result = db.execute(
+                "DELETE FROM auth_sessions WHERE token_hash = ? AND user_id = ?",
+                (token_hash, user_id),
+            )
+        return result.rowcount == 1
+
     def save_model_config(self, tenant_id: str, values: dict[str, Any]) -> dict:
         credential_reference = values["credential_reference"]
         credential_id = encrypted_credential_id(credential_reference)
@@ -880,7 +910,12 @@ class SQLiteRepository(
     def list_active_scheduled_tasks(self) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' ORDER BY next_run_at, id"
+                "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' "
+                "AND NOT EXISTS (SELECT 1 FROM scheduled_task_firings f "
+                "WHERE f.tenant_id = scheduled_tasks.tenant_id "
+                "AND f.task_id = scheduled_tasks.id "
+                "AND f.due_at = scheduled_tasks.next_run_at) "
+                "ORDER BY next_run_at, id"
             ).fetchall()
         return [_decode_scheduled_task(row) for row in rows]
 
@@ -889,10 +924,78 @@ class SQLiteRepository(
             rows = db.execute(
                 "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' "
                 "AND next_run_at IS NOT NULL AND next_run_at <= ? "
+                "AND NOT EXISTS (SELECT 1 FROM scheduled_task_firings f "
+                "WHERE f.tenant_id = scheduled_tasks.tenant_id "
+                "AND f.task_id = scheduled_tasks.id "
+                "AND f.due_at = scheduled_tasks.next_run_at) "
                 "ORDER BY next_run_at, id LIMIT ?",
                 (due_at, max(1, min(limit, 1000))),
             ).fetchall()
         return [_decode_scheduled_task(row) for row in rows]
+
+    def claim_scheduled_firing(self, values: dict[str, str]) -> bool:
+        # INSERT ... SELECT makes status/due validation and the unique firing
+        # identity one database statement, also across separate workers.
+        with self._connect() as db:
+            result = db.execute(
+                "INSERT INTO scheduled_task_firings "
+                "(id, tenant_id, task_id, due_at, lease_owner, lease_expires_at, state, claimed_at) "
+                "SELECT ?, tenant_id, id, next_run_at, ?, ?, 'running', ? "
+                "FROM scheduled_tasks WHERE tenant_id = ? AND id = ? "
+                "AND status = 'scheduled' AND next_run_at = ? AND next_run_at <= ? "
+                "ON CONFLICT(tenant_id, task_id, due_at) DO NOTHING",
+                (
+                    values["id"], values["lease_owner"], values["lease_expires_at"],
+                    values["claimed_at"], values["tenant_id"], values["task_id"],
+                    values["due_at"], values["claimed_at"],
+                ),
+            )
+        return result.rowcount == 1
+
+    def renew_scheduled_firing(self, firing_id: str, owner: str, expires_at: str) -> bool:
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE scheduled_task_firings SET lease_expires_at = ? "
+                "WHERE id = ? AND lease_owner = ? AND state = 'running'",
+                (expires_at, firing_id, owner),
+            )
+        return result.rowcount == 1
+
+    def finish_scheduled_firing(
+        self, firing_id: str, owner: str, state: str,
+        finished_at: str, error_kind: str | None,
+    ) -> bool:
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE scheduled_task_firings SET state = ?, finished_at = ?, "
+                "error_kind = ? WHERE id = ? AND lease_owner = ? AND state = 'running'",
+                (state, finished_at, error_kind, firing_id, owner),
+            )
+        return result.rowcount == 1
+
+    def get_scheduled_firing(self, firing_id: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM scheduled_task_firings WHERE id = ?", (firing_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_scheduled_firings(self, tenant_id: str, task_id: str) -> list[dict]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM scheduled_task_firings WHERE tenant_id = ? "
+                "AND task_id = ? ORDER BY due_at DESC LIMIT 100", (tenant_id, task_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def expire_scheduled_firings(self, now: str) -> int:
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE scheduled_task_firings SET state = 'indeterminate', "
+                "finished_at = ?, error_kind = 'lease_expired' "
+                "WHERE state = 'running' AND lease_expires_at < ?", (now, now),
+            )
+        return result.rowcount
 
     def set_scheduled_task_status(
         self,
@@ -916,6 +1019,7 @@ class SQLiteRepository(
         task_id: str,
         *,
         expected_next_run_at: str,
+        expected_status: str,
         status: str,
         last_run_at: str,
         next_run_at: str | None,
@@ -924,7 +1028,7 @@ class SQLiteRepository(
             result = db.execute(
                 "UPDATE scheduled_tasks SET status = ?, last_run_at = ?, "
                 "next_run_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ? "
-                "AND status = 'scheduled' AND next_run_at = ?",
+                "AND status = ? AND next_run_at = ?",
                 (
                     status,
                     last_run_at,
@@ -932,6 +1036,7 @@ class SQLiteRepository(
                     utc_now(),
                     tenant_id,
                     task_id,
+                    expected_status,
                     expected_next_run_at,
                 ),
             )
@@ -1593,6 +1698,27 @@ class SQLiteRepository(
     def search_memory(self, tenant_id: str, query: str, limit: int = 20) -> list[dict]:
         return self.search_backend().search(tenant_id, query, limit)
 
+    def search_qualified_claims(
+        self, tenant_id: str, profile_id: str, query: str, limit: int = 20
+    ) -> list[dict]:
+        """Search admitted claims directly so candidate-index ranking cannot hide them."""
+
+        from .adapters.search.lexical import rank_lexical
+
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT e.source_id id, e.kind, e.title, e.content, e.created_at, "
+                "e.session_id, e.run_id, e.step_id, e.artifact_id, e.source_kind, "
+                "e.import_batch_id, e.conversation_id "
+                "FROM search_entries e JOIN current_use_bindings b "
+                "ON b.tenant_id = e.tenant_id AND b.claim_revision_id = e.source_id "
+                "WHERE e.tenant_id = ? AND e.kind = 'research_claim' "
+                "AND b.profile_id = ? AND b.use_scope = 'knowledge' "
+                "AND b.state = 'current'",
+                (tenant_id, profile_id),
+            ).fetchall()
+        return rank_lexical([dict(row) for row in rows], query, limit, max_results=100)
+
     def list_audit(self, tenant_id: str, limit: int = 100) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
@@ -1816,6 +1942,13 @@ class PostgresRepository(
             "SELECT * FROM auth_sessions WHERE token_hash = :token_hash AND expires_at > :now",
             {"token_hash": token_hash, "now": utc_now()},
         )
+
+    def revoke_auth_session(self, token_hash: str, user_id: str) -> bool:
+        result = self._execute(
+            "DELETE FROM auth_sessions WHERE token_hash = :token_hash AND user_id = :user_id",
+            {"token_hash": token_hash, "user_id": user_id},
+        )
+        return result.rowcount == 1
 
     def save_model_config(self, tenant_id: str, values: dict[str, Any]) -> dict:
         credential_reference = values["credential_reference"]
@@ -2064,7 +2197,12 @@ class PostgresRepository(
 
     def list_active_scheduled_tasks(self) -> list[dict]:
         rows = self._many(
-            "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' ORDER BY next_run_at, id"
+            "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' "
+            "AND NOT EXISTS (SELECT 1 FROM scheduled_task_firings f "
+            "WHERE f.tenant_id = scheduled_tasks.tenant_id "
+            "AND f.task_id = scheduled_tasks.id "
+            "AND f.due_at = scheduled_tasks.next_run_at) "
+            "ORDER BY next_run_at, id"
         )
         return [_decode_scheduled_task(row) for row in rows]
 
@@ -2072,10 +2210,67 @@ class PostgresRepository(
         rows = self._many(
             "SELECT * FROM scheduled_tasks WHERE status = 'scheduled' "
             "AND next_run_at IS NOT NULL AND next_run_at <= :due_at "
+            "AND NOT EXISTS (SELECT 1 FROM scheduled_task_firings f "
+            "WHERE f.tenant_id = scheduled_tasks.tenant_id "
+            "AND f.task_id = scheduled_tasks.id "
+            "AND f.due_at = scheduled_tasks.next_run_at) "
             "ORDER BY next_run_at, id LIMIT :limit",
             {"due_at": due_at, "limit": max(1, min(limit, 1000))},
         )
         return [_decode_scheduled_task(row) for row in rows]
+
+    def claim_scheduled_firing(self, values: dict[str, str]) -> bool:
+        result = self._execute(
+            "INSERT INTO scheduled_task_firings "
+            "(id, tenant_id, task_id, due_at, lease_owner, lease_expires_at, state, claimed_at) "
+            "SELECT :id, tenant_id, id, next_run_at, :lease_owner, :lease_expires_at, "
+            "'running', :claimed_at FROM scheduled_tasks "
+            "WHERE tenant_id = :tenant_id AND id = :task_id AND status = 'scheduled' "
+            "AND next_run_at = :due_at AND next_run_at <= :claimed_at "
+            "ON CONFLICT(tenant_id, task_id, due_at) DO NOTHING",
+            values,
+        )
+        return result.rowcount == 1
+
+    def renew_scheduled_firing(self, firing_id: str, owner: str, expires_at: str) -> bool:
+        return self._execute(
+            "UPDATE scheduled_task_firings SET lease_expires_at = :expires_at "
+            "WHERE id = :id AND lease_owner = :owner AND state = 'running'",
+            {"id": firing_id, "owner": owner, "expires_at": expires_at},
+        ).rowcount == 1
+
+    def finish_scheduled_firing(
+        self, firing_id: str, owner: str, state: str,
+        finished_at: str, error_kind: str | None,
+    ) -> bool:
+        return self._execute(
+            "UPDATE scheduled_task_firings SET state = :state, finished_at = :finished_at, "
+            "error_kind = :error_kind WHERE id = :id AND lease_owner = :owner "
+            "AND state = 'running'",
+            {
+                "state": state, "finished_at": finished_at,
+                "error_kind": error_kind, "id": firing_id, "owner": owner,
+            },
+        ).rowcount == 1
+
+    def get_scheduled_firing(self, firing_id: str) -> dict | None:
+        return self._one(
+            "SELECT * FROM scheduled_task_firings WHERE id = :id", {"id": firing_id}
+        )
+
+    def list_scheduled_firings(self, tenant_id: str, task_id: str) -> list[dict]:
+        return self._many(
+            "SELECT * FROM scheduled_task_firings WHERE tenant_id = :tenant_id "
+            "AND task_id = :task_id ORDER BY due_at DESC LIMIT 100",
+            {"tenant_id": tenant_id, "task_id": task_id},
+        )
+
+    def expire_scheduled_firings(self, now: str) -> int:
+        return self._execute(
+            "UPDATE scheduled_task_firings SET state = 'indeterminate', "
+            "finished_at = :now, error_kind = 'lease_expired' "
+            "WHERE state = 'running' AND lease_expires_at < :now", {"now": now},
+        ).rowcount
 
     def set_scheduled_task_status(
         self,
@@ -2105,6 +2300,7 @@ class PostgresRepository(
         task_id: str,
         *,
         expected_next_run_at: str,
+        expected_status: str,
         status: str,
         last_run_at: str,
         next_run_at: str | None,
@@ -2112,7 +2308,7 @@ class PostgresRepository(
         result = self._execute(
             "UPDATE scheduled_tasks SET status = :status, last_run_at = :last_run_at, "
             "next_run_at = :next_run_at, updated_at = :updated_at "
-            "WHERE tenant_id = :tenant_id AND id = :id AND status = 'scheduled' "
+            "WHERE tenant_id = :tenant_id AND id = :id AND status = :expected_status "
             "AND next_run_at = :expected_next_run_at",
             {
                 "status": status,
@@ -2121,6 +2317,7 @@ class PostgresRepository(
                 "updated_at": utc_now(),
                 "tenant_id": tenant_id,
                 "id": task_id,
+                "expected_status": expected_status,
                 "expected_next_run_at": expected_next_run_at,
             },
         )
@@ -2825,6 +3022,28 @@ class PostgresRepository(
 
     def search_memory(self, tenant_id: str, query: str, limit: int = 20) -> list[dict]:
         return self.search_backend().search(tenant_id, query, limit)
+
+    def search_qualified_claims(
+        self, tenant_id: str, profile_id: str, query: str, limit: int = 20
+    ) -> list[dict]:
+        """Keep candidate rows out of the PostgreSQL qualified retrieval view."""
+
+        from .adapters.search.lexical import rank_lexical
+
+        rows = self._many(
+            "SELECT c.id, 'research_claim' kind, c.claim_key title, "
+            "CONCAT(c.statement, '\n', c.scope, '\n', c.claim_type, '\n', "
+            "c.method_revision, '\n', c.lifecycle_status, '\n', "
+            "c.promotion_stage, '\n', c.status_axes, '\n', c.closure_status, "
+            "'\n', c.blockers) content, c.created_at, NULL session_id, "
+            "NULL run_id, NULL step_id, NULL artifact_id, c.claim_type source_kind "
+            "FROM research_claim_revisions c JOIN current_use_bindings b "
+            "ON b.tenant_id = c.tenant_id AND b.claim_revision_id = c.id "
+            "WHERE c.tenant_id = :tenant_id AND b.profile_id = :profile_id "
+            "AND b.use_scope = 'knowledge' AND b.state = 'current'",
+            {"tenant_id": tenant_id, "profile_id": profile_id},
+        )
+        return rank_lexical(rows, query, limit, max_results=100)
 
     def list_audit(self, tenant_id: str, limit: int = 100) -> list[dict]:
         rows = self._many(

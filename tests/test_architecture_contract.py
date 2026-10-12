@@ -25,6 +25,7 @@ def test_current_http_surface_remains_available() -> None:
         "/api/auth/register",
         "/api/auth/login",
         "/api/auth/me",
+        "/api/auth/logout",
         "/api/sessions",
         "/api/sessions/{session_id}",
         "/api/chat",

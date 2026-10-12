@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from math import isfinite
 from typing import Any
 
@@ -115,6 +116,18 @@ class SchedulerService:
             raise ResourceNotFoundError("scheduled_task", task_id)
         return _task(value)
 
+    def firings(self, context: RequestContext, task_id: str) -> list[dict[str, Any]]:
+        self.get(context, task_id)  # Enforce workspace ownership first.
+        return self._repository_provider().list_scheduled_firings(
+            context.workspace_id, task_id
+        )
+
+    def reconcile_expired(self, *, now: datetime | None = None) -> int:
+        """Expose lost-worker outcomes without retrying ambiguous side effects."""
+        return self._repository_provider().expire_scheduled_firings(
+            _iso(_utc(now or self._clock(), "now"))
+        )
+
     def pause(self, context: RequestContext, task_id: str) -> ScheduledTask:
         task = self.get(context, task_id)
         if task.status is not ScheduleStatus.SCHEDULED:
@@ -166,6 +179,56 @@ class SchedulerService:
             )
         ]
 
+    def claim(
+        self, task: ScheduledTask, *, owner: str,
+        now: datetime | None = None, lease_seconds: int = 60,
+    ) -> str | None:
+        """Claim one due occurrence atomically across all scheduler workers.
+
+        The durable firing identity is never reusable, including after lease
+        expiry: an interrupted external side effect is indeterminate, not safe
+        to silently replay.
+        """
+        if task.next_run_at is None or task.status is not ScheduleStatus.SCHEDULED:
+            return None
+        if not owner or lease_seconds < 1:
+            raise ValueError("A lease owner and positive duration are required")
+        claimed = _utc(now or self._clock(), "now")
+        due_at = _iso(task.next_run_at)
+        firing_id = sha256(
+            f"{task.workspace_id}\0{task.id}\0{due_at}".encode()
+        ).hexdigest()
+        accepted = self._repository_provider().claim_scheduled_firing({
+            "id": firing_id,
+            "tenant_id": task.workspace_id,
+            "task_id": task.id,
+            "due_at": due_at,
+            "lease_owner": owner,
+            "lease_expires_at": _iso(claimed + timedelta(seconds=lease_seconds)),
+            "claimed_at": _iso(claimed),
+        })
+        return firing_id if accepted else None
+
+    def renew(
+        self, firing_id: str, *, owner: str,
+        now: datetime | None = None, lease_seconds: int = 60,
+    ) -> bool:
+        renewed = _utc(now or self._clock(), "now")
+        return self._repository_provider().renew_scheduled_firing(
+            firing_id, owner, _iso(renewed + timedelta(seconds=lease_seconds))
+        )
+
+    def finish_firing(
+        self, firing_id: str, *, owner: str, state: str,
+        now: datetime | None = None, error_kind: str | None = None,
+    ) -> bool:
+        if state not in {"succeeded", "failed", "indeterminate"}:
+            raise ValueError("Invalid scheduled firing outcome")
+        return self._repository_provider().finish_scheduled_firing(
+            firing_id, owner, state, _iso(_utc(now or self._clock(), "now")),
+            error_kind,
+        )
+
     def acknowledge(
         self,
         context: RequestContext,
@@ -175,7 +238,9 @@ class SchedulerService:
     ) -> ScheduledTask:
         """Advance a trigger atomically after a runner has accepted it."""
         task = self.get(context, task_id)
-        if task.status is not ScheduleStatus.SCHEDULED or task.next_run_at is None:
+        if task.status not in {
+            ScheduleStatus.SCHEDULED, ScheduleStatus.PAUSED, ScheduleStatus.CANCELLED
+        } or task.next_run_at is None:
             raise ScheduleNotActiveError(task.id, task.status.value)
         fired = _utc(fired_at or self._clock(), "fired_at")
         if fired < task.next_run_at:
@@ -197,11 +262,21 @@ class SchedulerService:
             steps = int(missed_seconds // interval) + 1
             next_run_at = task.next_run_at + timedelta(seconds=steps * interval)
             next_status = ScheduleStatus.SCHEDULED
+        if task.status is ScheduleStatus.PAUSED:
+            next_status = (
+                ScheduleStatus.PAUSED
+                if task.kind is ScheduleKind.INTERVAL
+                else ScheduleStatus.COMPLETED
+            )
+        elif task.status is ScheduleStatus.CANCELLED:
+            next_run_at = None
+            next_status = ScheduleStatus.CANCELLED
 
         value = self._repository_provider().advance_scheduled_task(
             context.workspace_id,
             task.id,
             expected_next_run_at=_iso(task.next_run_at),
+            expected_status=task.status.value,
             status=next_status.value,
             last_run_at=_iso(fired),
             next_run_at=_iso(next_run_at) if next_run_at else None,

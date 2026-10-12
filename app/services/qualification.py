@@ -35,6 +35,8 @@ from ..core.qualification import (
     claim_semantic_hash,
 )
 from ..database import get_repository
+from ..profiles.bio_in_vitro import BioInVitroObservationVerifier
+from ..profiles.bio_observation_provenance import BioObservationProvenanceVerifier
 from ..profiles.math_project import MATH_PROJECT_PROFILE, PROJECT_RECEIPT_VERSION, SNAPSHOT_VERSION
 from ..profiles.math_theorem import (
     CLAIM_KIND,
@@ -696,6 +698,8 @@ def create_default_verifier_registry() -> DomainVerifierRegistry:
     registry.register(MathTheoremVerifier())
     registry.register(MathProjectVerifier())
     registry.register(PropositionalABVerifier())
+    registry.register(BioInVitroObservationVerifier())
+    registry.register(BioObservationProvenanceVerifier())
     return registry
 
 
@@ -1184,8 +1188,10 @@ class QualificationService:
         bindings = [self._refresh_binding(context, item) for item in bindings]
         bindings = [item for item in bindings if item["state"] == CurrentUseState.CURRENT.value]
         by_claim = {item["claim_revision_id"]: item for item in bindings}
-        candidates = self._repository_provider().search_memory(
-            context.workspace_id, query, min(max(limit * 10, 50), 500)
+        if not by_claim:
+            return []
+        candidates = self._repository_provider().search_qualified_claims(
+            context.workspace_id, profile_id, query, limit
         )
         results = []
         for item in candidates:
@@ -1491,9 +1497,43 @@ class QualificationService:
         if evaluation is None:
             stale_reasons.append("qualification_evaluation_missing")
             return sorted(set(stale_reasons))
+        try:
+            current_profile = self._registry.get(receipt["profile_id"]).profile
+        except ResourceNotFoundError:
+            stale_reasons.append("qualification_profile_unavailable")
+        else:
+            if (
+                evaluation["profile_hash"] != current_profile.content_hash
+                or receipt["profile_version"] != current_profile.version
+                or receipt["policy_version"] != current_profile.policy_version
+            ):
+                stale_reasons.append("qualification_profile_changed")
         path = _path or frozenset()
         closure = evaluation.get("evidence_closure", {})
         for node in closure.get("nodes", []):
+            if node.get("node_type") == "artifact":
+                artifact = repository.get_artifact(context.workspace_id, node.get("node_id"))
+                if artifact is None:
+                    stale_reasons.append(f"evidence_artifact_missing:{node.get('node_id')}")
+                    continue
+                frozen = node.get("payload") or {}
+                content = artifact.get("content_text") or artifact.get("uri") or ""
+                if (
+                    artifact.get("content_hash") != node.get("content_hash")
+                    or hashlib.sha256(content.encode("utf-8")).hexdigest() != node.get("content_hash")
+                    or any(artifact.get(key) != value for key, value in frozen.items())
+                ):
+                    stale_reasons.append(f"evidence_artifact_changed:{node.get('node_id')}")
+                continue
+            if node.get("node_type") == "source" and claim is not None:
+                source = next(
+                    (item for item in claim.get("sources", []) if item["id"] == node.get("node_id")),
+                    None,
+                )
+                frozen = node.get("payload") or {}
+                if source is None or any(source.get(key) != value for key, value in frozen.items()):
+                    stale_reasons.append(f"evidence_source_changed:{node.get('node_id')}")
+                continue
             if node.get("node_type") != "dependency_binding":
                 continue
             frozen = node.get("payload") or {}

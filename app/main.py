@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -25,6 +25,7 @@ from .adapters.research_import import (
     RimeConsumerWitnessAdapter,
 )
 from .adapters.scheduling import TimeWheelScheduler
+from .api.bio_in_vitro import create_bio_in_vitro_router
 from .api.citation_extraction import create_citation_extraction_router
 from .api.configuration import create_configuration_router
 from .api.conversation_imports import create_conversation_import_router
@@ -86,6 +87,7 @@ from .database import (
 from .mcp import build_transport_apps, call_local_tool, create_mcp_server, handle_rpc
 from .services.artifacts import ArtifactService
 from .services.assurance import AssuranceBundleService
+from .services.bio_in_vitro_case import BioInVitroCaseService
 from .services.chat_capabilities import ChatCapabilityPolicy
 from .services.citation_extraction import CitationExtractionService
 from .services.conversation_import_registry import ConversationImportRegistry
@@ -189,6 +191,7 @@ conversation_import_service = ConversationImportService(
 )
 math_release_import_service = MathReleaseImportService(adapter=math_release_adapter)
 rime_consumer_case_service = RimeConsumerCaseService(adapter=rime_consumer_adapter)
+bio_in_vitro_case_service = BioInVitroCaseService()
 kernel_verifier_registry = KernelVerifierRegistry.from_config(
     lean_executable=settings.lean_executable,
     coq_executable=settings.coq_executable,
@@ -605,6 +608,12 @@ async def me(user: dict = Depends(current_user)) -> dict:
     return {key: value for key, value in user.items() if key != "password_hash"}
 
 
+@app.post("/api/auth/logout")
+async def logout(http_request: Request, user: dict = Depends(current_user)) -> dict[str, bool]:
+    get_repository().revoke_auth_session(http_request.state.auth_token_hash, user["id"])
+    return {"revoked": True}
+
+
 @app.post("/api/sessions")
 async def new_session(request: SessionRequest, tenant: Tenant = Depends(current_tenant)) -> dict:
     return create_session(tenant.id, request.title)
@@ -673,8 +682,9 @@ async def chat_stream(
 
     async def events():
         try:
-            async for chunk in result.chunks:
-                yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+            async with aclosing(result.chunks):
+                async for event in result.chunks:
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except ApplicationError as exc:
             yield f"data: {json.dumps({'error': str(exc), 'code': exc.code.value}, ensure_ascii=False)}\n\n"
             return
@@ -782,6 +792,15 @@ async def schedule_detail(
 ) -> dict[str, Any]:
     task = scheduler_service.get(_schedule_context(http_request, user), task_id)
     return _schedule_response(task)
+
+
+@app.get("/api/schedules/{task_id}/firings")
+async def schedule_firings(
+    task_id: str,
+    http_request: Request,
+    user: dict = Depends(current_admin_user),
+) -> list[dict[str, Any]]:
+    return scheduler_service.firings(_schedule_context(http_request, user), task_id)
 
 
 def _control_schedule(
@@ -936,6 +955,10 @@ rime_consumer_router = create_rime_consumer_router(
     service=rime_consumer_case_service,
     request_context_factory=request_context,
 )
+bio_in_vitro_router = create_bio_in_vitro_router(
+    service=bio_in_vitro_case_service,
+    request_context_factory=request_context,
+)
 enforcement_router = create_enforcement_router(
     enforcement_service=enforcement_service,
     external_enforcer_service=external_enforcer_service,
@@ -949,6 +972,7 @@ app.include_router(conversation_import_router)
 app.include_router(math_release_import_router)
 app.include_router(citation_extraction_router)
 app.include_router(rime_consumer_router)
+app.include_router(bio_in_vitro_router)
 app.include_router(enforcement_router)
 
 

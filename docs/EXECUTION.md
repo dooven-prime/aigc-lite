@@ -115,8 +115,11 @@ AIGC_LITE_HTTP_POLL_ALLOWED_HOSTS=status.example.com,api.example.com:8443
 ```
 
 一次性计划执行后进入 `completed`；周期计划从原计划刻度推进到下一个未来时间，停机期间错过的
-周期不会在重启时集中补跑。执行中进程退出时不会确认该次触发，重启恢复后会按 at-least-once
-语义重试。workspace 管理员通过 `/api/schedules` 创建、查询、暂停、恢复和取消计划；入口只接受
+周期不会在重启时集中补跑。每个到期点由 PostgreSQL/SQLite 唯一 firing 记录领取，运行期间
+续租；失联、取消或过期后记录 `indeterminate`，不会自动重放可能已有外部副作用的目标。
+`GET /api/schedules/{task_id}/firings` 可查看最近 100 次触发。稳定 firing ID 作为内置目标的
+request identity，但这不等于任意外部服务已实现端到端 exactly-once。
+workspace 管理员通过 `/api/schedules` 创建、查询、暂停、恢复和取消计划；入口只接受
 `TaskRunner` 已注册的目标，创建时即校验目标 payload，并为每次控制操作写入不含 prompt 的审计事件。
 
 ```json

@@ -22,7 +22,7 @@ from app.core.research import (
     VerificationKind,
     VerificationOutcome,
 )
-from app.profiles.math_theorem import KERNEL_CERTIFICATE_VERSION, PROFILE_ID
+from app.profiles.math_theorem import KERNEL_CERTIFICATE_VERSION, MATH_FORMAL_PROFILE, PROFILE_ID
 from app.repository import SQLiteRepository
 from app.services.artifacts import ArtifactService
 from app.services.assurance import AssuranceBundleService, AssuranceBundleVerifier
@@ -306,6 +306,16 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
             ("silently changed", admission["knowledge_admission_receipt"]["id"]),
         )
 
+    for index in range(70):
+        repository.create_document(
+            context.workspace_id,
+            f"even integers candidate {index}",
+            "even integers " * 20,
+            [{"index": 0, "content": "even integers " * 20, "vector": [0.0]}],
+        )
+    assert claim["id"] not in {
+        item["id"] for item in repository.search_memory(context.workspace_id, "even integers", 50)
+    }
     qualified = qualification.qualified_search(context, "even integers", PROFILE_ID)
     assert [item["id"] for item in qualified] == [claim["id"]]
     assert qualified[0]["currentness"] == "current"
@@ -686,6 +696,11 @@ def test_refresh_binding_propagates_transitive_dependency_staleness() -> None:
         },
         "C": {"id": "evaluation-C2", "evidence_closure": {"nodes": []}},
     }
+    for receipt in receipts.values():
+        receipt["profile_version"] = MATH_FORMAL_PROFILE.version
+        receipt["policy_version"] = MATH_FORMAL_PROFILE.policy_version
+    for evaluation in evaluations.values():
+        evaluation["profile_hash"] = MATH_FORMAL_PROFILE.content_hash
 
     class DependencyRepository:
         def list_invalidation_decisions(self, tenant_id, claim_id):

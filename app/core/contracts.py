@@ -125,11 +125,11 @@ class ChatResult:
 
 @dataclass(frozen=True, slots=True)
 class ChatStreamResult:
-    """Identity plus the lazy content stream for one observable run."""
+    """Identity plus lazy, redacted content and step events for one run."""
 
     session_id: str
     run_id: str
-    chunks: AsyncIterator[str]
+    chunks: AsyncIterator[dict]
 
 
 @dataclass(frozen=True, slots=True)

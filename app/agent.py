@@ -15,6 +15,7 @@ from .tools import invoke, schemas
 
 StepObserver = Callable[[AgentStepRecord], None]
 ToolInvoker = Callable[[str, str], Awaitable[ToolInvocationResult]]
+ModelCompletion = Callable[[list[dict], str | None, list[dict] | None, dict | None], Awaitable[dict]]
 def _safe_json_text(value: str, *, hide_errors: bool = False) -> str:
     return safe_json_text(value, hide_errors=hide_errors)
 
@@ -61,6 +62,7 @@ async def run_agent(
     available_tools: list[dict] | None = None,
     tool_invoker: ToolInvoker | None = None,
     max_tool_calls: int | None = None,
+    model_completion: ModelCompletion | None = None,
 ) -> str:
     """Run a bounded OpenAI-compatible tool loop."""
     max_steps = settings.max_agent_steps if max_steps is None else max_steps
@@ -82,7 +84,14 @@ async def run_agent(
             {key: value for key, value in message.items() if not key.startswith("_")}
             for message in messages
         ]
-        if provider is None:
+        if model_completion is not None:
+            message = await model_completion(
+                provider_messages,
+                model,
+                tool_schemas if step < max_steps - 1 else None,
+                provider,
+            )
+        elif provider is None:
             message = await completion(
                 provider_messages, model, tool_schemas if step < max_steps - 1 else None
             )

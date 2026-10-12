@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -17,6 +18,7 @@ from app.core.enforcement import (
     PermissionDomain,
     PolicyPermission,
 )
+from app.core.scheduling import ScheduleKind, ScheduleSpec, ScheduleTaskCommand
 from app.repository import PostgresRepository
 from app.services.conversation_import_registry import ConversationImportRegistry
 from app.services.conversation_imports import ConversationImportService
@@ -24,6 +26,7 @@ from app.services.credentials import CredentialService
 from app.services.enforcement import EnforcementService
 from app.services.math_release_imports import MathReleaseImportService
 from app.services.reviews import ReviewService
+from app.services.scheduler import SchedulerService
 
 POSTGRES_URL = os.getenv("AIGC_LITE_TEST_POSTGRES_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -31,14 +34,60 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_postgres_scheduled_firing_is_unique_across_repository_instances() -> None:
+    first = PostgresRepository(POSTGRES_URL)
+    first.init()
+    second = PostgresRepository(POSTGRES_URL)
+    now = datetime(2026, 10, 12, tzinfo=UTC)
+    workspace_id = f"schedule-{uuid4()}"
+    context = RequestContext(request_id="scheduled-contract", workspace_id=workspace_id)
+    first_service = SchedulerService(repository_provider=lambda: first, clock=lambda: now)
+    second_service = SchedulerService(repository_provider=lambda: second, clock=lambda: now)
+    task = first_service.schedule(context, ScheduleTaskCommand(
+        name="once", target="test.capture",
+        schedule=ScheduleSpec(ScheduleKind.ONCE, now),
+    ))
+    firing_id = first_service.claim(task, owner="pg-worker-1", now=now, lease_seconds=3)
+    assert firing_id
+    assert second_service.claim(task, owner="pg-worker-2", now=now) is None
+    assert second_service.due(now=now) == []
+    assert second_service.reconcile_expired(now=now + timedelta(seconds=4)) == 1
+    assert first.get_scheduled_firing(firing_id)["state"] == "indeterminate"
+    assert first_service.claim(task, owner="pg-worker-2", now=now + timedelta(minutes=1)) is None
+    interval = first_service.schedule(context, ScheduleTaskCommand(
+        name="interval", target="test.capture",
+        schedule=ScheduleSpec(ScheduleKind.INTERVAL, now, interval_seconds=10),
+    ))
+    interval_firing = first_service.claim(interval, owner="pg-worker-1", now=now)
+    assert interval_firing
+    first_service.pause(context, interval.id)
+    assert first_service.finish_firing(
+        interval_firing, owner="pg-worker-1", state="succeeded", now=now,
+    )
+    advanced = second_service.acknowledge(context, interval.id, fired_at=now)
+    assert advanced.status.value == "paused"
+    assert advanced.next_run_at == now + timedelta(seconds=10)
+
+
 def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
     repository = PostgresRepository(POSTGRES_URL)
     repository.init()
-    assert repository.schema_revision() == "0022_verified_invalidations"
+    assert repository.schema_revision() == "0023_scheduled_firings"
     workspace_id = f"contract-{uuid4()}"
     repository.create_tenant("PostgreSQL contract", workspace_id)
     context = RequestContext(request_id="postgres-contract", workspace_id=workspace_id)
+    assert repository.search_qualified_claims(
+        workspace_id, "math.formal.v1", "postgres-contract"
+    ) == []
+    auth_user = repository.create_user(
+        workspace_id, f"{workspace_id}@example.test", "Session owner", "hash"
+    )
+    repository.save_auth_session("postgres-session-token", auth_user["id"], workspace_id, "2999-01-01T00:00:00+00:00")
+    assert repository.get_auth_session("postgres-session-token") is not None
+    assert not repository.revoke_auth_session("postgres-session-token", "wrong-user")
+    assert repository.revoke_auth_session("postgres-session-token", auth_user["id"])
+    assert repository.get_auth_session("postgres-session-token") is None
 
     class StaticMathAdapter(OpenAIMathReleaseAdapter):
         def fetch(self, source_commit: str) -> tuple[bytes, bytes]:
@@ -362,7 +411,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
                 )
             )
         }
-    assert revision == "0022_verified_invalidations"
+    assert revision == "0023_scheduled_firings"
     assert {
         "signature_verified",
         "enforcement_request_id",

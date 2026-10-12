@@ -122,6 +122,48 @@ def test_schedule_transitions_remain_workspace_scoped(tmp_path) -> None:
         service.cancel(_context("workspace-a"), task.id)
 
 
+def test_durable_firing_identity_fences_workers_and_expired_lease(tmp_path) -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    repository, service = _service(tmp_path, now)
+    task = service.schedule(_context(), ScheduleTaskCommand(
+        name="Once", target="test.capture",
+        schedule=ScheduleSpec(ScheduleKind.ONCE, now),
+    ))
+    firing_id = service.claim(task, owner="worker-a", now=now, lease_seconds=3)
+    assert firing_id is not None
+    assert service.claim(task, owner="worker-b", now=now, lease_seconds=3) is None
+    assert service.due(now=now) == []
+    assert service.recover_active() == []
+    assert not service.renew(firing_id, owner="worker-b", now=now)
+    assert service.renew(firing_id, owner="worker-a", now=now, lease_seconds=3)
+    assert service.reconcile_expired(now=now + timedelta(seconds=4)) == 1
+    assert repository.get_scheduled_firing(firing_id)["state"] == "indeterminate"
+    assert service.claim(task, owner="worker-b", now=now + timedelta(minutes=1)) is None
+    assert not service.finish_firing(firing_id, owner="worker-a", state="succeeded")
+    assert service.firings(_context(), task.id)[0]["error_kind"] == "lease_expired"
+    with pytest.raises(ResourceNotFoundError):
+        service.firings(_context("workspace-b"), task.id)
+
+
+def test_pause_during_claimed_interval_preserves_pause_after_ack(tmp_path) -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    _, service = _service(tmp_path, now)
+    task = service.schedule(_context(), ScheduleTaskCommand(
+        name="Interval", target="test.capture",
+        schedule=ScheduleSpec(ScheduleKind.INTERVAL, now, interval_seconds=10),
+    ))
+    firing_id = service.claim(task, owner="worker-a", now=now)
+    assert firing_id
+    assert service.pause(_context(), task.id).status is ScheduleStatus.PAUSED
+    assert service.finish_firing(firing_id, owner="worker-a", state="succeeded", now=now)
+    advanced = service.acknowledge(_context(), task.id, fired_at=now)
+    assert advanced.status is ScheduleStatus.PAUSED
+    assert advanced.next_run_at == now + timedelta(seconds=10)
+    assert service.due(now=now + timedelta(seconds=11)) == []
+    assert service.resume(_context(), task.id).status is ScheduleStatus.SCHEDULED
+    assert len(service.due(now=now + timedelta(seconds=11))) == 1
+
+
 @pytest.mark.parametrize(
     ("command", "field"),
     [

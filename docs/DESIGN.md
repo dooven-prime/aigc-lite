@@ -216,7 +216,7 @@ Step 按 Run 内 sequence 持久化，保存稳定状态、脱敏输入/输出�
 当前实现已经覆盖模型轮次、工具调用数、总墙钟、单工具超时/结果长度和 asyncio
 取消传播。预算耗尽统一写入 `limit_reached`，主动取消写入 `cancelled`；模型轮次耗尽不再以
 普通文本冒充成功结果。`POST /api/runs/{run_id}/cancel` 使用进程内 active-run handle，适用于
-当前单进程部署；多 worker/后台执行时必须替换为带 owner/lease 的持久化调度句柄。同步本地
+当前 Chat Run 的取消仍是进程内句柄；跨 worker 取消需要独立控制通道。同步本地
 Python 工具默认进入工作线程，无法强杀；需要硬终止的工具可显式选择一次一进程的 process
 backend。token 预算仍留待模型调用契约能够可靠提供 usage/finish reason 后实现。
 
@@ -286,8 +286,11 @@ allowlist 的无凭据 URL，且不记录响应正文。自定义内部动作通
 
 `/api/schedules` 控制面只对当前 workspace 管理员开放，提供创建、列表、详情、暂停、恢复和取消。
 创建时校验目标及 payload，控制动作只审计标识、目标、触发类型和状态，不写入 prompt。暂停或取消
-阻止后续触发，不承诺终止已经开始的 Run；运行中取消仍使用 Run 控制入口。当前恢复语义为
-at-least-once，单进程内做并发上限；多 worker 部署前需要增加 owner/lease 与幂等执行键。
+阻止后续触发，不承诺终止已经开始的 Run；运行中取消仍使用 Run 控制入口。
+每个到期点由数据库 `scheduled_task_firings` 唯一领取，拥有稳定 firing ID、owner 与续租期限。
+多 worker 不会同时领取同一到期点；进程失联后的外部副作用可能已经发生，因此过期 firing
+标为 `indeterminate`，不会自动再次执行。管理员可通过 firings API 核查；这不宣称任意
+外部 target 的 exactly-once 效果。
 
 #### 证据控制层与 Profile
 
@@ -424,12 +427,13 @@ MCP 是 AI-first capability surface。入站 Streamable HTTP/SSE transport 投�
 不允许模型借 MCP 写 Qualification verdict、Knowledge Admission、CurrentUseBinding、Grant 或
 Enforcement 状态。HTTP 控制面上的管理员操作不会因为存在一个相似 MCP tool 而自动委托给模型。
 
-`/api/chat` 与 `/api/chat/stream` 都经 `GatewayService` 建立可追踪 Run。stream 路径当前不执行
-迭代工具循环，这是显式功能差异，不是认证、capability 或 ledger 的旁路。
+`/api/chat` 与 `/api/chat/stream` 都经 `GatewayService` 建立可追踪 Run，并调用同一个有界
+Agent/Tool Catalog 循环。流式 provider 在每轮组装完整 tool call，再交给现有调用与 Step 路径；
+SSE 仅发布文本增量和脱敏步骤状态。
 
 ### 存储与迁移
 
-- schema 由 20 个 Alembic revision 管理，应用启动升级到 head；新变更只能追加 revision；
+- schema 由 23 个 Alembic revision 管理，应用启动升级到 head；新变更只能追加 revision；
 - SQLite 是单进程 quick start，并提供 FTS5 搜索；PostgreSQL 是多实例推荐后端；
 - CI 在 PostgreSQL 17 上运行真实 migration/repository contract，并保留 SQLite 回归；
 - Research、Qualification、Review、Conversation Import 和 Enforcement 已形成显式 repository
@@ -474,17 +478,18 @@ Enforcement 状态。HTTP 控制面上的管理员操作不会因为存在一个
 
 下列项目才是当前待办；历史 roadmap 中出现的 “后续” 不应覆盖本节：
 
-1. SSE Chat 尚不执行同步路径的迭代工具循环；两条路径已有相同 capability decision 与 Run
-   语义，但 tool-event streaming 仍需单独契约与回归测试。
+1. SSE Chat 已复用同步路径的迭代工具循环；跨进程 Chat Run 取消、SSE 断线重连/事件回放
+   仍未实现。
 2. token budget 仍依赖 provider 能可靠返回 usage/finish reason；当前已强制模型轮次、工具次数、
    墙钟、单工具 timeout 和结果大小。
-3. Run cancellation 与 scheduler 并发控制主要面向单进程；多 worker 需要持久化 owner/lease、
-   幂等执行键和共享 rate limiter。
+3. Scheduler 已用持久化 firing 身份/lease 防止多 worker 同一到期点重复领取；过期执行保留为
+   `indeterminate`，不自动重放。跨 worker Chat Run 取消、外部 target 的端到端幂等与共享 rate limiter
+   仍未实现。
 4. credential master-key rotation、批量重加密、备份/恢复演练和租户数据导出/删除流程尚未闭合。
 5. 当前没有跨 workspace 的 platform-admin 身份；现有 `/api/admin/tenants` 有意保持 workspace-local。
    若引入平台治理，必须使用独立 identity/scope，不能扩大现有 `admin` 角色。
-6. 登录/注册缺少专门的分布式暴力破解防护；logout、session revoke、密码变更和过期会话清理
-   仍需完整生命周期接口。
+6. 已支持撤销当前登录 session；登录/注册仍缺少专门的分布式暴力破解防护，
+   全 session 撤销、密码变更和过期会话清理仍需完整生命周期接口。
 7. repository 已拆出多个 domain port/mixin，但 identity/gateway/run/knowledge 等兼容面仍集中在
    `repository.py`；`main.py` 仍承担部分 route 和 composition 兼容职责。
 8. `math.formal.v1` 是保守的单文件 proof replay profile；项目级 content-addressed import closure、
