@@ -75,6 +75,19 @@ def prepare_work(project: Path, target: Path) -> None:
     for name in names:
         (target / "project" / "packages" / name).mkdir(parents=True, exist_ok=True)
         (target / "packages" / name).mkdir(parents=True)
+    # ProofWidgets' Lake target writes a .hash file beside its pinned lockfile.
+    # The facade itself is read-only in the guest; only its pre-created .hash
+    # file is rebound writable. Never copy source bytes into placeholders.
+    if "proofwidgets" in names:
+        widget = target / "sidecars" / "proofwidgets" / "widget"
+        widget.mkdir(parents=True)
+        for name in ("js", "penrose", "src"):
+            (widget / name).mkdir()
+        for name in (
+            "package-lock.json", "package-lock.json.trace", "package.json",
+            "rollup.config.js", "tsconfig.json", "package-lock.json.hash",
+        ):
+            (widget / name).touch()
 
 
 def _outputs(project: Path, root: Path) -> dict[str, object]:
@@ -89,6 +102,7 @@ def _outputs(project: Path, root: Path) -> dict[str, object]:
     return {
         "project": _tree(root / "project"),
         "packages": {name: _tree(root / "packages" / name) for name in names},
+        "sidecars": _tree(root / "sidecars") if (root / "sidecars").is_dir() else None,
     }
 
 
@@ -141,11 +155,21 @@ def verify(
         raise RuntimeError("Build cache environment changed")
     if manifest.get("outputs") != _outputs(project, entry):
         raise RuntimeError("Build cache bytes changed")
-    if {path.name for path in entry.iterdir()} != {"manifest.json", "project", "packages"}:
+    expected_entries = {"manifest.json", "project", "packages"}
+    if manifest["outputs"]["sidecars"] is not None:
+        expected_entries.add("sidecars")
+    if {path.name for path in entry.iterdir()} != expected_entries:
         raise RuntimeError("Unexpected build cache entry")
-    return {"cache_sha256": entry.name, "file_count": sum(
-        item["file_count"] for item in [manifest["outputs"]["project"], *manifest["outputs"]["packages"].values()]
-    ), "qualification_use": "forbidden"}
+    output_trees = [
+        manifest["outputs"]["project"], *manifest["outputs"]["packages"].values()
+    ]
+    if manifest["outputs"]["sidecars"] is not None:
+        output_trees.append(manifest["outputs"]["sidecars"])
+    return {
+        "cache_sha256": entry.name,
+        "file_count": sum(item["file_count"] for item in output_trees),
+        "qualification_use": "forbidden",
+    }
 
 
 def main() -> int:

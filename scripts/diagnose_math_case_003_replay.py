@@ -32,6 +32,10 @@ def main() -> int:
     parser.add_argument("--dependency-scratch-root", type=Path)
     parser.add_argument("--patched-closure-root", type=Path)
     parser.add_argument("--build-work-root", type=Path)
+    parser.add_argument(
+        "--probe-widget-lock", action="store_true",
+        help="Probe only the pinned ProofWidgets lock target; not a replay result",
+    )
     args = parser.parse_args()
     project = args.project_root.resolve(strict=True)
     policy = bubblewrap_math_project_args(
@@ -46,12 +50,14 @@ def main() -> int:
         patched_closure_root=args.patched_closure_root,
         build_work_root=args.build_work_root,
     )
-    command = (
-        "/usr/bin/bwrap", *policy, str(args.lake.resolve(strict=True)), "env",
-        str(args.comparator.resolve(strict=True)), CONFIG_PATH.removeprefix("lean/"),
+    suffix = (
+        ("build", "@proofwidgets/widgetPackageLock")
+        if args.probe_widget_lock
+        else ("env", str(args.comparator.resolve(strict=True)), CONFIG_PATH.removeprefix("lean/"))
     )
+    command = ("/usr/bin/bwrap", *policy, str(args.lake.resolve(strict=True)), *suffix)
     code, stdout, stderr = asyncio.run(_run(command, project / "lean", args.timeout_seconds))
-    print(f"Comparator exit code: {code}")
+    print(f"Diagnostic process exit code: {code}")
     print("--- stdout (last 20000 characters) ---")
     print(stdout.decode("utf-8", errors="replace")[-20_000:])
     print("--- stderr (last 20000 characters) ---")

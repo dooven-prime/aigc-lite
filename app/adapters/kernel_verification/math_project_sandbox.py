@@ -15,6 +15,20 @@ from ...core.errors import InvalidEvidenceError
 from .math_project import _check_dependencies, _git
 
 _NAME = re.compile(r"[A-Za-z0-9_.-]+\Z")
+_PROOFWIDGETS_WIDGET_INPUTS = frozenset({
+    "js", "penrose", "src", "package-lock.json", "package-lock.json.trace",
+    "package.json", "rollup.config.js", "tsconfig.json",
+})
+
+
+def _invalid_widget_placeholder(entry: Path, source: Path) -> bool:
+    if entry.is_symlink():
+        return True
+    if entry.name == "package-lock.json.hash":
+        return not entry.is_file() or entry.stat().st_size != 0
+    if (source / entry.name).is_dir():
+        return not entry.is_dir() or any(entry.iterdir())
+    return not entry.is_file() or entry.stat().st_size != 0
 
 
 def bubblewrap_math_project_args(
@@ -144,6 +158,34 @@ def bubblewrap_math_project_args(
                     or any(package_build.iterdir())):
                 raise InvalidEvidenceError("sandbox", f"Package build work directory must be empty: {package.name}")
             args.extend(("--bind", str(package_build), str(package / ".lake")))
+        if closure is not None and build_work is not None and package.name == "proofwidgets":
+            widget_source = closure_roots[index] / "widget"
+            widget_target = package / "widget"
+            widget_output = build_work / "sidecars" / "proofwidgets" / "widget"
+            facade_entries = list(widget_output.iterdir()) if widget_output.is_dir() else []
+            if (
+                widget_source.is_symlink() or not widget_source.is_dir()
+                or {entry.name for entry in widget_source.iterdir()} != _PROOFWIDGETS_WIDGET_INPUTS
+                or any(entry.is_symlink() for entry in widget_source.iterdir())
+                or widget_output.is_symlink() or not widget_output.is_dir()
+                or {entry.name for entry in facade_entries}
+                != (_PROOFWIDGETS_WIDGET_INPUTS | {"package-lock.json.hash"})
+                or any(_invalid_widget_placeholder(entry, widget_source) for entry in facade_entries)
+            ):
+                raise InvalidEvidenceError(
+                    "sandbox", "ProofWidgets output facade or pinned inputs are not pristine"
+                )
+            # The facade is read-only. Inputs are rebound read-only from the
+            # audited closure; only the pre-created .hash file is writable.
+            args.extend(("--ro-bind", str(widget_output), str(widget_target)))
+            for name in sorted(_PROOFWIDGETS_WIDGET_INPUTS):
+                args.extend((
+                    "--ro-bind", str(widget_source / name), str(widget_target / name)
+                ))
+            args.extend((
+                "--bind", str(widget_output / "package-lock.json.hash"),
+                str(widget_target / "package-lock.json.hash"),
+            ))
     args.extend((
         "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
         "--setenv", "PATH", f"{lean.parent}:{landrun.parent}:/usr/bin:/bin",

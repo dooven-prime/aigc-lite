@@ -13,6 +13,7 @@ import os
 import re
 import signal
 import subprocess
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,10 @@ class ProjectReplayObservation:
     patch_closure_verified: bool = False
     patched_closure_sha256: str | None = None
     limitations: tuple[str, ...] = ()
+    elapsed_seconds: float | None = None
+    reported_milestones: tuple[str, ...] = ()
+    comparator_stdout_tail: str = ""
+    comparator_stderr_tail: str = ""
 
 
 class MathProjectComparatorBackend:
@@ -167,7 +172,10 @@ class MathProjectComparatorBackend:
             str(self.comparator),
             CONFIG_PATH.removeprefix("lean/"),
         )
+        replay_started = time.monotonic()
         comparator = await _run(prefix + comparator_command, lean_root, self.timeout_seconds)
+        elapsed_seconds = time.monotonic() - replay_started
+        reported_milestones = _reported_milestones(comparator[1])
         # A successful Comparator run entails its challenge-first builds,
         # statement comparison, axiom check, and built-in kernel replay. A
         # failure does not reveal which of those stages passed, so keep the
@@ -201,6 +209,10 @@ class MathProjectComparatorBackend:
         ]
         if comparator[0] is None:
             limitations.append("Comparator exceeded its wall-clock limit and was terminated.")
+        limitations.append(
+            "Build-stage milestones are informational Comparator process output, "
+            "not independently authenticated stage or mathematical results."
+        )
         return ProjectReplayObservation(
             worktree_clean=clean_after,
             dependencies_closed=dependencies_after[0],
@@ -222,7 +234,27 @@ class MathProjectComparatorBackend:
             patch_closure_verified=closure_identity is not None,
             patched_closure_sha256=closure_identity,
             limitations=tuple(limitations),
+            elapsed_seconds=elapsed_seconds,
+            reported_milestones=reported_milestones,
+            comparator_stdout_tail=comparator[1][-20_000:].decode("utf-8", errors="replace"),
+            comparator_stderr_tail=comparator[2][-20_000:].decode("utf-8", errors="replace"),
         )
+
+
+def _reported_milestones(stdout: bytes) -> tuple[str, ...]:
+    """Retain bounded diagnostic markers without using them as a pass criterion."""
+
+    prefixes = (
+        "Building ", "Exporting ", "Running Lean default kernel",
+        "Lean default kernel accepts", "Lean default kernel rejects",
+        "Your solution is okay!",
+    )
+    markers = [
+        line[:240]
+        for line in stdout.decode("utf-8", errors="replace").splitlines()
+        if line.startswith(prefixes)
+    ]
+    return tuple(markers[:32])
 
 
 def _hash_file(path: Path) -> str:

@@ -28,6 +28,13 @@ from ..adapters.research_import.math_case_003 import (
     PinnedSourceFile,
     validate_snapshot_files,
 )
+from ..adapters.research_import.math_case_003_review import (
+    REVIEW_NOTE_PATH,
+    REVIEW_NOTE_SHA256,
+    REVIEW_SOURCE_COMMIT,
+    REVIEW_SOURCE_PATH,
+    REVIEW_SOURCE_SHA256,
+)
 from ..core.artifacts import ArtifactDraft, ArtifactKind
 from ..core.contracts import RequestContext, RunStatus, StepKind, StepStatus
 from ..core.errors import InvalidEvidenceError, ResourceNotFoundError
@@ -40,6 +47,7 @@ from ..core.qualification import (
 from ..core.research import VerificationAttemptDraft, VerificationKind, VerificationOutcome
 from ..database import get_repository
 from ..profiles.math_project import PROJECT_RECEIPT_VERSION, SNAPSHOT_VERSION
+from ..redaction import redact_record_text
 from ..repository import Repository
 from .artifacts import ArtifactService
 from .qualification import QualificationService
@@ -74,6 +82,54 @@ class MathProjectSliceService:
         """Download and store exact bytes, chunking large PDFs and patches."""
 
         return self.store_snapshot(context, self._source.fetch())
+
+    def store_rtheta_candidate_review(
+        self, context: RequestContext, review_bytes: bytes
+    ) -> dict[str, Any]:
+        """Keep the scoped 11/12 paper reading without granting 7/8 authority."""
+
+        digest = hashlib.sha256(review_bytes).hexdigest()
+        if digest != REVIEW_NOTE_SHA256:
+            raise InvalidEvidenceError("review", "RTheta review bytes do not match the frozen note")
+        try:
+            content = review_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise InvalidEvidenceError("review", "RTheta review must be UTF-8") from exc
+        if redact_record_text(content) != content:
+            raise InvalidEvidenceError("review", "RTheta review cannot be stored byte-exactly")
+        artifact = self._artifacts.create_artifact(
+            context,
+            ArtifactDraft(
+                name="openai-math-003-rtheta-candidate-review.md",
+                kind=ArtifactKind.MARKDOWN,
+                media_type="text/markdown",
+                content_text=content,
+                metadata={
+                    "role": "candidate_paper_review",
+                    "review_note_path": REVIEW_NOTE_PATH,
+                    "review_note_sha256": digest,
+                    "source_repository": SOURCE_REPOSITORY,
+                    "source_commit": REVIEW_SOURCE_COMMIT,
+                    "source_path": REVIEW_SOURCE_PATH,
+                    "source_sha256_expected": REVIEW_SOURCE_SHA256,
+                    "source_bytes_verified_by_import": False,
+                    "review_location_publicly_retrievable": False,
+                    "covered_route": "11/12 mean-square / theta reflection",
+                    "covered_labels": ["lem:reflection", "thm:ms"],
+                    "excluded_claim_key": "OAI-MATH-003-ZETA-7-8",
+                    "support_relation_asserted": False,
+                    "expert_review_attempt_created": False,
+                    "qualification_status": "candidate_only",
+                },
+            ),
+        )
+        if artifact["content_hash"] != digest or artifact["content_text"] != content:
+            raise InvalidEvidenceError("review", "Stored RTheta review changed its source bytes")
+        return {
+            "artifact": artifact,
+            "qualification_granted": False,
+            "current_use_binding": None,
+        }
 
     def store_snapshot(
         self, context: RequestContext, files: tuple[PinnedSourceFile, ...]
@@ -247,6 +303,33 @@ class MathProjectSliceService:
             )
             raise
         passed = observation.kernel_exit_code == 0 and observation.comparator_exit_code == 0
+        diagnostic = None
+        if not passed:
+            diagnostic = self._artifacts.create_artifact(
+                context,
+                ArtifactDraft(
+                    name="openai-math-003-replay-diagnostic.json",
+                    kind=ArtifactKind.JSON,
+                    media_type="application/json",
+                    content_text=json.dumps(
+                        {
+                            "stdout_tail": observation.comparator_stdout_tail,
+                            "stderr_tail": observation.comparator_stderr_tail,
+                            "tail_limit_bytes_per_stream": 20_000,
+                            "source": "untrusted Comparator child-process output",
+                            "qualification_use": "forbidden",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    metadata={
+                        "role": "project_replay_diagnostic",
+                        "claim_revision_id": claim_id,
+                        "source_snapshot_hash": snapshot["content_hash"],
+                        "qualification_use": "forbidden",
+                    },
+                ),
+                run_id=run["id"],
+            )
         receipt_payload = {
             "contract_version": PROJECT_RECEIPT_VERSION,
             "claim_revision_id": claim_id,
@@ -272,14 +355,14 @@ class MathProjectSliceService:
                 "clean_build_exit_code": observation.clean_build_exit_code,
             },
             "kernel": {
-                "status": "passed" if observation.kernel_exit_code == 0 else "undetermined",
+                "status": "passed" if passed else "undetermined",
                 "exit_code": observation.kernel_exit_code,
                 "lean_executable_hash": observation.lean_executable_hash,
                 "lake_executable_hash": observation.lake_executable_hash,
                 "lean_version": observation.lean_version,
                 "lake_version": observation.lake_version,
                 "sorry_present": False if passed else None,
-                "axioms_permitted": passed,
+                "axioms_permitted": True if passed else None,
                 "stdout_sha256": observation.kernel_stdout_hash,
                 "stderr_sha256": observation.kernel_stderr_hash,
             },
@@ -305,6 +388,13 @@ class MathProjectSliceService:
                 "command": list(observation.command),
                 "stdout_sha256": observation.comparator_stdout_hash,
                 "stderr_sha256": observation.comparator_stderr_hash,
+            },
+            "execution_observation": {
+                "elapsed_seconds": observation.elapsed_seconds,
+                "reported_milestones": list(observation.reported_milestones),
+                "milestones_are_gate_evidence": False,
+                "diagnostic_artifact_id": diagnostic["id"] if diagnostic else None,
+                "diagnostic_artifact_hash": diagnostic["content_hash"] if diagnostic else None,
             },
             "limitations": list(observation.limitations),
         }
@@ -365,7 +455,9 @@ class MathProjectSliceService:
                 ),
                 output_digest=receipt["content_hash"],
                 run_id=run["id"],
-                artifact_ids=tuple([*artifact_ids, receipt["id"]]),
+                artifact_ids=tuple(
+                    [*artifact_ids, *([diagnostic["id"]] if diagnostic else []), receipt["id"]]
+                ),
             ),
         )
         repository.finish_run(
@@ -381,6 +473,7 @@ class MathProjectSliceService:
             "run": repository.get_run(context.workspace_id, run["id"]),
             "step": step,
             "receipt_artifact": receipt,
+            "diagnostic_artifact": diagnostic,
             "verification_attempt": attempt,
             "qualification_granted": False,
         }

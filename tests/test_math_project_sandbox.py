@@ -113,3 +113,54 @@ def test_build_work_root_requires_empty_directories(tmp_path, monkeypatch):
         math_project_sandbox.bubblewrap_math_project_args(
             project, build_work_root=work, **kwargs,
         )
+
+
+def test_proofwidgets_sidecar_mount_preserves_read_only_inputs(tmp_path, monkeypatch):
+    project, _package, kwargs = _fixture(tmp_path, monkeypatch)
+    manifest = project / "lean" / "lake-manifest.json"
+    manifest.write_text(json.dumps({"packages": [
+        {"name": "example", "rev": "a" * 40},
+        {"name": "proofwidgets", "rev": "b" * 40},
+    ]}), encoding="utf-8")
+    proofwidgets = project / "lean" / ".lake" / "packages" / "proofwidgets"
+    (proofwidgets / ".lake").mkdir(parents=True)
+    closure = tmp_path / "closure"
+    source = closure / "packages" / "proofwidgets" / "widget"
+    source.mkdir(parents=True)
+    for name in math_project_sandbox._PROOFWIDGETS_WIDGET_INPUTS:
+        target = source / name
+        if name in {"js", "penrose", "src"}:
+            target.mkdir()
+        else:
+            target.write_bytes(b"pinned")
+    work = tmp_path / "work"
+    for name in ("example", "proofwidgets"):
+        (work / "project" / "packages" / name).mkdir(parents=True)
+        (work / "packages" / name).mkdir(parents=True)
+    facade = work / "sidecars" / "proofwidgets" / "widget"
+    facade.mkdir(parents=True)
+    for name in math_project_sandbox._PROOFWIDGETS_WIDGET_INPUTS:
+        target = facade / name
+        if (source / name).is_dir():
+            target.mkdir()
+        else:
+            target.touch()
+    (facade / "package-lock.json.hash").touch()
+    monkeypatch.setattr(
+        "app.adapters.kernel_verification.math_project_closure.verify_patched_closure",
+        lambda _project, _closure: {"closure_sha256": "a" * 64},
+    )
+    args = math_project_sandbox.bubblewrap_math_project_args(
+        project, patched_closure_root=closure, build_work_root=work, **kwargs,
+    )
+    triples = set(zip(args, args[1:], args[2:], strict=False))
+    assert ("--ro-bind", str(facade), str(proofwidgets / "widget")) in triples
+    assert ("--bind", str(facade / "package-lock.json.hash"),
+            str(proofwidgets / "widget" / "package-lock.json.hash")) in triples
+    for name in math_project_sandbox._PROOFWIDGETS_WIDGET_INPUTS:
+        assert ("--ro-bind", str(source / name), str(proofwidgets / "widget" / name)) in triples
+    (facade / "stale.hash").write_bytes(b"forged")
+    with pytest.raises(InvalidEvidenceError, match="not pristine"):
+        math_project_sandbox.bubblewrap_math_project_args(
+            project, patched_closure_root=closure, build_work_root=work, **kwargs,
+        )

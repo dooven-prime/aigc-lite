@@ -90,6 +90,19 @@ def main() -> int:
     if package_file.exists():
         raise RuntimeError(f"Refusing a pre-existing probe file: {package_file}")
     package_write = probe("/usr/bin/touch", str(package_file))
+    widget_source_write = widget_unlisted_write = widget_sidecar_write = None
+    widget_probe = widget_hash_file = None
+    if args.patched_closure_root and args.build_work_root:
+        widget = project / "lean" / ".lake" / "packages" / "proofwidgets" / "widget"
+        widget_probe = args.build_work_root / "sidecars" / "proofwidgets" / "widget" / ".aigc-lite-sandbox-probe"
+        widget_hash_file = args.build_work_root / "sidecars" / "proofwidgets" / "widget" / "package-lock.json.hash"
+        if widget_probe.exists():
+            raise RuntimeError(f"Refusing a pre-existing widget probe: {widget_probe}")
+        if not widget_hash_file.is_file() or widget_hash_file.stat().st_size != 0:
+            raise RuntimeError(f"Widget sidecar is not initially empty: {widget_hash_file}")
+        widget_source_write = probe("/usr/bin/touch", str(widget / "package.json"))
+        widget_unlisted_write = probe("/usr/bin/touch", str(widget / ".aigc-lite-sandbox-probe"))
+        widget_sidecar_write = probe("/usr/bin/touch", str(widget / "package-lock.json.hash"))
     checks = {
         "pinned_lean_runs": toolchain.returncode == 0 and "4.34.1" in toolchain.stdout,
         "pinned_lake_runs": lake.returncode == 0 and "4.34.1" in lake.stdout,
@@ -113,6 +126,17 @@ def main() -> int:
         and not package_file.exists()
         and (work_package_probe is None or work_package_probe.is_file()),
     }
+    if widget_probe is not None:
+        checks["widget_inputs_read_only"] = widget_source_write.returncode != 0
+        checks["widget_unlisted_outputs_denied"] = (
+            widget_unlisted_write.returncode != 0 and not widget_probe.exists()
+        )
+        checks["widget_sidecar_isolated"] = (
+            widget_sidecar_write.returncode == 0
+            and widget_hash_file.is_file() and widget_hash_file.stat().st_size == 0
+            and not (project / "lean" / ".lake" / "packages" / "proofwidgets"
+                     / "widget" / "package-lock.json.hash").exists()
+        )
     for owned_probe in (work_project_probe, work_package_probe):
         if owned_probe is not None and owned_probe.is_file() and not owned_probe.is_symlink():
             if owned_probe.stat().st_size != 0:

@@ -8,6 +8,12 @@ The boundary ℜ(s)=7/8 is excluded. The pole at (s=1), and the exact
 relationship between the paper's meromorphic zeta and Mathlib's `riemannZeta`,
 remain explicit subjects of the paper-to-challenge semantic review.
 
+The [proposition correspondence register](MATH_PROJECT_003_PROPOSITION_ALIGNMENT.md)
+keeps this frozen `7/8` target separate from RIME's later `11/12` RTheta
+paper reconstruction. The [external replay handoff](../replay_packages/math-003-zeta-7-8-v1/README.md)
+contains the fixed raw-file hashes and challenge-first procedure; its existence
+is not an external replay result.
+
 ## Frozen inputs
 
 `OpenAIMathCase003Source` has one fixed repository, commit
@@ -198,3 +204,27 @@ A separate 45-second diagnostic cold build reached early challenge compilation,
 timed out as expected, and produced a sealed cache snapshot of 3,303 files.
 The snapshot re-audited successfully; it is neither a Comparator pass nor a
 Qualification Receipt.
+
+On 2026-10-12 a separate local `bwrap-v1` replay used the same frozen commit,
+the audited 23-patch read-only dependency closure, a fresh build-work tree, and
+a 7,200-second ceiling. Comparator exited nonzero after about 357 seconds;
+its only reported milestone was challenge construction. The stored attempt
+therefore failed and the gate returned `BLOCKED` with no QualificationReceipt
+or CurrentUseBinding. This is **not** a theorem counterexample: neither
+statement comparison nor kernel checking was reached. A narrower sandboxed
+probe then identified a ProofWidgets build-target failure: Lake tried to write
+`widget/package-lock.json.hash` next to a lockfile in the read-only pinned
+dependency tree. The upstream `npm install` line was replayed from a Lake
+trace, not independently observed as a fresh installation. The next execution
+task is an auditable build-output mount/sidecar contract that keeps all frozen
+source bytes immutable; neither making the dependency tree generally writable
+nor accepting a cached trace as proof is an acceptable shortcut. Local formal
+replay success and independent external re-execution both remain **not observed**.
+
+The CLI now accepts the audited `--patched-closure-root` and a fresh
+`--build-work-root` for the authoritative `bwrap-v1` replay, and refuses an
+ambiguous scratch-plus-closure mode. It can store the exact, locally held RIME
+RTheta reading with `review-candidate --review-file` as a **candidate Artifact
+only**; that action produces neither a verification attempt nor a support
+relation to the frozen zeta claim. Build-stage milestones in a replay receipt
+are process-output diagnostics, never substitutes for Comparator exit status.

@@ -32,6 +32,7 @@ from app.core.qualification import ValidationModality, canonical_hash
 from app.core.research import VerificationAttemptDraft, VerificationKind, VerificationOutcome
 from app.profiles.math_project import PROFILE_ID
 from app.repository import SQLiteRepository
+from app.services import math_project as math_project_service
 from app.services.math_project import MathProjectSliceService
 from app.services.qualification import QualificationService
 from app.services.research_registry import ResearchRegistryService
@@ -76,6 +77,35 @@ def _observation(
         command=("lake", "env", "comparator", "ComparatorChallenges/QuasiRiemannHypothesis.json"),
         patch_closure_verified=patch_closure_verified,
     )
+
+
+def test_rtheta_review_is_only_a_byte_exact_candidate_artifact(tmp_path, monkeypatch):
+    repository = SQLiteRepository(tmp_path / "review.db")
+    repository.init()
+    content = b"# Scoped theta review\nNo kernel or 7/8 verdict.\n"
+    monkeypatch.setattr(
+        math_project_service, "REVIEW_NOTE_SHA256", hashlib.sha256(content).hexdigest()
+    )
+    context = RequestContext("review", "workspace-a", "local:deployer")
+    result = MathProjectSliceService(lambda: repository).store_rtheta_candidate_review(
+        context, content
+    )
+    artifact = result["artifact"]
+    assert artifact["content_text"].encode("utf-8") == content
+    assert artifact["metadata"]["role"] == "candidate_paper_review"
+    assert artifact["metadata"]["support_relation_asserted"] is False
+    assert artifact["metadata"]["expert_review_attempt_created"] is False
+    assert artifact["metadata"]["source_bytes_verified_by_import"] is False
+    assert result["qualification_granted"] is False
+    assert result["current_use_binding"] is None
+    assert repository.list_qualification_receipts("workspace-a") == []
+    assert repository.list_current_use_bindings("workspace-a", PROFILE_ID) == []
+
+    with pytest.raises(InvalidEvidenceError, match="do not match"):
+        MathProjectSliceService(lambda: repository).store_rtheta_candidate_review(
+            context, content + b"changed"
+        )
+    assert len(repository.list_artifacts("workspace-a")) == 1
 
 
 @pytest.mark.asyncio
@@ -126,7 +156,7 @@ async def test_replay_never_prebuilds_untrusted_solution(
         calls.append(command)
         if command[-1] == "--version":
             return 0, b"Lean/Lake 4.34.1", b""
-        return comparator_exit, b"Comparator result", b""
+        return comparator_exit, b"Building ComparatorChallenges.QuasiRiemannHypothesis\n", b""
 
     monkeypatch.setattr(math_project_backend, "_run", fake_run)
     backend = MathProjectComparatorBackend(
@@ -154,6 +184,10 @@ async def test_replay_never_prebuilds_untrusted_solution(
     assert result.sandbox_hash == backend._sandbox_policy_hash
     assert result.kernel_exit_code == (0 if comparator_exit == 0 else None)
     assert result.clean_build_exit_code == (0 if comparator_exit == 0 else None)
+    assert result.reported_milestones == (
+        "Building ComparatorChallenges.QuasiRiemannHypothesis",
+    )
+    assert result.elapsed_seconds is not None
 
 
 @pytest.mark.asyncio
@@ -263,6 +297,14 @@ async def _assert_weak_statement_blocked(tmp_path, monkeypatch) -> None:
         snapshot["snapshot"]["id"],
         backend=_Backend(_observation(kernel_exit=0, comparator_exit=1)),
     )
+    receipt = json.loads(evidence["receipt_artifact"]["content_text"])
+    assert receipt["kernel"]["axioms_permitted"] is None
+    assert receipt["kernel"]["status"] == "undetermined"
+    assert receipt["comparator"]["statement_identity"] == "undetermined"
+    diagnostic = evidence["diagnostic_artifact"]
+    assert diagnostic["metadata"]["role"] == "project_replay_diagnostic"
+    assert receipt["execution_observation"]["diagnostic_artifact_id"] == diagnostic["id"]
+    assert json.loads(diagnostic["content_text"])["qualification_use"] == "forbidden"
     gate = QualificationService(provider).evaluate(context, claim["id"], PROFILE_ID)
     legacy_gate = QualificationService(provider).evaluate(context, claim["id"], "math.formal.v1")
 

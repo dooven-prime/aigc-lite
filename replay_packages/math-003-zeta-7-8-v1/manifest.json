@@ -1,0 +1,77 @@
+{
+  "contract_version": "math-003.replay-handoff.v1",
+  "target": {
+    "source_repository": "openai/math",
+    "source_commit": "adc7f1241b42e322a6451854ab7e4b4c146bf78a",
+    "claim_key": "OAI-MATH-003-ZETA-7-8",
+    "statement": "For every complex s, if Re(s) > 7/8, then the Riemann zeta function is nonzero at s.",
+    "theorem_name": "OAI.riemannZeta_ne_zero_of_seven_eighths_lt_re",
+    "paper_path": "preprints/The-Quasi-Riemann-Hypothesis-September-30-2026/paper.pdf",
+    "paper_locator": "printed page 4, Theorem 1.1, Riemann zeta consequence",
+    "paper_to_formal_semantic_review": "pending",
+    "challenge_path": "lean/ComparatorChallenges/QuasiRiemannHypothesis.lean",
+    "config_path": "lean/ComparatorChallenges/QuasiRiemannHypothesis.json",
+    "solution_path": "lean/OAI/NumberTheory/DirichletL/Nonvanishing.lean"
+  },
+  "source_file_sha256": {
+    "preprints/The-Quasi-Riemann-Hypothesis-September-30-2026/paper.pdf": "8fe93046f8cf5ef1ba5969c89addc02d76311adc4ee907509ff9cd96f7ec99e7",
+    "lean/docs/003.md": "41e52ed718260e6feb1db218f8e97287e703cb63c6f16e6c36f5563e6e2395ce",
+    "lean/ComparatorChallenges/QuasiRiemannHypothesis.lean": "065f8c9a01d28db78c8b1bfc5083b535082a2d2aac2230d563f98b8caa812cc5",
+    "lean/ComparatorChallenges/QuasiRiemannHypothesis.json": "46ebb7edc11f69536210f502b4bcbd36bbaf3f0872c16748b6c8ce43991bf320",
+    "lean/OAI/NumberTheory/DirichletL/Nonvanishing.lean": "d98c4a7e074469b429890e1c21b8cc76c410026525a776895293cdc0f9e6ae89",
+    "lean/lean-toolchain": "d5edba4e4b8faad9c1baeadb265716d20d03be4d1a2647dc5e35b0c0325bea7b",
+    "lean/lake-manifest.json": "cf6105a25d9dca2f166b241d9191bd12c7e13305890dc9c4d0952351cccc0794",
+    "lean/lakefile.lean": "4cca977ebece444b6c999d99755c1ad3c93119bafc127ea761f7f703c7279e74",
+    "lean/patches/AINTLIB-lean4341.patch": "076bee4cee068ad938e611d266bb32f7f1798189336087e88c08c8b3ac58dff1",
+    "lean/patches/AbsorptionCutoff-lean4341.patch": "8b35104dc12f807f594f7a61f7a183d967edcd0e601c7172e0e851e4c3adb3ba",
+    "lean/patches/ClassFieldTheory-lean4341.patch": "0275686e2febd9c14523a94cbfae105e6cf30997ed0b2a1ea28c84d0d0c12ba5",
+    "lean/patches/PrimeNumberTheoremAnd-lean4341.patch": "0890432340c0025973bcfe070b634355fa366cc831595f68526e4c73c8903d82",
+    "lean/patches/SphereEversion-lean4341.patch": "5c7c8dba85e4636ed2fec14a5765e937f2b1c428eadb12168645b9d2c0046098",
+    "lean/patches/StrongPNT-lean4341.patch": "2cac5cbef22987314f9293bebcf243d0a3341caaf0227925d1f8d4c31be924d7",
+    "lean/patches/Zeta3Irrational-lean4341.patch": "169eb72e9d12740688467a0e6abf63923a60ec5f7ce8f49ca4b3684a22418901",
+    "lean/patches/belyi-lean4341.patch": "f54c2e211464c0f8194ce63a80a6562489f23f688b1c233efe3c2debfc1b9f66",
+    "lean/patches/carleson-lean4341.patch": "8aa67adaeb6ef56967aa78c47a6c743f03ac72c125f503219a72dee5be23168c",
+    "lean/patches/elliptic-curves-lean4341.patch": "69e6575dae5797d43242694dc737b400b3e1e8fcb854094fead2a204a1f58632",
+    "lean/patches/fixed-point-theorems-lean4341.patch": "d70872e41e80b25191538d1659c4aa3a001349b5bd16f806c9e3833a502516e5",
+    "lean/patches/formal-schemes-lean4341.patch": "5376716aa94fe0c6907570d650dd6604f170687c218cea7028d09b9f95877cea",
+    "lean/patches/genl-lean4341.patch": "3a9edd7dd539e98f81145a3b6cc980c9d62a821b7d41e2591f9aa5c557a7b6fa",
+    "lean/patches/gromov-lean4341.patch": "26a1924bef774183a2e0865f144b782dc1f78eb0246993a31a5d63193b7781bb",
+    "lean/patches/heights-lean4341.patch": "bd3b58a301df273a199d9a0fe486b25d194df176afe32583289d42b64ab583a3",
+    "lean/patches/iut-lean4341.patch": "610ef069f7de5a5d500ead287287b60f193269ea4ddc0011101a9c7c98356dd4",
+    "lean/patches/oka-lean4341.patch": "02995b860e7d566a10adc3488439d38abc06dcb317ae4576d504c71c921816e7",
+    "lean/patches/orbicurve-cores-lean4341.patch": "4376110b9b7c823057cda21479a45de688c5138c81e5d4f1c050b632f168b93d",
+    "lean/patches/pi1-lean4341.patch": "816e0d8123d5622c5b3415675638053ae31126a829e4f21d96f7af28db292f5f",
+    "lean/patches/rellich-kondrachov-lean4341.patch": "0c121d8517dfeadc93ef24fe2deb56beec7cb3998e2552dee8f61c780b1408c8",
+    "lean/patches/schoenflies-lean-lean4341.patch": "4cbc255a2be785e6b617ecd61cdaf67e6d236d65a87f284380f2713670c8e350",
+    "lean/patches/tate-curves-theta-lean4341.patch": "885a19a0dc2d004aaece1987e2b7d2ff4745aef8881cbc53971a852cc5644c3f",
+    "lean/patches/tempered-fundamental-groups-lean4341.patch": "f2e51b5f38459f11515c21801c92c39de85a8feb5f2b490ebbe07a93511a8860"
+  },
+  "tool_sources": {
+    "lean_version_required_by_replay": "4.34.1",
+    "lean_release_archive_url": "https://github.com/leanprover/lean4/releases/download/v4.34.1/lean-4.34.1-linux.tar.zst",
+    "lean_release_archive_sha256": "47bf4bbd78f70c2e9670598ab7124d92b6efb7330ff33e5fbb4030f6fd72e4e4",
+    "comparator_commit": "d03acab154d269c06e60e4de7e4cc85deebff94b",
+    "lean4export_commit": "076e8e57707e813375e8f9da8bf989799ace9680",
+    "landrun_commit": "811cfff51ceaf3d9843708aa6d22e9b84ccac8b4"
+  },
+  "execution_contract": {
+    "sandbox_profile": "bwrap-v1",
+    "dependency_mode": "read_only_content_addressed_patched_closure",
+    "writable_build_outputs": [
+      "project/.lake",
+      "packages/*/.lake",
+      "sidecars/proofwidgets/widget/package-lock.json.hash"
+    ],
+    "widget_inputs_rebound_read_only": true,
+    "challenge_first": true,
+    "precompiled_solution_allowed": false,
+    "build_cache_qualification_use": "forbidden",
+    "maximum_replay_seconds": 7200
+  },
+  "qualification_boundaries": {
+    "machine_replay_success_is_paper_alignment": false,
+    "candidate_review_is_expert_review": false,
+    "qualification_auto_admits_current_knowledge": false,
+    "independent_execution_auto_proves_independent_organization": false
+  }
+}
