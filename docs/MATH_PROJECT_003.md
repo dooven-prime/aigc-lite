@@ -216,10 +216,27 @@ probe then identified a ProofWidgets build-target failure: Lake tried to write
 `widget/package-lock.json.hash` next to a lockfile in the read-only pinned
 dependency tree. The upstream `npm install` line was replayed from a Lake
 trace, not independently observed as a fresh installation. The next execution
-task is an auditable build-output mount/sidecar contract that keeps all frozen
+task was an auditable build-output sidecar contract that keeps all frozen
 source bytes immutable; neither making the dependency tree generally writable
-nor accepting a cached trace as proof is an acceptable shortcut. Local formal
-replay success and independent external re-execution both remain **not observed**.
+nor accepting a cached trace as proof is an acceptable shortcut.
+
+A further local cold replay on 2026-10-12 used that sidecar, the same frozen
+source and patch closure, and a fresh build-work directory. It compiled all
+8,529 Mathlib modules and the frozen challenge, then entered the OAI solution
+dependency build. At the 7,200-second Comparator wall-clock limit it had not
+completed `Nonvanishing.lean`; the process group was terminated. The receipt
+records statement identity and kernel check as **undetermined**, and the gate
+returned `UNRESOLVED` with no QualificationReceipt or current-use binding.
+The source worktree and patch closure were clean after termination. Build
+outputs were sealed separately as a content-addressed **diagnostic** cache,
+not as verification evidence. Raw receipts, logs, and cache bytes stay outside
+this repository. Local formal replay success remains **not observed**.
+
+A second Ubuntu host independently fetched the published handoff revision,
+the pinned source and dependency commits, and the tool sources. Its sandbox
+audit passed, and its own cold replay uses a separate ledger and build-work
+tree. This is a cross-host execution attempt, not yet a completed external
+reverification or an authenticated independent trust domain.
 
 The CLI now accepts the audited `--patched-closure-root` and a fresh
 `--build-work-root` for the authoritative `bwrap-v1` replay, and refuses an

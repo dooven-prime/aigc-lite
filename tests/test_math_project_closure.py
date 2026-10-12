@@ -84,6 +84,12 @@ def test_build_cache_binds_environment_and_rejects_tampering(tmp_path, monkeypat
     entry = cache.capture(project, tmp_path / "closure", work, store, {"lean": binary}, "b" * 64)
     assert cache.verify(project, tmp_path / "closure", entry, {"lean": binary}, "b" * 64)["qualification_use"] == "forbidden"
     assert (entry / "sidecars" / "proofwidgets" / "widget" / "package-lock.json.hash").read_bytes() == b"179e66574f04806e"
+    sealed_sidecar = entry / "sidecars" / "proofwidgets" / "widget" / "package-lock.json.hash"
+    sealed_sidecar.chmod(0o600)
+    sealed_sidecar.write_bytes(b"tampered")
+    with pytest.raises(RuntimeError, match="Build cache bytes changed"):
+        cache.verify(project, tmp_path / "closure", entry, {"lean": binary}, "b" * 64)
+    sealed_sidecar.write_bytes(b"179e66574f04806e")
     with pytest.raises(RuntimeError, match="environment changed"):
         cache.verify(project, tmp_path / "closure", entry, {"lean": binary}, "c" * 64)
     moved_artifact = entry / "packages" / "example" / "Example.olean"

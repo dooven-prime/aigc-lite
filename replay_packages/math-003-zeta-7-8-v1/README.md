@@ -10,10 +10,13 @@ review is a separate candidate and is not an input to this replay.
 **Current limitation (2026-10-12):** no successful full-project replay or
 external re-execution has yet been registered. The first local challenge build
 stopped when ProofWidgets tried to write a `.hash` sidecar in a read-only
-dependency. The narrow file-only output mount described below resolves that
-specific build fault in a target probe; it does **not** predict the outcome of
-the full Comparator run. The local gate issued no qualification receipt for
-the failed run. Never use cached artifacts as a substitute for replay.
+dependency. The narrow file-only output mount below resolved that fault: a
+subsequent cold run built the frozen challenge and reached the OAI solution
+dependencies, but exhausted its 7,200-second wall-clock budget before
+`Nonvanishing.lean` finished. Statement comparison and kernel checking remain
+undetermined; the local gate issued no qualification receipt. Its build outputs
+were sealed only as diagnostic cache data. Never use cached artifacts as a
+substitute for replay.
 
 An external operator should use their own Linux host, clean directory, own
 workspace ledger, and their own source retrieval. Copying our SQLite database,
@@ -113,21 +116,21 @@ kernel isolation. Set `AIGC_LITE_DATA_DIR` to a fresh, private ledger directory
 outside the repository. Then:
 
 ```sh
-aigc-lite math-case-003 snapshot --workspace independent-math-003
+python -m app.cli math-case-003 snapshot --workspace independent-math-003
 ```
 
 The command prints `claim_revision_id` and `source_snapshot_artifact_id`.
 Copy those exact values into `CLAIM_ID` and `SNAPSHOT_ID` before continuing:
 
 ```sh
-aigc-lite math-case-003 replay --workspace independent-math-003 \
+python -m app.cli math-case-003 replay --workspace independent-math-003 \
   --claim-id "$CLAIM_ID" --snapshot-id "$SNAPSHOT_ID" \
   --project-root "$SRC" --lake "$LAKE" --lean "$LEAN" \
   --comparator-root "$COMPARATOR_ROOT" --comparator "$COMPARATOR" \
   --landrun "$LANDRUN" --lean4export "$LEAN4EXPORT" \
   --sandbox-profile bwrap-v1 --patched-closure-root "$CLOSURE_ROOT" \
   --build-work-root "$BUILD" --timeout-seconds 7200
-aigc-lite math-case-003 evaluate --workspace independent-math-003 \
+python -m app.cli math-case-003 evaluate --workspace independent-math-003 \
   --claim-id "$CLAIM_ID"
 ```
 
@@ -138,7 +141,7 @@ Artifact, and VerificationAttempt; the receipt binds source, tool and sandbox
 hashes, outputs, elapsed time, and diagnostic build milestones. Keep its
 `run_id`, `verification_attempt_id`, and receipt Artifact in the private
 ledger. Export the byte-checked receipt JSON with
-`aigc-lite math-case-003 receipt --workspace independent-math-003 --receipt-id ID`,
+`python -m app.cli math-case-003 receipt --workspace independent-math-003 --receipt-id ID`,
 using the returned `verification_receipt_artifact_id` as `ID`. Record
 `uname -a`, available memory/disk before and after, wall time,
 CPU time, peak RSS, and any termination reason separately. Runtime logs and
