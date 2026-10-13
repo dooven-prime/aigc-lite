@@ -1,0 +1,49 @@
+{
+  "schema": "rime.consumer-origin.finite-corpus.v0",
+  "scope": "Predeclared small cases; no claim beyond these finite inputs",
+  "witnesses": [
+    {
+      "case_id": "n3-registration",
+      "environment": {
+        "q_size": 3, "p": "successor_mod_n", "d": [0, 1, 0],
+        "omega": [0, 1, 2], "iota": [0, 1, 2],
+        "ufe_enumeration": [0, 1, 2], "kernel_ports": [0, 2], "collision_image": 0
+      },
+      "prefix": "d", "selected_block": [0, 2], "commands": [],
+      "candidate_reports": null
+    },
+    {
+      "case_id": "n3-selected-absorption",
+      "environment": {
+        "q_size": 3, "p": "successor_mod_n", "d": [0, 1, 0],
+        "omega": [0, 1, 2], "iota": [0, 1, 2],
+        "ufe_enumeration": [0, 1, 2], "kernel_ports": [0, 2], "collision_image": 0
+      },
+      "prefix": "dpp", "selected_block": [0, 2],
+      "commands": [{"kind": "Absorb", "letter": "d"}],
+      "candidate_reports": null
+    },
+    {
+      "case_id": "n4-selected-absorption",
+      "environment": {
+        "q_size": 4, "p": "successor_mod_n", "d": [0, 1, 2, 0],
+        "omega": [0, 1, 2, 3], "iota": [0, 1, 2, 3],
+        "ufe_enumeration": [0, 1, 2, 3], "kernel_ports": [0, 3], "collision_image": 0
+      },
+      "prefix": "dppp", "selected_block": [0, 3],
+      "commands": [{"kind": "Absorb", "letter": "d"}],
+      "candidate_reports": null
+    },
+    {
+      "case_id": "n3-invalid-carry-on-selected-collision",
+      "environment": {
+        "q_size": 3, "p": "successor_mod_n", "d": [0, 1, 0],
+        "omega": [0, 1, 2], "iota": [0, 1, 2],
+        "ufe_enumeration": [0, 1, 2], "kernel_ports": [0, 2], "collision_image": 0
+      },
+      "prefix": "dpp", "selected_block": [0, 2],
+      "commands": [{"kind": "Carry", "letter": "d"}],
+      "candidate_reports": null
+    }
+  ]
+}
