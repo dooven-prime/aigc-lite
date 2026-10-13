@@ -1,0 +1,57 @@
+{
+  "schema": "information-sufficiency-case-lock.v1",
+  "case_id": "bio.biological-source-sufficiency.v1",
+  "authority": "candidate_only",
+  "hash_rules": {
+    "files": "SHA-256 of the complete raw file bytes",
+    "semantic_components": "SHA-256 of UTF-8 JSON with ensure_ascii=false, sorted keys, and compact separators",
+    "self_reference": "This lock and tests/test_information_sufficiency_locks.py are intentionally not hashed by this lock."
+  },
+  "files": {
+    "checker_source": {"path": "app/profiles/bio_information_sufficiency.py", "sha256": "6233863163d55e954372bd8c968b6547fe075a54dc788c834d3f18cea414335a"},
+    "record_binding_profile_source": {"path": "app/profiles/bio_observation_provenance.py", "sha256": "208845ccc9b59b8ed5de74b9113fbb11ffe7e1af0c2b9c96705051bf43485ddd"},
+    "regression_test_source": {"path": "tests/test_bio_information_sufficiency.py", "sha256": "940416bd72667b17531b78d29b91c5a8694cd6f4547a714c644b51df647e7c00"},
+    "contract_doc": {"path": "docs/BIO_INFORMATION_SUFFICIENCY_CASE.md", "sha256": "82688d04b36a94d2d1ddfbdea329d779377fe6d8037599440573f6e63ffab837"},
+    "input_fixture": {"path": "contracts/information-sufficiency/bio/fixture.json", "sha256": "0cddfb62729a2887d1f079dbfad76fef7bebf5d2dcad47a3053e5cdbd11e2d5c"},
+    "fixture_helper_sources": [
+      {"path": "tests/test_bio_in_vitro_case.py", "sha256": "84d5f743b1dc68bdede1ade0ba47658cdb81e6ff31ce34d7b21b3a26a3dd0cf0"},
+      {"path": "tests/test_bio_observation_provenance.py", "sha256": "daf459c3281168fe22987551292339b072aaa38812b64caf6e1ae3e57920088c"}
+    ]
+  },
+  "observation_projection": {
+    "value": {
+      "world_field": "observation",
+      "projection": "The complete instrument and custodian L1 record envelopes, including signatures, are returned unchanged.",
+      "instrument_envelope_fields": ["contract_version", "issuer_id", "key_id", "payload", "signature"],
+      "instrument_payload_fields": ["study", "pairs"],
+      "study_fields": ["study_id", "completed_at", "biological_model", "assay", "endpoint", "unit", "timepoint"],
+      "pair_fields": ["pair_id", "batch_id", "control", "treated"],
+      "custodian_envelope_fields": ["contract_version", "issuer_id", "key_id", "payload", "signature"],
+      "custodian_payload_fields": ["study_id", "instrument_sha256", "samples"],
+      "sample_fields": ["pair_id", "sample_id", "collected_at", "assayed_at"],
+      "equivalence": "Both projected observations must deeply equal the same baseline records, not merely share a digest."
+    },
+    "sha256": "b37e7ab90ef00174af6770010233cce9c06e23169263f7ebed9179a2d9c7076a"
+  },
+  "latent_world_constraints": {
+    "value": {
+      "world_fields": ["observation", "latent_parent_sources"],
+      "mapping_domain": "Exactly the distinct sample_id values from the custodian samples, with no missing or extra key.",
+      "source_labels": "Every parent-source label is a nonempty string.",
+      "visible_binding": "The custodian study_id equals the instrument study_id; pair IDs match one-to-one and sample IDs are distinct.",
+      "witnesses": ["one distinct parent culture per sample", "one shared culture for all samples"],
+      "reality_claim": "Synthetic possible assignments only; neither is asserted as actual laboratory history."
+    },
+    "sha256": "eb784cfe6ccfd06b68d5065f4338a545e5116a637b5609b00c27ffd59c377032"
+  },
+  "target_property": {
+    "value": {
+      "statement": "Each recorded measurement pair has a distinct biological parent source.",
+      "test": "Parent-source labels for the recorded samples are pairwise distinct.",
+      "witness_truth_values": [true, false],
+      "diagnostic_result": "UNRESOLVED",
+      "authority_limit": "No L2 qualification, current-use binding, or execution authorization. The L1 Gate authenticates record binding separately."
+    },
+    "sha256": "75dc9c98dfcaaa4423d311e96a7c427fb6a8512c881856176a81b8ef857ea6ad"
+  }
+}

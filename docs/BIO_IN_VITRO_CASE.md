@@ -140,3 +140,8 @@ The FDA's [AI credibility draft guidance](https://www.fda.gov/regulatory-informa
 emphasizes a particular context of use. That document is draft, and this
 research prototype does not establish regulatory compliance or model
 credibility for a submission.
+
+The separate [Bio information-sufficiency Case](BIO_INFORMATION_SUFFICIENCY_CASE.md)
+uses L1-admitted records to construct two observationally identical but
+biologically different possible worlds. It diagnoses missing parent-source
+information without changing this Profile or granting an independence Receipt.

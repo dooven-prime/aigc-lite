@@ -58,3 +58,8 @@ python scripts/citation_paper_smoke.py --pdf-dir tmp/pdfs
 ## 后续队列策略
 
 Topic、Taste、Novelty、Relevance 可以影响 *Discovery Priority*，不能改变 *Epistemic Qualification*。模型分数不得永久 early-reject 一个 family 或其其他 manuscript；低优先级队列应保留随机抽样，以估计漏检。此队列策略尚未在 v1 实现。
+
+独立的 [Citation information-sufficiency Case](CITATION_INFORMATION_SUFFICIENCY_CASE.md)
+用两个已锚定的书目目标候选构造“相同引用记录、不同潜在原始证据来源”的有限反例；
+锚定不等于外部论文身份鉴真。
+它不改变本抽取合同，也不将引用匹配晋升为证据独立性或 Claim 支持关系。

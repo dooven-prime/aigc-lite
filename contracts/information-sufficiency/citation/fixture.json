@@ -1,0 +1,21 @@
+{
+  "schema": "information-sufficiency-input-fixture.v1",
+  "case_id": "citation.primary-evidence-root-sufficiency.v1",
+  "kind": "generated_pdf_candidate_bundle",
+  "pdf_generator": "tests/test_citation_extraction.py::_pdf",
+  "freeze_extractor_dependency": {"name": "pypdf", "loaded_version": "6.7.0"},
+  "source_uri": "https://example.org/frozen-paper.pdf",
+  "pdf_lines": [
+    "Two cited reports address question Q [1] [2].",
+    "References",
+    "[1] Doe. Report A. arXiv:1234.56789.",
+    "[2] Roe. Report B. arXiv:9876.54321."
+  ],
+  "pdf_sha256": "b372b2ed0fa6a1d3b823da76480139c294cc32fb4de7729246fa4df508931d10",
+  "page_text_sha256": "901d420f16387cc4f2b0df88c3d475f03672536a936fb2df51faf27f99424456",
+  "bibliographic_target_candidates": [
+    "arxiv:1234.56789",
+    "arxiv:9876.54321"
+  ],
+  "identity_boundary": "The identifiers are formally distinct candidate strings, not authenticated external papers or verified primary evidence roots."
+}
