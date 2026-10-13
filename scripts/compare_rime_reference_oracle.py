@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
@@ -22,7 +23,6 @@ DELIVERY = ROOT / "replay_packages" / "rime-consumer-r2.zip"
 CORPUS = ROOT / "reference_oracles" / "finite_corpus_v0.json"
 ZIP_SHA256 = "11f6c61f430e5adedbfc488b02765d146ca652afa277e4d952988e10702c84c6"
 MANIFEST_SHA256 = "fd75add881becc2e37ceb79ed5999200132d90ed958f2ddb66df637b30ae46f6"
-sys.dont_write_bytecode = True  # the frozen package inventory must stay byte-for-byte clean
 sys.path.insert(0, str(ROOT))
 
 from reference_oracles.rime_consumer_origin_v0 import replay  # noqa: E402
@@ -55,6 +55,27 @@ def _r2_property(state: dict[str, Any]) -> dict[str, Any]:
             "q": state["carrier"]["pos"], "block": state["carrier"]["block"]
         },
     }
+
+
+def _run_pinned_r2(package: Path, witness: dict[str, Any]) -> dict[str, Any]:
+    code = (
+        "import json,sys; from router import run_witness; "
+        "print(json.dumps(run_witness(json.load(sys.stdin)), sort_keys=True))"
+    )
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key in {"PATH", "SystemRoot", "WINDIR", "LANG", "LC_ALL", "TZ"}
+    }
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", code],
+        input=json.dumps(witness), text=True, encoding="utf-8",
+        cwd=package / "checker", env=environment,
+        capture_output=True, timeout=30, check=False,
+    )
+    if completed.returncode != 0 or len(completed.stdout) > 10_000_000:
+        raise RuntimeError(f"pinned r2 replay failed: {completed.stderr[:1000]}")
+    return json.loads(completed.stdout)
 
 
 def compare_one(
@@ -110,24 +131,21 @@ def compare_all() -> dict[str, Any]:
         )
         package = Path(unpacked["package_path"])
         verify_before_execution(package, MANIFEST_SHA256)
-        checker_path = str(package / "checker")
-        sys.path.insert(0, checker_path)
-        try:
-            r2_runner = importlib.import_module("router").run_witness
-            expected = json.loads((package / "expected.json").read_text(encoding="utf-8"))
-            entries = expected["positive_witnesses"] + expected["negative_controls"]
-            cases = [
-                (entry["path"], json.loads((package / entry["path"]).read_text(encoding="utf-8")))
-                for entry in entries
-            ]
-            corpus_bytes = CORPUS.read_bytes()
-            corpus = json.loads(corpus_bytes)
-            if corpus.get("schema") != "rime.consumer-origin.finite-corpus.v0":
-                raise ValueError("unexpected finite corpus schema")
-            cases.extend((item["case_id"], item) for item in corpus["witnesses"])
-            results = [compare_one(name, witness, r2_runner) for name, witness in cases]
-        finally:
-            sys.path.remove(checker_path)
+        expected = json.loads((package / "expected.json").read_text(encoding="utf-8"))
+        entries = expected["positive_witnesses"] + expected["negative_controls"]
+        cases = [
+            (entry["path"], json.loads((package / entry["path"]).read_text(encoding="utf-8")))
+            for entry in entries
+        ]
+        corpus_bytes = CORPUS.read_bytes()
+        corpus = json.loads(corpus_bytes)
+        if corpus.get("schema") != "rime.consumer-origin.finite-corpus.v0":
+            raise ValueError("unexpected finite corpus schema")
+        cases.extend((item["case_id"], item) for item in corpus["witnesses"])
+        results = [
+            compare_one(name, witness, lambda value: _run_pinned_r2(package, value))
+            for name, witness in cases
+        ]
     return {
         "schema": "rime.consumer-origin.comparison.v0",
         "scope": "finite independent-code-path comparison; same author/trust domain",
