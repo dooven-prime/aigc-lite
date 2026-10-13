@@ -2,14 +2,19 @@
 
 This is a separate, finite formal-delivery case. It is **not** Math Project 003,
 a numbered RIME paper result, a general image/kernel theorem, or a
-QualificationReceipt. The source owner is the local RIME candidate at
-`rime-lite/contracts/formal-cases/fibre-criterion/v1/`; this repository does
-not copy or silently rewrite its Lean source.
+QualificationReceipt. The source owner is the RIME candidate at
+`rime-lite/contracts/formal-cases/fibre-criterion/v1/`, publicly retrievable at
+RIME commit `6357d10991c52c5c71f507d024912a39b9d99080`. The checker is
+publicly retrievable at aigc-lite commit
+`d86414257c7ab809978a392325fcdcdf53485d86`. These are source identities,
+not release tags or qualification anchors. This repository does not copy or
+silently rewrite the Lean source.
 
 The candidate `case-lock.json` has SHA-256
 `f4273da83620c8e581418aff8a9c485e476809694df325752afed911e1217705`.
-That digest is an **out-of-band local expected value for this candidate**, not
-yet a public Git identity. The bound `FibreCriterion.lean` bytes have SHA-256
+Supply that digest independently of the fetched package; a Git commit and a
+lock digest check different bindings. The bound `FibreCriterion.lean` bytes
+have SHA-256
 `8faff7f358827a405e198c8b0c134758d43e3e5eedc05bd80dc7e3336f90485c`.
 The lock also binds `AxiomAudit.lean`, `lean-toolchain`, `.gitattributes`, the
 seven declaration names, Lean 4.33.0 release commit, and per-theorem expected
@@ -41,14 +46,16 @@ in those exact source bytes compiled under the recorded Lean release and
 matched the frozen axiom audit. The factorization theorem **assumes
 surjectivity**. The matrix claims concern only the file's local two-dimensional
 column-pair representation. No paper-to-formal statement comparison, general
-image/kernel theorem, independent organization, OS sandbox, public source
-commit, or Math 003 replay follows. The Lean executable's version string and
-binary hash are observed, not independently authenticated by this script.
+image/kernel theorem, independent organization, OS sandbox, or Math 003 replay
+follows. The replay record does not authenticate the supplied files against a
+public Git commit; that identity must be checked separately. The Lean
+executable's version string and binary hash are observed, not independently
+authenticated by this script.
 
-Before an external delivery, the RIME package needs its own public immutable
-source identity and an out-of-band digest distributed independently of the
-package. A separate operator should obtain the package and trusted Lean
-toolchain, rerun it, preserve raw outputs, and report what was independently
-checked. Only a later, separately authorized application workflow could store
-its evidence or evaluate a domain-specific QualificationProfile; replay here
-does neither automatically.
+For cross-host replay, fetch both commits above, check their full commit IDs,
+check the lock against the independently supplied digest, and run the checker
+with a separately obtained Lean 4.33.0 toolchain. Preserve raw outputs and
+distinguish same-checker cross-host replay from independently implemented
+validation. Only a later, separately authorized application workflow could
+store this evidence or evaluate a domain-specific QualificationProfile; replay
+here does neither automatically.

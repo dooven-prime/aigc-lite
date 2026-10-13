@@ -220,7 +220,7 @@ def replay(
         "audit_stderr_sha256": audit_result["stderr_sha256"],
         "limitations": [
             "Same-source local Lean replay; not independently authenticated toolchain or OS isolation.",
-            "No external source commit, formal-to-paper semantic review, organizational independence, or Case 003 result.",
+            "This replay does not authenticate an external source commit, perform formal-to-paper semantic review, establish organizational independence, or produce a Case 003 result.",
             "No QualificationReceipt, CurrentUseBinding, or execution authorization is issued.",
         ],
     }
