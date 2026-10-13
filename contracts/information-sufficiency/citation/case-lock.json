@@ -1,0 +1,55 @@
+{
+  "schema": "information-sufficiency-case-lock.v1",
+  "case_id": "citation.primary-evidence-root-sufficiency.v1",
+  "authority": "candidate_only",
+  "hash_rules": {
+    "files": "SHA-256 of the complete raw file bytes",
+    "semantic_components": "SHA-256 of UTF-8 JSON with ensure_ascii=false, sorted keys, and compact separators",
+    "self_reference": "This lock and tests/test_information_sufficiency_locks.py are intentionally not hashed by this lock."
+  },
+  "files": {
+    "checker_source": {"path": "app/profiles/citation_information_sufficiency.py", "sha256": "076d114ccf5c5e99115a4d5ffc7e598adb33e16f9e7404921f7a2a6f114ba717"},
+    "regression_test_source": {"path": "tests/test_citation_information_sufficiency.py", "sha256": "cc2056a3c65be613ce3961f3890acaa1ae47e1c385430616105556d38a1e5a36"},
+    "candidate_bundle_service_source": {"path": "app/services/citation_extraction.py", "sha256": "6b73a37331abd2da874705dd66f2bccb10f7a378187eb9b1827cec884dc6025c"},
+    "contract_doc": {"path": "docs/CITATION_INFORMATION_SUFFICIENCY_CASE.md", "sha256": "ef77a107dde28fe0b89a41ab8c5793aa765256567b5a79b26d01eddc9dbc3631"},
+    "input_fixture": {"path": "contracts/information-sufficiency/citation/fixture.json", "sha256": "d3bc88da8716b842f758b6769a4e266cb8dd7bb7895f8f92f0286de746cc0b44"},
+    "fixture_helper_sources": [
+      {"path": "tests/test_citation_extraction.py", "sha256": "667f14bf7f27d4b1e7f64168f87ff1c73a0737a76020ec44a99212b4a39ef669"}
+    ]
+  },
+  "observation_projection": {
+    "value": {
+      "world_field": "visible_bundle",
+      "projection": "The complete candidate-only CitationExtractionProposal.v1 bundle is returned unchanged, including the source snapshot, page text, anchors, match fields, and selected match IDs.",
+      "bundle_fields": ["contract_version", "admission_state", "source_snapshot", "checker_source_sha256", "proposal", "proposal_mode", "occurrence_limit", "truncated", "submitted_by_principal_id", "limitations"],
+      "source_snapshot_fields": ["pdf_sha256", "pdf_size_bytes", "source_uri", "extractor", "pages"],
+      "page_fields": ["page", "text", "text_sha256"],
+      "proposal_fields": ["contract_version", "occurrences", "bibliographic_matches", "claim_relation_proposals", "proposer_model_route", "proposer_prompt_hash"],
+      "equivalence": "Both projected bundles must deeply equal the same baseline candidate bundle, not merely share a digest."
+    },
+    "sha256": "2f0961f5c38222e4f58598bb6c8953f8ba943163dba6022e1e241cc65ae97187"
+  },
+  "latent_world_constraints": {
+    "value": {
+      "world_fields": ["visible_bundle", "latent_primary_evidence_roots"],
+      "fixture_scope": "Only the pinned lineage-silent PDF and exact extracted page text are accepted.",
+      "candidate_selection": "Exactly two body-anchored occurrences and reference-anchored matches; selected match IDs cover both matches and their formally distinct target-identifier candidate strings.",
+      "anchor_binding": "Body and reference anchors are exact page-text spans, with citation marker and complete target-identifier consistency checked by the frozen checker.",
+      "mapping_domain": "Exactly the two target-identifier candidate strings, with no missing or extra key.",
+      "root_sets": "Each target has a nonempty list of distinct nonempty primary-root labels.",
+      "witnesses": ["disjoint primary-root sets", "a shared primary root"],
+      "reality_claim": "Synthetic possible assignments only; target identifiers are formal candidates, not authenticated papers."
+    },
+    "sha256": "d48012855610e23144c68ac853aa7e744b0d347b47fca04cf4d15fb7132c62f5"
+  },
+  "target_property": {
+    "value": {
+      "statement": "The works hypothetically denoted by two selected bibliographic target candidates have disjoint primary evidence roots.",
+      "test": "The two candidate-assigned primary-root sets are disjoint.",
+      "witness_truth_values": [true, false],
+      "diagnostic_result": "UNRESOLVED",
+      "authority_limit": "No authenticated paper identity, claim support, L2 qualification, current-use binding, or execution authorization."
+    },
+    "sha256": "5ec5be80261ff054ebd630bb2bda67d8d11f3d3262e28b6ca9401a55d85b46fb"
+  }
+}

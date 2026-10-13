@@ -254,7 +254,11 @@ class _ProcessKernelVerifierBackend:
         try:
             await asyncio.wait_for(process.wait(), timeout_seconds)
         except TimeoutError:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                # The child can exit between the timeout and the kill request.
+                pass
             await process.wait()
             stdout, stdout_truncated = await stdout_task
             stderr, stderr_truncated = await stderr_task
@@ -266,7 +270,11 @@ class _ProcessKernelVerifierBackend:
                 output_truncated=stdout_truncated or stderr_truncated,
             )
         except asyncio.CancelledError:
-            process.kill()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                # Keep cancellation propagation even if the child just exited.
+                pass
             await process.wait()
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             raise

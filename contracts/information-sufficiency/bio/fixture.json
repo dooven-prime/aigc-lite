@@ -1,0 +1,41 @@
+{
+  "schema": "information-sufficiency-input-fixture.v1",
+  "case_id": "bio.biological-source-sufficiency.v1",
+  "kind": "unsigned_l1_record_template",
+  "signature_policy": "Generate fresh Ed25519 keys and signatures in tests; no private key or runtime signature is frozen here.",
+  "instrument": {
+    "contract_version": "bio.instrument-record.v0",
+    "issuer_id": "device-registry-1",
+    "key_id": "key-1",
+    "payload": {
+      "study": {
+        "study_id": "retrospective-assay-1",
+        "completed_at": "2026-09-01",
+        "biological_model": "cell-line-X",
+        "assay": "endpoint-assay",
+        "endpoint": "signal",
+        "unit": "arbitrary-units",
+        "timepoint": "24h"
+      },
+      "pairs": [
+        {"pair_id": "pair-1", "batch_id": "batch-1", "control": "1.0", "treated": "1.8"},
+        {"pair_id": "pair-2", "batch_id": "batch-1", "control": "2.0", "treated": "2.6"},
+        {"pair_id": "pair-3", "batch_id": "batch-2", "control": "3.0", "treated": "3.4"}
+      ]
+    }
+  },
+  "custodian": {
+    "contract_version": "bio.custodian-record.v0",
+    "issuer_id": "sample-office-1",
+    "key_id": "key-1",
+    "payload": {
+      "study_id": "retrospective-assay-1",
+      "instrument_sha256": "pending",
+      "samples": [
+        {"pair_id": "pair-1", "sample_id": "Sample-1", "collected_at": "2026-09-01T08:00:00Z", "assayed_at": "2026-09-01T09:00:00Z"},
+        {"pair_id": "pair-2", "sample_id": "Sample-2", "collected_at": "2026-09-01T08:00:00Z", "assayed_at": "2026-09-01T09:00:00Z"},
+        {"pair_id": "pair-3", "sample_id": "Sample-3", "collected_at": "2026-09-01T08:00:00Z", "assayed_at": "2026-09-01T09:00:00Z"}
+      ]
+    }
+  }
+}
