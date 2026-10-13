@@ -1,0 +1,14 @@
+{
+  "environment": {
+    "q_size": 20, "p": "successor_mod_n",
+    "d": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "omega": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+    "iota": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+    "ufe_enumeration": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+    "kernel_ports": [0, 1], "collision_image": 0
+  },
+  "prefix": "pp",
+  "selected_block": [0, 1],
+  "commands": [{"kind": "Carry", "letter": "p"}],
+  "candidate_reports": null
+}
