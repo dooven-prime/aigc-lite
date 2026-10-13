@@ -1,0 +1,33 @@
+{
+  "environment": {
+    "q_size": 7, "p": "successor_mod_n",
+    "d": [0, 3, 2, 5, 1, 4, 0],
+    "omega": [0, 1, 2, 3, 4, 5, 6],
+    "iota": [0, 1, 2, 3, 4, 5, 6],
+    "ufe_enumeration": [0, 1, 2, 3, 4, 5, 6],
+    "kernel_ports": [0, 6], "collision_image": 0
+  },
+  "prefix": "dpp",
+  "selected_block": [0, 6],
+  "commands": [],
+  "candidate_reports": [
+    {
+      "partition": [
+        {"q": 0, "block": [3]},
+        {"q": 2, "block": [0, 6]},
+        {"q": 3, "block": [4]},
+        {"q": 4, "block": [2]},
+        {"q": 5, "block": [1]},
+        {"q": 6, "block": [5]}
+      ],
+      "selected_block": [0, 6],
+      "origin": {
+        "letter": "d", "ports": [6, 0],
+        "input_blocks": [[6], [0]],
+        "collision_image": 0, "fresh_block": [0, 6]
+      },
+      "absorptions": [],
+      "carrier": {"q": 2, "block": [0, 6]}
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "schema": "rime.consumer-replay.expected.v1",
+  "positive_witnesses": [
+    {
+      "path": "examples/witness.json",
+      "expected": {"verdict": "PASS"}
+    },
+    {
+      "path": "examples/witness_with_reports.json",
+      "expected": {"verdict": "PASS"}
+    },
+    {
+      "path": "examples/absorb_witness.json",
+      "expected": {"verdict": "PASS"}
+    }
+  ],
+  "negative_controls": [
+    {
+      "path": "negative_controls/bad_f_not_in_log.json",
+      "expected": {"verdict": "FAIL", "reason": "F never registered as a fresh block"}
+    },
+    {
+      "path": "negative_controls/absorb_p.json",
+      "expected": {"verdict": "FAIL", "reason": "Absorb(p) never enabled"}
+    },
+    {
+      "path": "negative_controls/carry_guard_wrong.json",
+      "expected": {"verdict": "FAIL", "reason": "Carry guard fails"}
+    },
+    {
+      "path": "negative_controls/wrong_candidate_report.json",
+      "expected": {"verdict": "FAIL", "reason": "candidate_reports[0] origin mismatch"}
+    },
+    {
+      "path": "negative_controls/q_too_large.json",
+      "expected": {"verdict": "INVALID_REQUEST", "reason": "out of bounds [2, 16]"}
+    },
+    {
+      "path": "negative_controls/invalid_letter.json",
+      "expected": {"verdict": "INVALID_REQUEST", "reason": "invalid letter in prefix"}
+    },
+    {
+      "path": "negative_controls/bad_command_kind.json",
+      "expected": {"verdict": "INVALID_REQUEST", "reason": "invalid command kind"}
+    }
+  ]
+}

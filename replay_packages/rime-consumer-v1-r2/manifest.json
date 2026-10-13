@@ -1,0 +1,170 @@
+{
+  "schema": "rime.consumer-replay.package-manifest.v2",
+  "contract_version": "rime.consumer-replay.v1",
+  "checker_revision": "r2",
+  "supersedes_manifest_sha256": "b5463a70792431785de81b176536c739255131f48be1d1b9e1c95c1016e8ac73",
+  "package_kind": "SAME_CHECKER_CROSS_HOST_REPLAY_BUNDLE",
+  "claim_boundary": "REPLAY_BUNDLE_NOT_INDEPENDENT_VALIDATION_OR_AUDIT",
+  "digest_scope": "SHA256_OF_EXACT_FILE_BYTES",
+  "frozen_spec_pin": "rime-lite commit 9d4c735d7a5fc14334c33c94160931ff53837c24 contracts/consumer-replay/v1/",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "role": "BYTE_MATERIALIZATION_POLICY",
+      "size": 64,
+      "sha256": "6966d0bc0169072d3f2c6341ebfd973e3a9c98c98c3941ca8459f077850f934d"
+    },
+    {
+      "path": "CONSUMER_SPEC.md",
+      "role": "INDEPENDENT_LOG_ORACLE",
+      "size": 3880,
+      "sha256": "184a507d1ad54004fec0b195db952ce1a18d949f6264f6c2f07b2a56b77bf0e1"
+    },
+    {
+      "path": "FOREST_MODEL.md",
+      "role": "PLACED_FOREST_REPRESENTATION",
+      "size": 3098,
+      "sha256": "7ee153f68238a436d973f254bb16857ba78e6a853a85e127cb5eee9e66535c48"
+    },
+    {
+      "path": "README.md",
+      "role": "SCOPE_AND_CASE_DECISIONS",
+      "size": 6480,
+      "sha256": "76525a11d3cd814c84d319af683c715065b7e8056fc5bb2a87f6f5cb1938908c"
+    },
+    {
+      "path": "REPLAY_PACKAGE.md",
+      "role": "CHECKER_REVISION_AND_SCOPE",
+      "size": 1587,
+      "sha256": "10e0ae73ed978aa8a3da0e6f16a3adb754ee525f9b88ad550307dd78277a0a54"
+    },
+    {
+      "path": "UFE_ADAPTER.md",
+      "role": "PLACED_FORWARD_UFE_REPRESENTATION",
+      "size": 4265,
+      "sha256": "bbd47dbaca39c2828f3e9a92fd536adb26730c63be3bf92c9a6def4c374fd35c"
+    },
+    {
+      "path": "candidate-reports.schema.json",
+      "role": "OPTIONAL_CASE_REPORT_JSON_SHAPE",
+      "size": 2693,
+      "sha256": "90b8c9ca530e59e4321a7ebc11dba0efed7b36f4faec3bbeff28a0339f4a8076"
+    },
+    {
+      "path": "checker/__init__.py",
+      "role": "CHECKER_PACKAGE_MARKER",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "checker/log_oracle.py",
+      "role": "CHECKER_ROUTE1_LOG_ORACLE",
+      "size": 9179,
+      "sha256": "14cbfe0822d0adf56d06703ce3a2bf864a439678b55a08b8e3bd4915a414c8fa"
+    },
+    {
+      "path": "checker/placed_forest.py",
+      "role": "CHECKER_ROUTE2_PLACED_FOREST",
+      "size": 10634,
+      "sha256": "ca8a9a3d75571ff2e47dc9440821b0134c8154947f064abe7ee7d2ff46f59135"
+    },
+    {
+      "path": "checker/placed_ufe.py",
+      "role": "CHECKER_ROUTE3_PLACED_UFE",
+      "size": 10049,
+      "sha256": "cc393a612e28f27cc3ed4aae763d1f049a54ca08b06c63a97aa2e981ca6aff84"
+    },
+    {
+      "path": "checker/router.py",
+      "role": "CHECKER_3ROUTE_COMPARISON",
+      "size": 8240,
+      "sha256": "92e6bf92bb97e6f7620daed23d13551224c4c37ae2f066f91364ec1089a61460"
+    },
+    {
+      "path": "checker/run.py",
+      "role": "CHECKER_CLI_ENTRYPOINT",
+      "size": 4401,
+      "sha256": "d4ac6523baef753a0c7f1f78dbdbf573bd9565b7dbd86212168237656b9915a8"
+    },
+    {
+      "path": "checker/utils.py",
+      "role": "CHECKER_SHARED_UTILITIES",
+      "size": 9618,
+      "sha256": "3547546120f17b82585a63fd2919ec2ab8cb991492228cd382d8fe328b518d28"
+    },
+    {
+      "path": "checker/verifier.py",
+      "role": "CHECKER_PACKAGE_INTEGRITY_VERIFIER",
+      "size": 3294,
+      "sha256": "e2ad56416e0ada75807aab16bd2c12166fe266922447971c3e5bf5844bf4942e"
+    },
+    {
+      "path": "examples/witness.json",
+      "role": "FINITE_DATA_WITNESS_POSITIVE",
+      "size": 408,
+      "sha256": "af7ecdc1c4d4dd38a6236f58684ec8fe7d3e7e3d00baa2a7d381b98859b3115d"
+    },
+    {
+      "path": "examples/witness_with_reports.json",
+      "role": "POSITIVE_COMPLETE_REPORT_COMPARISON",
+      "size": 1291,
+      "sha256": "8758ff2a00ac062f3b6eb6be2f418b1c096f17bb006cb4f29654c24d24018b41"
+    },
+    {
+      "path": "examples/absorb_witness.json",
+      "role": "POSITIVE_SELECTED_ABSORPTION",
+      "size": 396,
+      "sha256": "82767609cc98114c20d75d58631ae704c2841a0a44f86fcb3f7600e251e57663"
+    },
+    {
+      "path": "expected.json",
+      "role": "EXPECTED_VERDICTS",
+      "size": 1455,
+      "sha256": "37ff0427c52ffce78e51666498f08dcad3a1278383615864c290e4839cea4786"
+    },
+    {
+      "path": "negative_controls/absorb_p.json",
+      "role": "NEGATIVE_ABSORB_P_NEVER_ENABLED",
+      "size": 393,
+      "sha256": "d6457c390c73f8e033959337faad66fabe8c73c3b72f149f970e60a19d873b79"
+    },
+    {
+      "path": "negative_controls/bad_command_kind.json",
+      "role": "NEGATIVE_BAD_COMMAND_KIND",
+      "size": 391,
+      "sha256": "180dd4b329e0ba931dd3e948655e47a5a2abf6cb53f1ec870a311a504fdfed01"
+    },
+    {
+      "path": "negative_controls/carry_guard_wrong.json",
+      "role": "NEGATIVE_CARRY_GUARD_AT_SELECTED_COLLISION",
+      "size": 395,
+      "sha256": "c29928b6b7b3c245502852bfd6e6793abcee3f2a788045edaaf8a6123337e51a"
+    },
+    {
+      "path": "negative_controls/bad_f_not_in_log.json",
+      "role": "NEGATIVE_F_NEVER_REGISTERS",
+      "size": 360,
+      "sha256": "50cd82488182019fabbe3546e9b8e601a5d78725e2ea7df698d513beda8b22dc"
+    },
+    {
+      "path": "negative_controls/invalid_letter.json",
+      "role": "NEGATIVE_INVALID_LETTER",
+      "size": 361,
+      "sha256": "fa0441a3aa27d2892c17d0189f60e0f73ebf3cb095889ad87b613f4eb3b07acb"
+    },
+    {
+      "path": "negative_controls/q_too_large.json",
+      "role": "NEGATIVE_Q_SIZE_OUT_OF_BOUNDS",
+      "size": 578,
+      "sha256": "f34a3fab34cb92d3e8cbb71f43de2c3101517b21d57004ae4608e14c541db66e"
+    },
+    {
+      "path": "negative_controls/wrong_candidate_report.json",
+      "role": "NEGATIVE_WRONG_CANDIDATE_REPORT",
+      "size": 852,
+      "sha256": "219c22808ef898e001b39e63c4292d53f334e7e4b5a7bbfdddecf2830ca54ce9"
+    }
+  ],
+  "anchoring_rule": "The package manifest does not hash itself. A host-owned pre-execution verifier requires its SHA-256 from outside the package, then checks the exact file set, sizes and SHA-256 values before invoking the checker. This does not authenticate a Git tree or provide an OS sandbox.",
+  "scope_label": "SAME-CHECKER CROSS-HOST REPLAY. Not independent implementation validation. Not institutional verification. Not external audit. An independent validation requires a separate re-implementation or an external verifying organization; this package does NOT carry such authority."
+}
