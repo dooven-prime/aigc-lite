@@ -18,6 +18,7 @@ from aigc_lite_casepacks.mde_v0 import (
     bio,
     bio_certificate,
     certificate_common,
+    certificate_replay,
     citation,
     citation_certificate,
 )
@@ -32,13 +33,14 @@ def _installed_path(module: object) -> None:
 
 def main() -> None:
     assert metadata.version("aigc-lite") == "0.7.0"
-    assert metadata.version("aigc-lite-mde-casepack") == "0.1.0"
+    assert metadata.version("aigc-lite-mde-casepack") == "0.2.0.dev0"
     requires = metadata.requires("aigc-lite-mde-casepack") or []
     assert any(
         re.fullmatch(r"aigc-lite\s*==\s*0\.7\.0", requirement, re.IGNORECASE)
         for requirement in requires
     ), requires
-    for module in (app, bio, citation, bio_certificate, citation_certificate, certificate_common):
+    for module in (app, bio, citation, bio_certificate, citation_certificate,
+                   certificate_common, certificate_replay):
         _installed_path(module)
     assert not metadata.distribution("aigc-lite-mde-casepack").entry_points
 

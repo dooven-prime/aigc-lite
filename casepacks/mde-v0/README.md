@@ -4,6 +4,9 @@ This is a separately installable, candidate-only package. The main
 `aigc-lite` wheel does not include `aigc_lite_casepacks` and the application
 does not discover or register this package automatically. It imports the
 frozen Bio/Citation v1 observation helpers from `app`, never the reverse.
+The certificate work is an unpublished `0.2.0.dev0` research candidate.
+The formally released `0.1.0` wheel does not contain certificate modules;
+do not treat a source checkout or local development wheel as that release.
 The first separately installable casepack release requires exactly
 `aigc-lite==0.7.0`. The tagged `v0.6.0` core predates its Bio/Citation v1
 helpers and is not compatible, even if an unreleased checkout still reports
@@ -48,6 +51,13 @@ and one Citation positive result. They rerun those diagnostics from supplied
 evidence and record lawful one-step information ablations; they do not sign,
 register, or issue authority. The versioned JSON and replay limitations are
 specified in the [certificate contract](../../docs/DISAMBIGUATION_CERTIFICATE_V0.md).
+`certificate_replay.py` provides a bounded offline CLI for the two frozen
+synthetic replay inputs under `fixtures/certificate-replay-v0/`. It requires
+the raw input and canonical certificate JSON SHA-256 as separate command-line
+expectations; `replay-lock.json` is only a candidate comparison record and
+must itself be pinned outside the submitted input. Matching output on another
+host demonstrates reproducibility of this checker, not independent validation
+or real-world source authentication. The package remains candidate-only.
 
 The package version identifies this distribution, not a frozen execution
 environment. Reports include the checker source and direct-dependency hashes;

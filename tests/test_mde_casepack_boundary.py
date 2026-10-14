@@ -12,6 +12,7 @@ from aigc_lite_casepacks.mde_v0 import (
     bio,
     bio_certificate,
     certificate_common,
+    certificate_replay,
     citation,
     citation_certificate,
 )
@@ -25,6 +26,7 @@ def test_casepack_has_its_own_distribution_and_packaged_contract() -> None:
     )
     assert core["tool"]["setuptools"]["packages"]["find"]["include"] == ["app*"]
     assert package["project"]["name"] == "aigc-lite-mde-casepack"
+    assert package["project"]["version"] == "0.2.0.dev0"
     assert package["project"]["dependencies"] == ["aigc-lite==0.7.0"]
     assert "entry-points" not in package["project"]
     assert package["tool"]["setuptools"]["packages"]["find"]["include"] == [
@@ -53,6 +55,9 @@ def test_casepack_has_its_own_distribution_and_packaged_contract() -> None:
     assert certificate_common.finalize_certificate.__module__ == (
         "aigc_lite_casepacks.mde_v0.certificate_common"
     )
+    assert certificate_replay.replay_input.__module__ == (
+        "aigc_lite_casepacks.mde_v0.certificate_replay"
+    )
 
 
 def test_core_application_has_no_static_casepack_import() -> None:
@@ -76,7 +81,10 @@ def test_candidate_certificate_modules_have_no_authority_or_transport_imports() 
     root = Path(__file__).resolve().parents[1] / (
         "casepacks/mde-v0/src/aigc_lite_casepacks/mde_v0"
     )
-    for filename in ("bio_certificate.py", "citation_certificate.py", "certificate_common.py"):
+    for filename in (
+        "bio_certificate.py", "citation_certificate.py", "certificate_common.py",
+        "certificate_replay.py",
+    ):
         path = root / filename
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         imports: list[str] = []

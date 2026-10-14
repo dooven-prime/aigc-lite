@@ -1,0 +1,45 @@
+{
+  "lock_version": "mde.certificate-replay-lock.v0",
+  "core_tag_target": "834ebff7ac17f7825d8afab0c7e277f9185bd853",
+  "core_wheel_sha256": "ccd720cc198f763aa1a9cc57c050735b5ea756d87eb65875686ff4e0d03c7f8c",
+  "casepack_research_version": "0.2.0.dev0",
+  "casepack_development_wheel_sha256": "f7611eb142dc1c39cdefc7a5636df287f99bc053f2b9406d5d474461509f6d6d",
+  "wheel_source_date_epoch": 1791950000,
+  "certificate_replay_source_sha256": "6cf404b88905b8c8a68af5756f94c1d911c1986f10d0b598e5325f3106dcfc2f",
+  "certificate_contract_sha256": "b1b5a13870a33ca6a9fa71e117f9307535b02d416b133c8ccd5f3f9a6a4388f3",
+  "cases": [
+    {
+      "case": "bio.parent-source-refutation.v0",
+      "input_file": "bio-input.json",
+      "input_sha256": "dac44f29be5a379dbcffe1794ac3a0b9e1f0c504ea9a66eccc02f80ffe609c53",
+      "certificate_json_sha256": "2853ed40aac06032af4c4a1ffcafdc7435151525837a1540378d76be3696e952",
+      "certificate_field_sha256": "5890c14b77e738f845911ee2a2710ceaca81e4c5bbd1600e9efebb5041b41776",
+      "expected_status": "TARGET_FALSE_UNDER_ATTESTED_LINEAGE",
+      "expected_ablation_classification": {
+        "Sample-1": "NECESSARY_IN_THIS_BUNDLE",
+        "Sample-2": "NECESSARY_IN_THIS_BUNDLE",
+        "Sample-3": "REDUNDANT_IN_THIS_BUNDLE"
+      }
+    },
+    {
+      "case": "citation.positive-conditional-disambiguation.v0",
+      "input_file": "citation-input.json",
+      "input_sha256": "01395fa34c4a02b044fd21620926e57c30cddb134b86cbe1b7479c20fdce685a",
+      "certificate_json_sha256": "f727239f39e4f08bc7bd650d2dd702c933c06059ca731fe407a1c72d624000ef",
+      "certificate_field_sha256": "edb19dfe55efed4564cb24b4d67a87a44f26d347e203de0ea82b761190d688bc",
+      "expected_status": "TARGET_TRUE_UNDER_ATTESTED_LINEAGE",
+      "expected_ablation_classification": {
+        "identity_record:b-1": "UNTESTED",
+        "identity_record:b-2": "UNTESTED",
+        "lineage_record": "UNTESTED",
+        "alias_index_complete": "NECESSARY_IN_THIS_BUNDLE",
+        "work_coverage:b-1": "NECESSARY_IN_THIS_BUNDLE",
+        "work_coverage:b-2": "NECESSARY_IN_THIS_BUNDLE",
+        "edge:0": "NECESSARY_IN_THIS_BUNDLE",
+        "edge:1": "NECESSARY_IN_THIS_BUNDLE",
+        "unused_node:unused-primary-root": "REDUNDANT_IN_THIS_BUNDLE"
+      }
+    }
+  ],
+  "trust_boundary": "Synthetic public keys and signatures are replay data; this lock does not independently authenticate real issuers, physical samples, datasets, or publication history. Expected hashes must be pinned outside the candidate input."
+}
