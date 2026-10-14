@@ -45,6 +45,7 @@ from .repositories.invalidation import (
     PostgresInvalidationRepositoryMixin,
     SQLiteInvalidationRepositoryMixin,
 )
+from .repositories.ledger_snapshot import collect_bounded_ledger_rows, read_run_ledger_rows
 from .repositories.math_release import (
     PostgresMathReleaseRepositoryMixin,
     SQLiteMathReleaseRepositoryMixin,
@@ -358,6 +359,10 @@ class Repository(
     ) -> None: ...
 
     def get_run(self, tenant_id: str, run_id: str) -> dict | None: ...
+
+    def read_run_ledger_snapshot(
+        self, tenant_id: str, run_id: str
+    ) -> dict[str, Any] | None: ...
 
     def get_run_by_request_id(
         self, tenant_id: str, request_id: str
@@ -1619,6 +1624,22 @@ class SQLiteRepository(
         value["artifacts"] = self.list_artifacts(tenant_id, 200, run_id)
         value["citations"] = self.list_citations(tenant_id, 500, run_id=run_id)
         return value
+
+    def read_run_ledger_snapshot(
+        self, tenant_id: str, run_id: str
+    ) -> dict[str, Any] | None:
+        """Read native Run facts from one SQLite snapshot, without authority inference."""
+
+        with self._connect() as db:
+            db.execute("BEGIN")
+            budget = {"rows": 0, "bytes": 0}
+
+            def rows(statement: str, values: dict[str, Any]) -> list[dict[str, Any]]:
+                return collect_bounded_ledger_rows(
+                    db.execute(statement, values), budget
+                )
+
+            return read_run_ledger_rows(rows, tenant_id, run_id)
 
     def get_run_by_request_id(
         self, tenant_id: str, request_id: str
@@ -3266,6 +3287,31 @@ class PostgresRepository(
         value["artifacts"] = self.list_artifacts(tenant_id, 200, run_id)
         value["citations"] = self.list_citations(tenant_id, 500, run_id=run_id)
         return value
+
+    def read_run_ledger_snapshot(
+        self, tenant_id: str, run_id: str
+    ) -> dict[str, Any] | None:
+        """Read native Run facts under a read-only PostgreSQL MVCC snapshot."""
+
+        from sqlalchemy import text
+
+        with self.engine.connect().execution_options(
+            isolation_level="REPEATABLE READ"
+        ) as connection:
+            with connection.begin():
+                connection.execute(text("SET TRANSACTION READ ONLY"))
+                budget = {"rows": 0, "bytes": 0}
+
+                def rows(statement: str, values: dict[str, Any]) -> list[dict[str, Any]]:
+                    result = connection.execution_options(
+                        stream_results=True, max_row_buffer=128,
+                    ).execute(text(statement), values)
+                    try:
+                        return collect_bounded_ledger_rows(result.mappings(), budget)
+                    finally:
+                        result.close()
+
+                return read_run_ledger_rows(rows, tenant_id, run_id)
 
     def get_run_by_request_id(
         self, tenant_id: str, request_id: str

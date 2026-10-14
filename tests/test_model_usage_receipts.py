@@ -11,6 +11,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import app.repositories.ledger_snapshot as ledger_snapshot_module
 from app import main, providers
 from app.core.contracts import ChatCommand, RequestContext
 from app.core.errors import AgentCancelledError, UpstreamResponseError
@@ -356,6 +357,21 @@ def test_http_api_key_identity_and_run_scoped_read_projection(tmp_path, monkeypa
         assert client.get("/api/runs", headers=headers).status_code == 200
         assert client.get(f"/api/runs/{other_run['id']}/model-usage", headers=headers).status_code == 404
         assert client.get(f"/api/runs/{own_run['id']}/model-usage", headers=headers).json() == []
+        assert client.get(
+            f"/api/runs/{other_run['id']}/ledger-projection", headers=headers
+        ).status_code == 404
+        projected = client.get(
+            f"/api/runs/{own_run['id']}/ledger-projection", headers=headers
+        )
+        assert projected.status_code == 200
+        assert projected.json()["run_id"] == own_run["id"]
+        assert projected.json()["signals"]["verified_evidence"] == []
+        monkeypatch.setattr(ledger_snapshot_module, "MAX_LEDGER_SNAPSHOT_BYTES", 32)
+        too_large = client.get(
+            f"/api/runs/{own_run['id']}/ledger-projection", headers=headers
+        )
+        assert too_large.status_code == 413
+        assert too_large.json()["error"]["code"] == "ledger_projection_too_large"
     assert observed[0].principal_id is None
     assert observed[0].api_key_id.startswith("api-key:v1:")
     assert "test-api-key" not in observed[0].api_key_id

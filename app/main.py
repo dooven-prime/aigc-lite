@@ -64,6 +64,7 @@ from .core.errors import (
     InvalidScheduleError,
     InvalidVerificationResultError,
     KernelVerifierNotConfiguredError,
+    LedgerProjectionTooLargeError,
     LLMError,
     ProviderNotConfiguredError,
     ResourceConflictError,
@@ -112,6 +113,7 @@ from .services.gateway import GatewayService
 from .services.http_poll import HTTPPollService
 from .services.invalidation import InvalidationService
 from .services.kernel_verification import KernelVerificationService
+from .services.ledger_projection import LedgerProjectionService
 from .services.math_release_imports import MathReleaseImportService
 from .services.mcp_probe import MCPProbeService
 from .services.memory import MemoryService
@@ -168,6 +170,7 @@ gateway_service = GatewayService(
     chat_capability_policy=chat_capability_policy,
 )
 memory_service = MemoryService()
+ledger_projection_service = LedgerProjectionService()
 mcp_probe_service = MCPProbeService()
 http_poll_service = HTTPPollService()
 credential_service = CredentialService()
@@ -413,6 +416,8 @@ async def validation_error_handler(
 async def application_error_handler(_request: Request, exc: ApplicationError) -> JSONResponse:
     if isinstance(exc, ResourceNotFoundError):
         status_code = 404
+    elif isinstance(exc, LedgerProjectionTooLargeError):
+        status_code = 413
     elif isinstance(
         exc, (ResourceConflictError, RunNotActiveError, ScheduleNotActiveError)
     ):
@@ -752,6 +757,18 @@ async def run_model_usage(
     # host-owned accounting receipts; a receipt ID is never a cross-tenant key.
     memory_service.get_run(request_context(http_request, tenant), run_id)
     return get_repository().list_model_usage(tenant.id, run_id)
+
+
+@app.get("/api/runs/{run_id}/ledger-projection")
+async def run_ledger_projection(
+    run_id: str,
+    http_request: Request,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    """Return host-recorded execution facts without certifying goal evidence."""
+    return ledger_projection_service.export_run(
+        request_context(http_request, tenant), run_id
+    )
 
 
 @app.get("/api/artifacts")

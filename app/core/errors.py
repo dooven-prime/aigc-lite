@@ -14,6 +14,7 @@ from typing import Any
 class ErrorCode(StrEnum):
     RESOURCE_NOT_FOUND = "resource_not_found"
     RESOURCE_CONFLICT = "resource_conflict"
+    LEDGER_PROJECTION_TOO_LARGE = "ledger_projection_too_large"
     PROVIDER_NOT_CONFIGURED = "provider_not_configured"
     UPSTREAM_REQUEST_FAILED = "upstream_request_failed"
     UPSTREAM_INVALID_RESPONSE = "upstream_invalid_response"
@@ -109,6 +110,15 @@ class ResourceConflictError(ApplicationError):
             f"{resource.replace('_', ' ').title()} already exists",
             metadata={"resource": resource, "field": field},
         )
+
+
+class LedgerProjectionTooLargeError(ApplicationError):
+    """A read-only Run snapshot exceeds the export resource contract."""
+
+    code = ErrorCode.LEDGER_PROJECTION_TOO_LARGE
+
+    def __init__(self) -> None:
+        super().__init__("Run ledger projection exceeds bounded export limits")
 
 
 class LLMError(ApplicationError):
