@@ -14,7 +14,13 @@ from importlib import metadata
 from importlib.resources import files
 from pathlib import Path
 
-from aigc_lite_casepacks.mde_v0 import bio, citation
+from aigc_lite_casepacks.mde_v0 import (
+    bio,
+    bio_certificate,
+    certificate_common,
+    citation,
+    citation_certificate,
+)
 
 import app
 
@@ -32,8 +38,25 @@ def main() -> None:
         re.fullmatch(r"aigc-lite\s*==\s*0\.7\.0", requirement, re.IGNORECASE)
         for requirement in requires
     ), requires
-    for module in (app, bio, citation):
+    for module in (app, bio, citation, bio_certificate, citation_certificate, certificate_common):
         _installed_path(module)
+    assert not metadata.distribution("aigc-lite-mde-casepack").entry_points
+
+    identity = certificate_common.finalize_certificate(
+        {
+            "certificate_version": certificate_common.CERTIFICATE_VERSION,
+            "certificate_kind": "bio.parent-source-refutation.v0",
+            "case_id": "installed-wheel-identity-smoke",
+            "candidate_only": True,
+            "qualification_granted": False,
+            "current_use_bound": False,
+            "authorization_granted": False,
+        }
+    )
+    assert certificate_common.verify_certificate_hash(identity)
+    assert identity == certificate_common.finalize_certificate(
+        {key: value for key, value in identity.items() if key != "certificate_sha256"}
+    )
 
     contract = files("aigc_lite_casepacks.mde_v0").joinpath(
         "bio_lineage_contract_v0.json"
@@ -41,6 +64,12 @@ def main() -> None:
     assert hashlib.sha256(contract).hexdigest() == bio.CHECKER_DEPENDENCY_SHA256[
         "bio_mde_contract"
     ]
+    certificate_contract = files("aigc_lite_casepacks.mde_v0").joinpath(
+        "certificate_contract_v0.json"
+    ).read_bytes()
+    assert hashlib.sha256(certificate_contract).hexdigest() == (
+        certificate_common.CERTIFICATE_CONTRACT_SHA256
+    )
 
     bio_report = bio.diagnose_bio_mde(b"{}", b"{}", [], [], [])
     assert bio_report["status"] == "UNRESOLVED"

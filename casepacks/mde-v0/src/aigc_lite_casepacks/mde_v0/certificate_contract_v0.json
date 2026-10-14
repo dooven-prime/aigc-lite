@@ -1,0 +1,40 @@
+{
+  "certificate_version": "mde.disambiguation-certificate.v0",
+  "authority_effect": "candidate_diagnostic_only",
+  "required_authority_flags": {
+    "candidate_only": true,
+    "qualification_granted": false,
+    "current_use_bound": false,
+    "authorization_granted": false
+  },
+  "mathematical_condition": {
+    "compatible_worlds": "W[o,d] = {w in W : O(w) = o and D(w) = d}",
+    "required": [
+      "W[o,d] is nonempty under the frozen finite domain model",
+      "{T(w) : w in W[o,d]} has exactly one value under that model"
+    ],
+    "not_claimed": "enumeration or authentication of all real-world histories"
+  },
+  "ablation_classifications": {
+    "NECESSARY_IN_THIS_BUNDLE": "A lawful reduction under unchanged observation, target and trust becomes UNRESOLVED.",
+    "REDUNDANT_IN_THIS_BUNDLE": "A lawful reduction preserves the same scoped target truth.",
+    "UNTESTED": "A comparable lawful reduction was not supplied or run.",
+    "INVALID_ABLATION": "The reduction changes frozen scope or trust, is unauthenticated, conflicts, or is not the declared unit deletion."
+  },
+  "domain_cases": [
+    "bio.parent-source-refutation.v0",
+    "citation.positive-conditional-disambiguation.v0"
+  ],
+  "hash": {
+    "encoding": "UTF-8 JSON with sorted keys, compact separators, ensure_ascii=false, allow_nan=false",
+    "excludes": "certificate_sha256",
+    "domain_separator": "aigc-lite.mde.disambiguation-certificate.v0\n",
+    "algorithm": "SHA-256"
+  },
+  "non_claims": [
+    "A content hash is not a signature or an independent source authentication.",
+    "An enrolled-key signature authenticates an assertion, not physical or publication history.",
+    "One-step information irreducibility is not global evidence minimality.",
+    "No QualificationReceipt, CurrentUseBinding, or AuthorizationGrant is issued."
+  ]
+}

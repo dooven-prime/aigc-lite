@@ -10,8 +10,12 @@ _CASEPACK_PREFIX = "aigc_lite_casepacks/"
 _REQUIRED_CASEPACK_MEMBERS = {
     "aigc_lite_casepacks/mde_v0/__init__.py",
     "aigc_lite_casepacks/mde_v0/bio.py",
+    "aigc_lite_casepacks/mde_v0/bio_certificate.py",
+    "aigc_lite_casepacks/mde_v0/certificate_common.py",
     "aigc_lite_casepacks/mde_v0/citation.py",
+    "aigc_lite_casepacks/mde_v0/citation_certificate.py",
     "aigc_lite_casepacks/mde_v0/bio_lineage_contract_v0.json",
+    "aigc_lite_casepacks/mde_v0/certificate_contract_v0.json",
 }
 
 

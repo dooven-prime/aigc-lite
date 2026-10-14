@@ -42,6 +42,13 @@ HTTP/MCP route or persistence and cannot create a QualificationReceipt,
 CurrentUseBinding, or AuthorizationGrant. See the [MDE contract](../../docs/MINIMAL_DISAMBIGUATING_EVIDENCE.md)
 for the narrow claims and limitations.
 
+The optional `bio_certificate` and `citation_certificate` modules produce
+candidate-only conditional disambiguation certificates for one Bio refutation
+and one Citation positive result. They rerun those diagnostics from supplied
+evidence and record lawful one-step information ablations; they do not sign,
+register, or issue authority. The versioned JSON and replay limitations are
+specified in the [certificate contract](../../docs/DISAMBIGUATION_CERTIFICATE_V0.md).
+
 The package version identifies this distribution, not a frozen execution
 environment. Reports include the checker source and direct-dependency hashes;
 the separately supplied trust-root snapshot and dependency environment must

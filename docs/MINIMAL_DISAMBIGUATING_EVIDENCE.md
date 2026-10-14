@@ -35,6 +35,9 @@ The domain contracts and their executable examples are documented separately:
 is part of the application Qualification Gate. Both live in the separately
 installable [`MDE v0 casepack`](../casepacks/mde-v0/README.md), not the core
 wheel; installation alone does not register a capability or authority path.
+The optional [candidate disambiguation certificate](DISAMBIGUATION_CERTIFICATE_V0.md)
+combines a recomputed conditional decision, lawful one-step ablations, and
+explicit unauthenticated assumptions without changing that boundary.
 
 There is an asymmetry in the required coverage. One authenticated common
 parent or common primary root can refute the respective *narrow* distinctness

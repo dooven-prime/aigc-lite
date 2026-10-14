@@ -17,4 +17,7 @@ include = ["aigc_lite_casepacks*"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"aigc_lite_casepacks.mde_v0" = ["bio_lineage_contract_v0.json"]
+"aigc_lite_casepacks.mde_v0" = [
+    "bio_lineage_contract_v0.json",
+    "certificate_contract_v0.json",
+]
