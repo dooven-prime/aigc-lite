@@ -14,8 +14,13 @@ from ..core.enforcement import (
     EnforcementOutcome,
     ExternalToolExecutionBinding,
     enforcement_payload_hash,
+    tool_spec_value,
 )
-from ..core.errors import EnforcementDispatchIndeterminateError, ErrorCode
+from ..core.errors import (
+    EnforcementDispatchIndeterminateError,
+    ErrorCode,
+    InvalidExecutionPolicyError,
+)
 from ..database import get_repository
 from ..repository import Repository
 from .enforcer import ExternalEnforcerService
@@ -89,6 +94,45 @@ class ExternalToolExecutionRouter:
     def list_bindings(self, workspace_id: str) -> list[dict[str, Any]]:
         return self._registry.list_public(workspace_id)
 
+    def prepare_if_bound(
+        self, context: RequestContext, run_id: str | None, spec: ToolSpec
+    ) -> tuple[dict[str, Any], ToolProviderResult | None] | None:
+        """Resolve the host binding and reject blocked calls before grant use."""
+
+        binding = self._registry.resolve(context, spec)
+        if binding is None:
+            return None
+        public = binding.as_dict()
+        metadata = {"external_enforcement": {
+            "binding_id": binding.binding_id,
+            "binding_hash": public["binding_hash"],
+            "adapter_id": binding.adapter_id,
+            "proposal_id": binding.proposal_id,
+            "policy_hash": binding.policy_hash,
+        }}
+        proposal = self._repository_provider().get_policy_proposal(
+            context.workspace_id, binding.proposal_id
+        )
+        details = {
+            **public,
+            "adapter_target_type": proposal["target_type"] if proposal else "",
+            "adapter_target_id": proposal["target_id"] if proposal else "",
+        }
+        if not run_id or proposal is None or proposal.get("candidate_policy_hash") != binding.policy_hash:
+            return details, self._failure(ErrorCode.EXTERNAL_ENFORCEMENT_REQUIRED, metadata)
+        unresolved = self._enforcer_service.unresolved_dispatches(
+            context, adapter_id=binding.adapter_id
+        )
+        if unresolved:
+            blocked = unresolved[0]
+            metadata["external_enforcement"].update(
+                {"dispatch_id": blocked["id"], "state": blocked["state"]}
+            )
+            return details, self._failure(
+                ErrorCode.ENFORCEMENT_DISPATCH_INDETERMINATE, metadata
+            )
+        return details, None
+
     async def execute_if_bound(
         self,
         context: RequestContext,
@@ -97,9 +141,14 @@ class ExternalToolExecutionRouter:
         arguments: dict,
         authorization: dict | None = None,
     ) -> ToolProviderResult | None:
-        binding = self._registry.resolve(context, spec)
-        if binding is None:
+        prepared = self.prepare_if_bound(context, run_id, spec)
+        if prepared is None:
             return None
+        details, failure = prepared
+        if failure is not None:
+            return failure
+        binding = self._registry.resolve(context, spec)
+        assert binding is not None
         base_metadata = {
             "external_enforcement": {
                 "binding_id": binding.binding_id,
@@ -109,43 +158,19 @@ class ExternalToolExecutionRouter:
                 "policy_hash": binding.policy_hash,
             }
         }
-        if not run_id:
-            return self._failure(
-                ErrorCode.EXTERNAL_ENFORCEMENT_REQUIRED,
-                base_metadata,
-            )
-        proposal = self._repository_provider().get_policy_proposal(
-            context.workspace_id, binding.proposal_id
-        )
-        if (
-            proposal is None
-            or proposal.get("candidate_policy_hash") != binding.policy_hash
-        ):
-            return self._failure(
-                ErrorCode.EXTERNAL_ENFORCEMENT_REQUIRED,
-                base_metadata,
-            )
-        unresolved = self._enforcer_service.unresolved_dispatches(
-            context,
-            adapter_id=binding.adapter_id,
-        )
-        if unresolved:
-            metadata = {
-                **base_metadata,
-                "external_enforcement": {
-                    **base_metadata["external_enforcement"],
-                    "dispatch_id": unresolved[0]["id"],
-                    "state": unresolved[0]["state"],
-                },
-            }
-            return self._failure(
-                ErrorCode.ENFORCEMENT_DISPATCH_INDETERMINATE,
-                metadata,
-            )
-
-        spec_value = _tool_spec_value(spec)
+        spec_value = tool_spec_value(spec)
         arguments_digest = enforcement_payload_hash(arguments)
         authorization_value = authorization or {}
+        if not authorization_value.get("authorization_invocation_id"):
+            return self._failure(ErrorCode.TOOL_AUTHORIZATION_REQUIRED, base_metadata)
+        grant_binding = {
+            "action": authorization_value.get("action"),
+            "target": authorization_value.get("target"),
+            "grant_id": authorization_value.get("grant_id"),
+            "grant_call_number": authorization_value.get("calls_used"),
+            "authorization_invocation_id": authorization_value["authorization_invocation_id"],
+            "invocation_digest": authorization_value.get("invocation_digest"),
+        }
         envelope = {
             "operation": "tool.execute.v1",
             "principal_id": context.principal_id,
@@ -157,7 +182,7 @@ class ExternalToolExecutionRouter:
                 "source": spec.source.value,
             },
             "arguments": arguments,
-            "grant_binding": authorization_value,
+            "grant_binding": grant_binding,
         }
         try:
             receipt = await self._enforcer_service.dispatch(
@@ -168,9 +193,14 @@ class ExternalToolExecutionRouter:
                 step_id=None,
                 execution_envelope=envelope,
                 tool_spec_hash=enforcement_payload_hash(spec_value),
+                tool_timeout_seconds=spec.timeout_seconds,
                 arguments_digest=arguments_digest,
                 expires_in_seconds=min(spec.timeout_seconds, 300.0),
                 binding_id=binding.binding_id,
+                binding_hash=details["binding_hash"],
+                authorization_invocation_id=authorization_value[
+                    "authorization_invocation_id"
+                ],
             )
         except EnforcementDispatchIndeterminateError as exc:
             metadata = {
@@ -185,6 +215,8 @@ class ExternalToolExecutionRouter:
                 ErrorCode.ENFORCEMENT_DISPATCH_INDETERMINATE,
                 metadata,
             )
+        except InvalidExecutionPolicyError:
+            return self._failure(ErrorCode.TOOL_AUTHORIZATION_REQUIRED, base_metadata)
 
         enforcement_metadata = {
             **base_metadata["external_enforcement"],
@@ -229,26 +261,3 @@ class ExternalToolExecutionRouter:
             failed=True,
             metadata={**metadata, "error_code": error_code.value},
         )
-
-
-def _tool_spec_value(spec: ToolSpec) -> dict[str, Any]:
-    return {
-        "name": spec.name,
-        "native_name": spec.native_name,
-        "description": spec.description,
-        "input_schema": spec.input_schema,
-        "source": spec.source.value,
-        "provider_id": spec.provider_id,
-        "workspace_id": spec.workspace_id,
-        "risk": spec.risk.value,
-        "required_scopes": sorted(spec.required_scopes),
-        "timeout_seconds": spec.timeout_seconds,
-        "execution_mode": spec.execution_mode.value if spec.execution_mode else None,
-        "hints": {
-            "readOnlyHint": spec.hints.read_only,
-            "destructiveHint": spec.hints.destructive,
-            "idempotentHint": spec.hints.idempotent,
-            "openWorldHint": spec.hints.open_world,
-        },
-        "extensions": spec.extensions,
-    }

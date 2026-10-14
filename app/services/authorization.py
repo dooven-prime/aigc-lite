@@ -5,8 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
+from ..core.authorization import grant_allows, invocation_view
 from ..core.contracts import RequestContext, ToolSpec
+from ..core.enforcement import (
+    authorization_invocation_digest,
+    authorization_invocation_facts,
+    enforcement_payload_hash,
+    tool_spec_value,
+)
 from ..database import get_repository
 from ..repository import Repository, utc_now
 from .qualification import QualificationService
@@ -81,11 +89,18 @@ class ToolAuthorizationGate:
         context: RequestContext,
         spec: ToolSpec,
         arguments: dict[str, Any] | None = None,
+        *,
+        run_id: str | None = None,
+        dispatch_binding: dict[str, str] | None = None,
+        tool_spec_hash: str | None = None,
+        dispatch_spec: ToolSpec | None = None,
     ) -> dict[str, Any] | None:
         requirement = tool_authorization_requirement(spec)
         if requirement is None:
             return {}
         if not context.principal_id:
+            return None
+        if dispatch_binding is not None and (not run_id or not tool_spec_hash):
             return None
         repository = self._repository_provider()
         invocation = _authorization_invocation(context, spec, arguments or {})
@@ -102,8 +117,43 @@ class ToolAuthorizationGate:
             self._qualification.refresh_receipt_binding(
                 context, grant["qualification_receipt_id"]
             )
-            if not _grant_allows(grant, invocation):
+            if not grant_allows(
+                grant,
+                {"scope": invocation.scope, "conditions": invocation.conditions,
+                 "budget": invocation.budget},
+            ):
                 continue
+            invocation_values = None
+            if dispatch_binding is not None:
+                facts = authorization_invocation_facts(
+                    workspace_id=context.workspace_id,
+                    actor_id=context.principal_id,
+                    request_id=context.request_id,
+                    run_id=run_id,
+                    action=requirement.action,
+                    target=requirement.target,
+                    provider_id=spec.provider_id,
+                    native_name=spec.native_name,
+                    public_name=spec.name,
+                    source=spec.source.value,
+                    binding_id=dispatch_binding["binding_id"],
+                    binding_hash=dispatch_binding["binding_hash"],
+                    adapter_id=dispatch_binding["adapter_id"],
+                    proposal_id=dispatch_binding["proposal_id"],
+                    policy_hash=dispatch_binding["policy_hash"],
+                    adapter_target_type=dispatch_binding["adapter_target_type"],
+                    adapter_target_id=dispatch_binding["adapter_target_id"],
+                    tool_spec_hash=tool_spec_hash,
+                    tool_timeout_seconds=(dispatch_spec or spec).timeout_seconds,
+                    arguments_digest=enforcement_payload_hash(arguments or {}),
+                )
+                invocation_values = {
+                    "id": str(uuid4()),
+                    **facts,
+                    "invocation_digest": authorization_invocation_digest(facts),
+                    "spec_snapshot": tool_spec_value(dispatch_spec or spec),
+                    "arguments": arguments or {},
+                }
             consumed = repository.consume_authorization_grant(
                 context.workspace_id,
                 context.principal_id,
@@ -111,8 +161,15 @@ class ToolAuthorizationGate:
                 requirement.target,
                 utc_now(),
                 grant_id=grant["id"],
+                invocation=invocation_values,
             )
             if consumed is not None:
+                if invocation_values is not None:
+                    consumed = {
+                        **consumed,
+                        "authorization_invocation_id": invocation_values["id"],
+                        "invocation_digest": invocation_values["invocation_digest"],
+                    }
                 return consumed
         return None
 
@@ -123,110 +180,9 @@ def _authorization_invocation(
     arguments: dict[str, Any],
 ) -> ToolAuthorizationInvocation:
     """Build a closed, non-model-writable view of the concrete invocation."""
-
-    effective_arguments = dict(arguments)
-    properties = spec.input_schema.get("properties", {})
-    if isinstance(properties, dict):
-        for name, schema in properties.items():
-            if (
-                name not in effective_arguments
-                and isinstance(schema, dict)
-                and "default" in schema
-            ):
-                effective_arguments[name] = schema["default"]
-    extensions = spec.extensions if isinstance(spec.extensions, dict) else {}
-    capability = extensions.get("capability")
-    capability = capability if isinstance(capability, dict) else {}
-    numeric_budget = {
-        key: value
-        for key, value in effective_arguments.items()
-        if key.endswith("timeout_seconds")
-        and isinstance(value, (int, float))
-        and not isinstance(value, bool)
-    }
+    view = invocation_view(context.workspace_id, tool_spec_value(spec), arguments)
     return ToolAuthorizationInvocation(
-        scope={
-            "workspace_id": context.workspace_id,
-            "provider_id": spec.provider_id,
-            "tool_name": spec.native_name,
-            "public_tool_name": spec.name,
-            "required_scopes": sorted(spec.required_scopes),
-            "risk": spec.risk.value,
-        },
-        conditions={
-            "arguments": effective_arguments,
-            "capability": capability,
-        },
-        budget={
-            "tool_timeout_seconds": spec.timeout_seconds,
-            "arguments": numeric_budget,
-        },
+        scope=view["scope"],
+        conditions=view["conditions"],
+        budget=view["budget"],
     )
-
-
-def _grant_allows(
-    grant: dict[str, Any], invocation: ToolAuthorizationInvocation
-) -> bool:
-    return (
-        _constraint_matches(grant.get("scope") or {}, invocation.scope)
-        and _constraint_matches(
-            grant.get("conditions") or {}, invocation.conditions
-        )
-        and _budget_within(grant.get("budget") or {}, invocation.budget)
-    )
-
-
-def _constraint_matches(expected: Any, actual: Any) -> bool:
-    """Match a small deterministic subset/range constraint language."""
-
-    if isinstance(expected, dict):
-        operators = {key for key in expected if str(key).startswith("$")}
-        if operators:
-            if operators != set(expected):
-                return False
-            if "$eq" in expected and actual != expected["$eq"]:
-                return False
-            if "$in" in expected:
-                values = expected["$in"]
-                if not isinstance(values, list) or actual not in values:
-                    return False
-            for operator, comparator in (("$lte", lambda a, b: a <= b), ("$gte", lambda a, b: a >= b)):
-                if operator not in expected:
-                    continue
-                limit = expected[operator]
-                if (
-                    isinstance(actual, bool)
-                    or isinstance(limit, bool)
-                    or not isinstance(actual, (int, float))
-                    or not isinstance(limit, (int, float))
-                    or not comparator(actual, limit)
-                ):
-                    return False
-            return operators.issubset({"$eq", "$in", "$lte", "$gte"})
-        if not isinstance(actual, dict):
-            return False
-        return all(
-            key in actual and _constraint_matches(value, actual[key])
-            for key, value in expected.items()
-        )
-    if isinstance(expected, list):
-        return isinstance(actual, list) and all(item in actual for item in expected)
-    return expected == actual
-
-
-def _budget_within(limit: Any, actual: Any) -> bool:
-    if isinstance(limit, dict):
-        if not isinstance(actual, dict):
-            return False
-        return all(
-            key in actual and _budget_within(value, actual[key])
-            for key, value in limit.items()
-        )
-    if (
-        isinstance(limit, (int, float))
-        and not isinstance(limit, bool)
-        and isinstance(actual, (int, float))
-        and not isinstance(actual, bool)
-    ):
-        return actual <= limit
-    return limit == actual

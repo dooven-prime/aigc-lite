@@ -35,6 +35,8 @@ from ..core.enforcement import (
     ReceiptSignatureVerification,
     SignedEnforcementReceiptEnvelope,
     VerifiedEnforcementReceipt,
+    authorization_invocation_digest,
+    authorization_invocation_facts,
     canonical_enforcement_json,
     enforcement_payload_hash,
 )
@@ -712,11 +714,73 @@ class ExternalEnforcerService:
         step_id: str | None,
         execution_envelope: dict[str, Any],
         tool_spec_hash: str,
+        tool_timeout_seconds: float | None = None,
         arguments_digest: str,
         expires_in_seconds: float = 30.0,
         binding_id: str | None = None,
+        binding_hash: str | None = None,
+        authorization_invocation_id: str | None = None,
         original_dispatch_id: str | None = None,
+        authority: AuthorityContext | None = None,
+        expected_original_dispatch: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        tool_operation = execution_envelope.get("operation") == "tool.execute.v1"
+        if tool_operation != (binding_id is not None) or tool_operation != (
+            authorization_invocation_id is not None
+        ):
+            raise InvalidExecutionPolicyError(
+                "authorization_invocation_id",
+                "Tool execution requires a bound, consumed grant invocation",
+            )
+        if binding_id is not None and original_dispatch_id is not None:
+            raise InvalidExecutionPolicyError(
+                "original_dispatch_id", "Tool execution cannot be a reconciliation"
+            )
+        if tool_operation and step_id is not None:
+            raise InvalidExecutionPolicyError(
+                "step_id", "Bound tool invocation is run-scoped"
+            )
+        if tool_operation and (
+            isinstance(tool_timeout_seconds, bool)
+            or not isinstance(tool_timeout_seconds, (int, float))
+            or not isfinite(float(tool_timeout_seconds))
+            or float(tool_timeout_seconds) < float(expires_in_seconds)
+        ):
+            raise InvalidExecutionPolicyError(
+                "expires_in_seconds", "Dispatch timeout exceeds frozen tool timeout"
+            )
+        if original_dispatch_id is not None and execution_envelope.get("operation") != "enforcement.reconcile.v1":
+            raise InvalidExecutionPolicyError(
+                "execution_envelope", "Reconciliation requires its exact operation"
+            )
+        if original_dispatch_id is None and execution_envelope.get("operation") == "enforcement.reconcile.v1":
+            raise InvalidExecutionPolicyError(
+                "original_dispatch_id", "Reconciliation requires an original dispatch"
+            )
+        if original_dispatch_id is not None:
+            if (
+                expected_original_dispatch is None
+                or expected_original_dispatch.get("id") != original_dispatch_id
+                or expected_original_dispatch.get("tenant_id") != context.workspace_id
+                or set(execution_envelope) != {
+                    "operation", "original_dispatch_id", "original_request_hash", "workload_id"
+                }
+                or execution_envelope["original_dispatch_id"] != original_dispatch_id
+                or execution_envelope["original_request_hash"] != expected_original_dispatch.get("request_hash")
+                or execution_envelope["workload_id"] != expected_original_dispatch.get("workload_id")
+            ):
+                raise InvalidExecutionPolicyError(
+                    "original_dispatch_id", "Reconciliation does not match original dispatch"
+                )
+        if not tool_operation and original_dispatch_id is None:
+            raise InvalidExecutionPolicyError(
+                "authorization_invocation_id",
+                "Initial dispatch requires a consumed grant invocation",
+            )
+        if original_dispatch_id is not None:
+            require_admin_authority(
+                self._repository_provider(), context, authority, "enforcement:reconcile",
+            )
         if (
             not isinstance(expires_in_seconds, (int, float))
             or isinstance(expires_in_seconds, bool)
@@ -758,6 +822,14 @@ class ExternalEnforcerService:
             raise ResourceNotFoundError("run_step", step_id)
         proposal = self._enforcement_service.get_policy_proposal(context, proposal_id)
         adapter = self._adapter_registry.get(adapter_id)
+        if (
+            adapter.target_type.value == "tool_execution_backend"
+            and not tool_operation
+            and original_dispatch_id is None
+        ):
+            raise InvalidExecutionPolicyError(
+                "execution_envelope", "Tool backend execution requires a consumed grant"
+            )
         if adapter.issuer_id not in {
             item["issuer_id"] for item in self._enforcement_service.list_issuers()
         }:
@@ -769,6 +841,75 @@ class ExternalEnforcerService:
             raise InvalidExecutionPolicyError(
                 "adapter_id", "Enforcer adapter target does not match the frozen proposal"
             )
+
+        invocation_claim = None
+        if tool_operation:
+            tool = execution_envelope.get("tool")
+            grant_binding = execution_envelope.get("grant_binding")
+            if (
+                set(execution_envelope) != {
+                    "operation", "principal_id", "request_id", "tool", "arguments", "grant_binding"
+                }
+                or not isinstance(tool, dict)
+                or set(tool) != {"public_name", "native_name", "provider_id", "source"}
+                or not isinstance(execution_envelope.get("arguments"), dict)
+                or not isinstance(grant_binding, dict)
+                or set(grant_binding) != {
+                    "action", "target", "grant_id", "grant_call_number",
+                    "authorization_invocation_id", "invocation_digest"
+                }
+                or execution_envelope["principal_id"] != context.principal_id
+                or execution_envelope["request_id"] != context.request_id
+                or grant_binding["authorization_invocation_id"] != authorization_invocation_id
+                or not isinstance(grant_binding["grant_call_number"], int)
+                or isinstance(grant_binding["grant_call_number"], bool)
+                or grant_binding["grant_call_number"] < 1
+                or not binding_hash
+            ):
+                raise InvalidExecutionPolicyError(
+                    "execution_envelope", "Tool invocation does not match the host handoff"
+                )
+            computed_arguments_digest = enforcement_payload_hash(
+                execution_envelope["arguments"]
+            )
+            if arguments_digest != computed_arguments_digest:
+                raise InvalidExecutionPolicyError(
+                    "arguments_digest", "Tool arguments digest does not match envelope"
+                )
+            facts = authorization_invocation_facts(
+                workspace_id=context.workspace_id,
+                actor_id=context.principal_id,
+                request_id=context.request_id,
+                run_id=run_id,
+                action=grant_binding["action"],
+                target=grant_binding["target"],
+                provider_id=tool["provider_id"],
+                native_name=tool["native_name"],
+                public_name=tool["public_name"],
+                source=tool["source"],
+                binding_id=binding_id,
+                binding_hash=binding_hash,
+                adapter_id=adapter_id,
+                proposal_id=proposal_id,
+                policy_hash=proposal["candidate_policy_hash"],
+                adapter_target_type=adapter.target_type.value,
+                adapter_target_id=adapter.target_id,
+                tool_spec_hash=tool_spec_hash,
+                tool_timeout_seconds=float(tool_timeout_seconds),
+                arguments_digest=computed_arguments_digest,
+            )
+            digest = authorization_invocation_digest(facts)
+            if grant_binding["invocation_digest"] != digest:
+                raise InvalidExecutionPolicyError(
+                    "invocation_digest", "Tool invocation digest does not match envelope"
+                )
+            invocation_claim = {
+                "id": authorization_invocation_id,
+                "grant_id": grant_binding["grant_id"],
+                "grant_call_number": grant_binding["grant_call_number"],
+                **facts,
+                "invocation_digest": digest,
+            }
 
         now = self._now_provider().astimezone(UTC)
         expires_at = now + timedelta(seconds=float(expires_in_seconds))
@@ -812,11 +953,18 @@ class ExternalEnforcerService:
             "requested_at": request.requested_at,
             "expires_at": request.expires_at,
             "state": EnforcementDispatchState.DISPATCHING.value,
+            "expected_original_dispatch": expected_original_dispatch,
         }
         try:
             repository.create_enforcement_dispatch(
-                context.workspace_id, dispatch_values
+                context.workspace_id,
+                dispatch_values,
+                context=context,
+                authority=authority,
+                authorization_invocation=invocation_claim,
             )
+        except InvalidExecutionPolicyError:
+            raise
         except Exception as exc:
             unresolved = self.unresolved_dispatches(
                 context,
@@ -969,6 +1117,8 @@ class ExternalEnforcerService:
             # a second execution slot for the bound tool.
             binding_id=None,
             original_dispatch_id=root["id"],
+            authority=authority,
+            expected_original_dispatch=root,
         )
 
     def _mark_indeterminate(

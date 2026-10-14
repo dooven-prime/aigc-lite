@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
+from ..core.authority import AuthorityContext
+from ..core.contracts import RequestContext
+from ..core.errors import AuthorityDeniedError, InvalidExecutionPolicyError
 from .common import decode_list as _decode_list
 from .common import decode_metadata as _decode_metadata
 from .common import utc_now
@@ -42,6 +46,161 @@ def _decode_enforcement_receipt(row: Any) -> dict[str, Any]:
 
 def _decode_enforcement_dispatch(row: Any) -> dict[str, Any]:
     return dict(row)
+
+
+_INVOCATION_MATCH_FIELDS = (
+    "grant_id", "grant_call_number", "actor_id", "request_id", "run_id",
+    "action", "target", "provider_id", "native_name", "public_name", "source",
+    "binding_id", "binding_hash", "adapter_id", "proposal_id", "policy_hash",
+    "adapter_target_type", "adapter_target_id", "tool_spec_hash",
+    "tool_timeout_seconds",
+    "arguments_digest", "invocation_digest",
+)
+
+
+def _checked_invocation_claim(
+    invocation: dict[str, Any], tenant_id: str, dispatch_id: str, claimed_at: str
+) -> dict[str, Any]:
+    return {
+        "invocation_id": invocation["id"],
+        "tenant_id": tenant_id,
+        "dispatch_id": dispatch_id,
+        "claimed_at": claimed_at,
+        **{field: invocation[field] for field in _INVOCATION_MATCH_FIELDS},
+    }
+
+
+def _assert_reconciliation_root(
+    row: dict[str, Any], original: Any, expected: dict[str, Any] | None
+) -> None:
+    if expected is None or original["original_dispatch_id"] is not None:
+        raise InvalidExecutionPolicyError(
+            "original_dispatch_id", "Reconciliation requires the exact root dispatch"
+        )
+    if any(
+        original[field] != expected.get(field)
+        for field in (
+            "id", "tenant_id", "request_hash", "updated_at", "state",
+            "receipt_id", "workload_id",
+        )
+    ) or any(
+        original[field] != row[field]
+        for field in (
+            "adapter_id", "issuer_id", "target_type", "target_id", "run_id",
+            "step_id", "proposal_id", "tool_spec_hash", "arguments_digest",
+        )
+    ):
+        raise InvalidExecutionPolicyError(
+            "original_dispatch_id", "Reconciliation root changed or does not match"
+        )
+    if original["state"] not in {"dispatching", "indeterminate"}:
+        raise InvalidExecutionPolicyError(
+            "original_dispatch_id", "Reconciliation root is already terminal"
+        )
+    if original["state"] == "dispatching":
+        expiry = datetime.fromisoformat(original["expires_at"].replace("Z", "+00:00"))
+        if datetime.now(UTC) <= expiry.astimezone(UTC):
+            raise InvalidExecutionPolicyError(
+                "original_dispatch_id", "Reconciliation root is still active"
+            )
+
+
+def _dispatch_within_frozen_timeout(
+    row: dict[str, Any], invocation: dict[str, Any]
+) -> bool:
+    try:
+        start = datetime.fromisoformat(row["requested_at"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+        return (
+            start.tzinfo is not None
+            and end.tzinfo is not None
+            and 0 < (end - start).total_seconds()
+            <= float(invocation["tool_timeout_seconds"]) + 0.000001
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _assert_dispatch_finish(
+    dispatch: Any,
+    *,
+    state: str,
+    receipt: Any | None,
+    reconciliation: Any | None,
+    workload_id: str | None,
+    last_error_code: str | None,
+) -> None:
+    current = dispatch["state"]
+    if state == "indeterminate":
+        if current != "dispatching":
+            raise InvalidExecutionPolicyError(
+                "state", "Only an active dispatch can become indeterminate"
+            )
+        if receipt is None:
+            if workload_id is not None:
+                raise InvalidExecutionPolicyError(
+                    "workload_id", "Unverified observation cannot name a workload"
+                )
+            return
+        if receipt["outcome"] not in {"timed_out", "indeterminate"}:
+            raise InvalidExecutionPolicyError(
+                "receipt_id", "Receipt outcome is not indeterminate"
+            )
+    elif state == "terminal":
+        if current != "dispatching" or receipt is None or last_error_code is not None:
+            raise InvalidExecutionPolicyError(
+                "state", "Terminal dispatch requires a verified receipt"
+            )
+        if receipt["outcome"] in {"timed_out", "indeterminate"}:
+            raise InvalidExecutionPolicyError(
+                "receipt_id", "Indeterminate receipt cannot release the slot"
+            )
+    elif state == "reconciled":
+        if (
+            current not in {"dispatching", "indeterminate"}
+            or receipt is None
+            or reconciliation is None
+            or last_error_code is not None
+        ):
+            raise InvalidExecutionPolicyError(
+                "state", "Reconciliation requires a terminal observation"
+            )
+        root_id = dispatch["original_dispatch_id"] or dispatch["id"]
+        if (
+            reconciliation["original_dispatch_id"] != root_id
+            or reconciliation["state"] != "terminal"
+            or reconciliation["receipt_id"] != receipt["id"]
+        ):
+            raise InvalidExecutionPolicyError(
+                "receipt_id", "Receipt is not from a terminal root reconciliation"
+            )
+        if workload_id != receipt["workload_id"]:
+            raise InvalidExecutionPolicyError(
+                "workload_id", "Reconciliation workload does not match receipt"
+            )
+        return
+    else:
+        raise InvalidExecutionPolicyError("state", "Unsupported dispatch transition")
+
+    if receipt is None:
+        return
+    if not bool(receipt["signature_verified"]) or any(
+        receipt[receipt_field] != dispatch[dispatch_field]
+        for receipt_field, dispatch_field in (
+            ("enforcement_request_id", "id"),
+            ("enforcement_request_hash", "request_hash"),
+            ("run_id", "run_id"),
+            ("step_id", "step_id"),
+            ("proposal_id", "proposal_id"),
+            ("issuer_id", "issuer_id"),
+            ("execution_envelope_hash", "execution_envelope_hash"),
+            ("tool_spec_hash", "tool_spec_hash"),
+            ("arguments_digest", "arguments_digest"),
+        )
+    ) or workload_id != receipt["workload_id"]:
+        raise InvalidExecutionPolicyError(
+            "receipt_id", "Verified receipt is not bound to this dispatch"
+        )
 
 
 def _dispatch_row(
@@ -212,10 +371,78 @@ class SQLiteEnforcementRepositoryMixin:
         return [_decode_policy_proposal(row) for row in rows]
 
     def create_enforcement_dispatch(
-        self, tenant_id: str, values: dict[str, Any]
+        self,
+        tenant_id: str,
+        values: dict[str, Any],
+        *,
+        context: RequestContext | None = None,
+        authority: AuthorityContext | None = None,
+        authorization_invocation: dict[str, Any] | None = None,
     ) -> dict:
         row = _dispatch_row(tenant_id, values, utc_now())
+        scope = "enforcement:reconcile"
+        if (
+            row["state"] != "dispatching"
+            or row["receipt_id"] is not None
+            or row["workload_id"] is not None
+            or row["last_error_code"] is not None
+        ):
+            raise InvalidExecutionPolicyError(
+                "state", "New dispatch must begin without a result in dispatching state"
+            )
+        if row["original_dispatch_id"] is None and authorization_invocation is None:
+            raise InvalidExecutionPolicyError(
+                "authorization_invocation_id", "Initial dispatch requires a consumed grant"
+            )
+        if context is None or context.workspace_id != tenant_id:
+            raise AuthorityDeniedError(scope)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if authorization_invocation is None:
+                self._assert_admin_write_authority(db, context, authority, scope)
+            else:
+                if row["original_dispatch_id"] is not None or row["binding_id"] is None:
+                    raise InvalidExecutionPolicyError(
+                        "authorization_invocation_id", "Invalid dispatch handoff"
+                    )
+                if (
+                    row["step_id"] is not None
+                    or not _dispatch_within_frozen_timeout(row, authorization_invocation)
+                    or authorization_invocation["actor_id"] != context.principal_id
+                    or authorization_invocation["request_id"] != context.request_id
+                    or authorization_invocation["action"] != authorization_invocation["native_name"]
+                    or any(
+                        row[field] != authorization_invocation[field]
+                        for field in (
+                            "run_id", "proposal_id", "adapter_id", "binding_id",
+                            "tool_spec_hash", "arguments_digest",
+                        )
+                    )
+                    or row["target_type"] != authorization_invocation["adapter_target_type"]
+                    or row["target_id"] != authorization_invocation["adapter_target_id"]
+                ):
+                    raise InvalidExecutionPolicyError(
+                        "authorization_invocation_id", "Dispatch differs from consumed invocation"
+                    )
+                claim = _checked_invocation_claim(
+                    authorization_invocation, tenant_id, row["id"], utc_now()
+                )
+                matched = db.execute(
+                    "UPDATE authorization_invocations SET dispatch_id = ?, claimed_at = ? "
+                    "WHERE id = ? AND tenant_id = ? AND dispatch_id IS NULL "
+                    "AND claim_expires_at > ? AND "
+                    + " AND ".join(f"{field} = ?" for field in _INVOCATION_MATCH_FIELDS),
+                    (
+                        claim["dispatch_id"], claim["claimed_at"], claim["invocation_id"],
+                        tenant_id, claim["claimed_at"],
+                        *(claim[field] for field in _INVOCATION_MATCH_FIELDS),
+                    ),
+                )
+                if matched.rowcount != 1:
+                    raise InvalidExecutionPolicyError(
+                        "authorization_invocation_id",
+                        "Consumed grant does not match this dispatch or was already claimed",
+                    )
             owned_run = db.execute(
                 "SELECT 1 FROM agent_runs WHERE tenant_id = ? AND id = ?",
                 (tenant_id, row["run_id"]),
@@ -237,11 +464,14 @@ class SQLiteEnforcementRepositoryMixin:
                 raise KeyError(row["proposal_id"])
             if row["original_dispatch_id"] is not None:
                 original = db.execute(
-                    "SELECT 1 FROM enforcement_dispatches WHERE tenant_id = ? AND id = ?",
+                    "SELECT * FROM enforcement_dispatches WHERE tenant_id = ? AND id = ?",
                     (tenant_id, row["original_dispatch_id"]),
                 ).fetchone()
                 if original is None:
                     raise KeyError(row["original_dispatch_id"])
+                _assert_reconciliation_root(
+                    row, original, values.get("expected_original_dispatch")
+                )
             db.execute(
                 "INSERT INTO enforcement_dispatches(id, tenant_id, contract_version, "
                 "binding_id, adapter_id, issuer_id, target_type, target_id, run_id, "
@@ -303,10 +533,40 @@ class SQLiteEnforcementRepositoryMixin:
     ) -> dict | None:
         updated_at = utc_now()
         with self._connect() as db:
-            db.execute(
+            db.execute("BEGIN IMMEDIATE")
+            dispatch = db.execute(
+                "SELECT * FROM enforcement_dispatches WHERE tenant_id = ? AND id = ?",
+                (tenant_id, dispatch_id),
+            ).fetchone()
+            if dispatch is None:
+                return None
+            receipt = (
+                db.execute(
+                    "SELECT * FROM enforcement_receipts WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, receipt_id),
+                ).fetchone()
+                if receipt_id is not None else None
+            )
+            if receipt_id is not None and receipt is None:
+                raise InvalidExecutionPolicyError("receipt_id", "Receipt does not exist")
+            reconciliation = (
+                db.execute(
+                    "SELECT * FROM enforcement_dispatches WHERE tenant_id = ? "
+                    "AND receipt_id = ? AND state = 'terminal' "
+                    "AND original_dispatch_id IS NOT NULL",
+                    (tenant_id, receipt_id),
+                ).fetchone()
+                if state == "reconciled" and receipt_id is not None else None
+            )
+            _assert_dispatch_finish(
+                dispatch, state=state, receipt=receipt,
+                reconciliation=reconciliation, workload_id=workload_id,
+                last_error_code=last_error_code,
+            )
+            result = db.execute(
                 "UPDATE enforcement_dispatches SET state = ?, receipt_id = ?, "
                 "workload_id = ?, last_error_code = ?, updated_at = ? "
-                "WHERE tenant_id = ? AND id = ?",
+                "WHERE tenant_id = ? AND id = ? AND state = ?",
                 (
                     state,
                     receipt_id,
@@ -315,8 +575,11 @@ class SQLiteEnforcementRepositoryMixin:
                     updated_at,
                     tenant_id,
                     dispatch_id,
+                    dispatch["state"],
                 ),
             )
+            if result.rowcount != 1:
+                raise InvalidExecutionPolicyError("state", "Dispatch transition raced")
             row = db.execute(
                 "SELECT * FROM enforcement_dispatches WHERE tenant_id = ? AND id = ?",
                 (tenant_id, dispatch_id),
@@ -465,12 +728,80 @@ class PostgresEnforcementRepositoryMixin:
         return [_decode_policy_proposal(row) for row in self._many(statement, values)]
 
     def create_enforcement_dispatch(
-        self, tenant_id: str, values: dict[str, Any]
+        self,
+        tenant_id: str,
+        values: dict[str, Any],
+        *,
+        context: RequestContext | None = None,
+        authority: AuthorityContext | None = None,
+        authorization_invocation: dict[str, Any] | None = None,
     ) -> dict:
         from sqlalchemy import text
 
         row = _dispatch_row(tenant_id, values, utc_now())
+        scope = "enforcement:reconcile"
+        if (
+            row["state"] != "dispatching"
+            or row["receipt_id"] is not None
+            or row["workload_id"] is not None
+            or row["last_error_code"] is not None
+        ):
+            raise InvalidExecutionPolicyError(
+                "state", "New dispatch must begin without a result in dispatching state"
+            )
+        if row["original_dispatch_id"] is None and authorization_invocation is None:
+            raise InvalidExecutionPolicyError(
+                "authorization_invocation_id", "Initial dispatch requires a consumed grant"
+            )
+        if context is None or context.workspace_id != tenant_id:
+            raise AuthorityDeniedError(scope)
         with self.engine.begin() as connection:
+            if authorization_invocation is None:
+                self._assert_admin_write_authority(connection, context, authority, scope)
+            else:
+                if row["original_dispatch_id"] is not None or row["binding_id"] is None:
+                    raise InvalidExecutionPolicyError(
+                        "authorization_invocation_id", "Invalid dispatch handoff"
+                    )
+                if (
+                    row["step_id"] is not None
+                    or not _dispatch_within_frozen_timeout(row, authorization_invocation)
+                    or authorization_invocation["actor_id"] != context.principal_id
+                    or authorization_invocation["request_id"] != context.request_id
+                    or authorization_invocation["action"] != authorization_invocation["native_name"]
+                    or any(
+                        row[field] != authorization_invocation[field]
+                        for field in (
+                            "run_id", "proposal_id", "adapter_id", "binding_id",
+                            "tool_spec_hash", "arguments_digest",
+                        )
+                    )
+                    or row["target_type"] != authorization_invocation["adapter_target_type"]
+                    or row["target_id"] != authorization_invocation["adapter_target_id"]
+                ):
+                    raise InvalidExecutionPolicyError(
+                        "authorization_invocation_id", "Dispatch differs from consumed invocation"
+                    )
+                claim = _checked_invocation_claim(
+                    authorization_invocation, tenant_id, row["id"], utc_now()
+                )
+                matched = connection.execute(
+                    text(
+                        "UPDATE authorization_invocations SET dispatch_id = :dispatch_id, "
+                        "claimed_at = :claimed_at WHERE id = :invocation_id "
+                        "AND tenant_id = :tenant_id AND dispatch_id IS NULL "
+                        "AND claim_expires_at > :claimed_at AND "
+                        + " AND ".join(
+                            f"{field} = :{field}" for field in _INVOCATION_MATCH_FIELDS
+                        )
+                    ),
+                    claim,
+                )
+                if matched.rowcount != 1:
+                    raise InvalidExecutionPolicyError(
+                        "authorization_invocation_id",
+                        "Consumed grant does not match this dispatch or was already claimed",
+                    )
             owned_run = connection.execute(
                 text(
                     "SELECT 1 FROM agent_runs WHERE tenant_id = :tenant_id AND id = :run_id"
@@ -501,13 +832,17 @@ class PostgresEnforcementRepositoryMixin:
             if row["original_dispatch_id"] is not None:
                 original = connection.execute(
                     text(
-                        "SELECT 1 FROM enforcement_dispatches "
-                        "WHERE tenant_id = :tenant_id AND id = :original_dispatch_id"
+                        "SELECT * FROM enforcement_dispatches "
+                        "WHERE tenant_id = :tenant_id AND id = :original_dispatch_id "
+                        "FOR UPDATE"
                     ),
                     row,
-                ).first()
+                ).mappings().first()
                 if original is None:
                     raise KeyError(row["original_dispatch_id"])
+                _assert_reconciliation_root(
+                    row, original, values.get("expected_original_dispatch")
+                )
             connection.execute(
                 text(
                     "INSERT INTO enforcement_dispatches(id, tenant_id, contract_version, "
@@ -589,15 +924,56 @@ class PostgresEnforcementRepositoryMixin:
             "updated_at": utc_now(),
         }
         with self.engine.begin() as connection:
-            connection.execute(
+            dispatch = connection.execute(
+                text(
+                    "SELECT * FROM enforcement_dispatches "
+                    "WHERE tenant_id = :tenant_id AND id = :id FOR UPDATE"
+                ),
+                values,
+            ).mappings().first()
+            if dispatch is None:
+                return None
+            receipt = (
+                connection.execute(
+                    text(
+                        "SELECT * FROM enforcement_receipts "
+                        "WHERE tenant_id = :tenant_id AND id = :receipt_id"
+                    ),
+                    values,
+                ).mappings().first()
+                if receipt_id is not None else None
+            )
+            if receipt_id is not None and receipt is None:
+                raise InvalidExecutionPolicyError("receipt_id", "Receipt does not exist")
+            reconciliation = (
+                connection.execute(
+                    text(
+                        "SELECT * FROM enforcement_dispatches "
+                        "WHERE tenant_id = :tenant_id AND receipt_id = :receipt_id "
+                        "AND state = 'terminal' AND original_dispatch_id IS NOT NULL"
+                    ),
+                    values,
+                ).mappings().first()
+                if state == "reconciled" and receipt_id is not None else None
+            )
+            _assert_dispatch_finish(
+                dispatch, state=state, receipt=receipt,
+                reconciliation=reconciliation, workload_id=workload_id,
+                last_error_code=last_error_code,
+            )
+            values["previous_state"] = dispatch["state"]
+            result = connection.execute(
                 text(
                     "UPDATE enforcement_dispatches SET state = :state, "
                     "receipt_id = :receipt_id, workload_id = :workload_id, "
                     "last_error_code = :last_error_code, updated_at = :updated_at "
-                    "WHERE tenant_id = :tenant_id AND id = :id"
+                    "WHERE tenant_id = :tenant_id AND id = :id "
+                    "AND state = :previous_state"
                 ),
                 values,
             )
+            if result.rowcount != 1:
+                raise InvalidExecutionPolicyError("state", "Dispatch transition raced")
             row = connection.execute(
                 text(
                     "SELECT * FROM enforcement_dispatches "

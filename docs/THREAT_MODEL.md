@@ -197,12 +197,15 @@ The service recheck does not make Python code in the same process an
 independent security domain. Code with arbitrary repository or session-table
 access can bypass application methods. Untrusted source execution therefore
 still requires the separate OS/external-enforcer boundary described above.
-The session/role recheck is not yet in the same database transaction as every
-authority write, so a concurrent revocation race is not claimed closed.
-The lower-level external-enforcer `dispatch()` port does not independently
-consume a one-time grant bound to the exact invocation. The supported Tool
-Catalog path checks and consumes grants first, but direct access to this
-internal port must not be exposed to untrusted same-process extensions.
+For the privileged knowledge, grant, invalidation, workflow, and reconciliation
+writes, the final session/role recheck and protected write share one database
+transaction. A revocation that commits first denies the write; an already
+authorized committed write is not retroactively erased. A bound external tool
+dispatch atomically claims one persisted, invocation-specific consumed Grant;
+replay and parameter or policy substitution cannot spend that handoff again.
+This does not make the repository an untrusted-code sandbox. A plugin allowed
+to call arbitrary grant-consumption or database ports can forge its own
+application-layer facts; those ports remain restricted to trusted host code.
 
 ### Collaborative research boundary
 

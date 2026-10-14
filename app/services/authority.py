@@ -2,8 +2,10 @@
 
 ``RequestContext`` fields are claims, not authorization. Only an active
 repository session for the same active administrator and workspace can carry a
-privileged operation. A session hash is bearer-equivalent and must never be
-serialized to Run, Step, Artifact, Receipt, or audit payloads.
+privileged operation. The repository repeats this check while holding the
+write transaction's lock before committing a protected mutation. A session
+hash is bearer-equivalent and must never be serialized to Run, Step,
+Artifact, Receipt, or audit payloads.
 """
 
 from __future__ import annotations

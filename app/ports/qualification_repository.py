@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from ..core.authority import AuthorityContext
+from ..core.contracts import RequestContext
+
 
 class QualificationRepository(Protocol):
     def create_qualification_evaluation(
@@ -35,7 +38,8 @@ class QualificationRepository(Protocol):
     ) -> dict: ...
 
     def admit_knowledge(
-        self, tenant_id: str, values: dict[str, Any]
+        self, tenant_id: str, values: dict[str, Any], *,
+        context: RequestContext, authority: AuthorityContext,
     ) -> dict: ...
 
     def list_knowledge_admission_receipts(
@@ -59,7 +63,8 @@ class QualificationRepository(Protocol):
     ) -> list[dict]: ...
 
     def create_authorization_grant(
-        self, tenant_id: str, values: dict[str, Any]
+        self, tenant_id: str, values: dict[str, Any], *,
+        context: RequestContext, authority: AuthorityContext,
     ) -> dict: ...
 
     def list_authorization_grants(
@@ -75,4 +80,5 @@ class QualificationRepository(Protocol):
         used_at: str,
         *,
         grant_id: str | None = None,
+        invocation: dict[str, Any] | None = None,
     ) -> dict | None: ...

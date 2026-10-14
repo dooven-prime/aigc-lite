@@ -1066,6 +1066,8 @@ class QualificationService:
                 },
                 "receipt_hash": admission_receipt.content_hash,
             },
+            context=context,
+            authority=authority,
         )
         return {
             **result,
@@ -1177,6 +1179,8 @@ class QualificationService:
                 "grant_receipt": canonical_hash(grant_payload),
                 "created_by": context.principal_id,
             },
+            context=context,
+            authority=authority,
         )
 
     def qualified_search(

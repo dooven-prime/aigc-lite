@@ -300,6 +300,8 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
                 "qualification_receipt_hash": "0" * 64,
                 "receipt_hash": "1" * 64,
             },
+            context=context,
+            authority=admin_authority,
         )
     with repository._connect() as connection, pytest.raises(
         sqlite3.IntegrityError, match="immutable"

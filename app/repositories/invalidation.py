@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..core.authority import AuthorityContext
+from ..core.contracts import RequestContext
+from ..core.errors import AuthorityDeniedError
+
 
 def _decode_decision(value: Any) -> dict[str, Any]:
     result = dict(value)
@@ -47,9 +51,18 @@ _NOTICE_NAMES = (
 
 
 class SQLiteInvalidationRepositoryMixin:
-    def record_notice_verification(self, tenant_id: str, values: dict) -> dict:
-        row = {"tenant_id": tenant_id, **values}
+    def record_notice_verification(
+        self, tenant_id: str, values: dict, *,
+        context: RequestContext, authority: AuthorityContext,
+    ) -> dict:
+        row = {**values, "tenant_id": tenant_id}
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if tenant_id != context.workspace_id:
+                raise AuthorityDeniedError("qualification:invalidate")
+            self._assert_admin_write_authority(
+                db, context, authority, "qualification:invalidate"
+            )
             db.execute(
                 "INSERT INTO notice_verifications(id, tenant_id, source_repository, "
                 "source_commit, source_path, source_artifact_id, source_hash, "
@@ -76,9 +89,17 @@ class SQLiteInvalidationRepositoryMixin:
             ).fetchall()
         return [_decode_decision(row) for row in rows]
 
-    def apply_invalidation_decision(self, tenant_id: str, values: dict) -> dict:
+    def apply_invalidation_decision(
+        self, tenant_id: str, values: dict, *,
+        context: RequestContext, authority: AuthorityContext,
+    ) -> dict:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if tenant_id != context.workspace_id:
+                raise AuthorityDeniedError("qualification:invalidate")
+            self._assert_admin_write_authority(
+                db, context, authority, "qualification:invalidate"
+            )
             parameters: list[Any] = [tenant_id, values["target_claim_revision_id"]]
             query = (
                 "SELECT id FROM current_use_bindings WHERE tenant_id = ? "
@@ -88,7 +109,7 @@ class SQLiteInvalidationRepositoryMixin:
                 query += " AND qualification_receipt_id = ?"
                 parameters.append(values["target_receipt_id"])
             affected_ids = [row["id"] for row in db.execute(query, parameters).fetchall()]
-            row = _decision_row({"tenant_id": tenant_id, **values}, affected_ids)
+            row = _decision_row({**values, "tenant_id": tenant_id}, affected_ids)
             db.execute(
                 f"INSERT INTO invalidation_decisions({_DECISION_COLUMNS}) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -114,17 +135,30 @@ class SQLiteInvalidationRepositoryMixin:
 
 
 class PostgresInvalidationRepositoryMixin:
-    def record_notice_verification(self, tenant_id: str, values: dict) -> dict:
-        row = {"tenant_id": tenant_id, **values}
-        self._execute(
-            "INSERT INTO notice_verifications(id, tenant_id, source_repository, "
-            "source_commit, source_path, source_artifact_id, source_hash, "
-            "verification_method, verification_hash, requested_by, verified_at) "
-            "VALUES (:id, :tenant_id, :source_repository, :source_commit, :source_path, "
-            ":source_artifact_id, :source_hash, :verification_method, "
-            ":verification_hash, :requested_by, :verified_at)",
-            row,
-        )
+    def record_notice_verification(
+        self, tenant_id: str, values: dict, *,
+        context: RequestContext, authority: AuthorityContext,
+    ) -> dict:
+        row = {**values, "tenant_id": tenant_id}
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            if tenant_id != context.workspace_id:
+                raise AuthorityDeniedError("qualification:invalidate")
+            self._assert_admin_write_authority(
+                connection, context, authority, "qualification:invalidate"
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO notice_verifications(id, tenant_id, source_repository, "
+                    "source_commit, source_path, source_artifact_id, source_hash, "
+                    "verification_method, verification_hash, requested_by, verified_at) "
+                    "VALUES (:id, :tenant_id, :source_repository, :source_commit, :source_path, "
+                    ":source_artifact_id, :source_hash, :verification_method, "
+                    ":verification_hash, :requested_by, :verified_at)"
+                ),
+                row,
+            )
         return row
 
     def get_notice_verification(self, tenant_id: str, verification_id: str) -> dict | None:
@@ -144,7 +178,10 @@ class PostgresInvalidationRepositoryMixin:
             )
         ]
 
-    def apply_invalidation_decision(self, tenant_id: str, values: dict) -> dict:
+    def apply_invalidation_decision(
+        self, tenant_id: str, values: dict, *,
+        context: RequestContext, authority: AuthorityContext,
+    ) -> dict:
         from sqlalchemy import text
 
         parameters = {
@@ -160,6 +197,11 @@ class PostgresInvalidationRepositoryMixin:
             query += " AND qualification_receipt_id = :receipt_id"
         query += " FOR UPDATE"
         with self.engine.begin() as connection:
+            if tenant_id != context.workspace_id:
+                raise AuthorityDeniedError("qualification:invalidate")
+            self._assert_admin_write_authority(
+                connection, context, authority, "qualification:invalidate"
+            )
             connection.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"{tenant_id}:{values['target_claim_revision_id']}"},
@@ -167,7 +209,7 @@ class PostgresInvalidationRepositoryMixin:
             affected_ids = [
                 item["id"] for item in connection.execute(text(query), parameters).mappings().all()
             ]
-            row = _decision_row({"tenant_id": tenant_id, **values}, affected_ids)
+            row = _decision_row({**values, "tenant_id": tenant_id}, affected_ids)
             placeholders = ", ".join(f":{name}" for name in _DECISION_NAMES)
             connection.execute(
                 text(

@@ -47,10 +47,11 @@ does not authorize the Verification Runner to update the stage.
 - `InvalidationService` requires `qualification:invalidate` application
   authority before verifying a notice or making an invalidation decision.
   These checks and the workflow transition re-read session, active user role,
-  principal, and workspace at the service boundary; an HTTP administrator
-  dependency alone is not proof.
+  principal, and workspace inside the protected write transaction; an HTTP
+  administrator dependency alone is not proof.
 - `ToolAuthorizationGate` validates concrete invocation restrictions and
-  atomically consumes the chosen grant before dispatch;
+  atomically consumes the chosen grant while recording an exact, one-time
+  invocation handoff before dispatch;
 - `ExternalEnforcerService.reconcile_dispatch()` rechecks a current
   `enforcement:reconcile` administrator session before requesting signed
   reconciliation of an indeterminate dispatch;
@@ -68,12 +69,14 @@ Session-bound service checks protect transport and ordinary internal call
 paths, not a host already compromised by arbitrary same-process code or direct
 database writes; those require an external enforcement trust boundary.
 The lower-level `ExternalEnforcerService.dispatch()` remains an internal
-execution port, not a public arbitrary-dispatch API. Its current authorization
-binding relies on the Tool Catalog caller having consumed the concrete grant;
-it does not independently consume or bind a one-time grant at the dispatch
-boundary. An untrusted same-process plugin must not be granted access to that
-port. Closing this gap requires a versioned, invocation-bound authorization
-handoff, not an additional caller-supplied `authorized=true` field.
+execution port, not a public arbitrary-dispatch API. Initial tool execution
+must claim the precise consumed-grant handoff in the same transaction that
+creates its dispatch row; a changed invocation or second claim fails closed
+without another grant debit. An uncertain dispatch retains its execution slot
+until a verified terminal receipt or authorized reconciliation closes it.
+This is a trusted-host application and database invariant, not isolation from
+arbitrary same-process code or direct database writes. Untrusted plugins must
+not receive repository, grant-consumption, dispatch, or state-transition ports.
 
 The planned controlled source-maintenance transition is separately frozen in
 [PATCH_RUNNER.md](PATCH_RUNNER.md). Until that contract is implemented, a

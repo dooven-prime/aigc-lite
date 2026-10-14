@@ -63,7 +63,7 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "last_latency_ms",
         "last_tool_count",
     } <= columns
-    assert revision == "0023_scheduled_firings"
+    assert revision == "0025_invocation_timeout"
     assert {
         "artifacts",
         "citations",
@@ -196,7 +196,7 @@ def test_repository_repairs_unreleased_sqlite_revision_alias(tmp_path) -> None:
         revision = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-    assert revision == "0023_scheduled_firings"
+    assert revision == "0025_invocation_timeout"
 
 
 def test_knowledge_admission_migration_does_not_silently_grandfather_bindings(

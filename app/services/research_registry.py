@@ -764,6 +764,8 @@ class ResearchRegistryService:
                     apply_transition
                     and decision is PromotionGateDecision.PASSED
                 ),
+                context=context if apply_transition else None,
+                authority=authority if apply_transition else None,
             )
         except KeyError as exc:
             raise InvalidEvidenceError(

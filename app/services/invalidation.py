@@ -145,7 +145,7 @@ class InvalidationService:
         }
         verification["verification_hash"] = canonical_hash(verification)
         return self._repository_provider().record_notice_verification(
-            context.workspace_id, verification
+            context.workspace_id, verification, context=context, authority=authority
         )
 
     def decide(
@@ -315,7 +315,9 @@ class InvalidationService:
             "decided_at": decided_at,
         }
         decision["decision_hash"] = canonical_hash(decision)
-        return repository.apply_invalidation_decision(context.workspace_id, decision)
+        return repository.apply_invalidation_decision(
+            context.workspace_id, decision, context=context, authority=authority
+        )
 
     def list_decisions(self, context: RequestContext, claim_id: str) -> list[dict]:
         return self._repository_provider().list_invalidation_decisions(

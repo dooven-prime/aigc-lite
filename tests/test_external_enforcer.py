@@ -9,6 +9,7 @@ import pytest
 from authority_support import provision_admin
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from external_handoff_support import provision_external_grant
 from httpx import AsyncClient, MockTransport, Request, Response
 
 from app.adapters.enforcement import HTTPEnforcerAdapter
@@ -32,6 +33,8 @@ from app.core.enforcement import (
     PolicyPermission,
     SignedEnforcementReceiptEnvelope,
     canonical_enforcement_json,
+    enforcement_payload_hash,
+    tool_spec_value,
 )
 from app.core.errors import (
     AuthorityDeniedError,
@@ -40,6 +43,7 @@ from app.core.errors import (
     InvalidExecutionPolicyError,
 )
 from app.repository import SQLiteRepository
+from app.services.authorization import ToolAuthorizationGate
 from app.services.enforced_tools import (
     ExternalToolExecutionBindingRegistry,
     ExternalToolExecutionRouter,
@@ -53,8 +57,6 @@ from app.services.enforcer import (
 )
 from app.services.tool_catalog import ToolCatalog
 
-HASH_A = "a" * 64
-HASH_B = "b" * 64
 NOW = datetime(2026, 9, 30, 5, 0, tzinfo=UTC)
 
 
@@ -246,6 +248,97 @@ def _proposal_and_run(repository, enforcement):
     return context, proposal, run, step
 
 
+async def _authorized_dispatch(
+    repository,
+    external,
+    context,
+    proposal,
+    run,
+    adapter,
+    *,
+    arguments=None,
+    binding_id="contract-binding",
+):
+    """Exercise the direct port with one genuinely consumed grant handoff."""
+
+    arguments = arguments or {}
+    spec = ToolSpec(
+        name="external_tool",
+        native_name="external_tool",
+        description="Signed external enforcement contract test.",
+        input_schema={"type": "object"},
+        source=ToolSource.LOCAL,
+        provider_id="contract-provider",
+        extensions={"authority_requirement": {"required": True}},
+    )
+    provision_external_grant(
+        repository,
+        context,
+        action=spec.native_name,
+        target=f"provider:{spec.provider_id}",
+        max_calls=1,
+    )
+    binding = ExternalToolExecutionBinding(
+        binding_id=binding_id,
+        workspace_id=context.workspace_id,
+        provider_id=spec.provider_id,
+        native_name=spec.native_name,
+        adapter_id=adapter.adapter_id,
+        proposal_id=proposal["id"],
+        policy_hash=proposal["candidate_policy_hash"],
+    ).as_dict()
+    gate = ToolAuthorizationGate(lambda: repository)
+    gate._qualification.refresh_receipt_binding = lambda *_args: None
+    consumed = gate.authorize_and_consume(
+        context,
+        spec,
+        arguments,
+        run_id=run["id"],
+        dispatch_binding={
+            **binding,
+            "adapter_target_type": adapter.target_type.value,
+            "adapter_target_id": adapter.target_id,
+        },
+        tool_spec_hash=enforcement_payload_hash(tool_spec_value(spec)),
+        dispatch_spec=spec,
+    )
+    assert consumed is not None
+    grant_binding = {
+        "action": spec.native_name,
+        "target": f"provider:{spec.provider_id}",
+        "grant_id": consumed["id"],
+        "grant_call_number": consumed["calls_used"],
+        "authorization_invocation_id": consumed["authorization_invocation_id"],
+        "invocation_digest": consumed["invocation_digest"],
+    }
+    return await external.dispatch(
+        context,
+        adapter_id=adapter.adapter_id,
+        proposal_id=proposal["id"],
+        run_id=run["id"],
+        step_id=None,
+        execution_envelope={
+            "operation": "tool.execute.v1",
+            "principal_id": context.principal_id,
+            "request_id": context.request_id,
+            "tool": {
+                "public_name": spec.name,
+                "native_name": spec.native_name,
+                "provider_id": spec.provider_id,
+                "source": spec.source.value,
+            },
+            "arguments": arguments,
+            "grant_binding": grant_binding,
+        },
+        tool_spec_hash=enforcement_payload_hash(tool_spec_value(spec)),
+        tool_timeout_seconds=spec.timeout_seconds,
+        arguments_digest=enforcement_payload_hash(arguments),
+        binding_id=binding_id,
+        binding_hash=binding["binding_hash"],
+        authorization_invocation_id=consumed["authorization_invocation_id"],
+    )
+
+
 def test_external_enforcer_verifies_signature_and_persists_request_binding(
     tmp_path,
 ) -> None:
@@ -257,18 +350,9 @@ def test_external_enforcer_verifies_signature_and_persists_request_binding(
     context, proposal, run, step = _proposal_and_run(repository, enforcement)
 
     receipt = asyncio.run(
-        external.dispatch(
-            context,
-            adapter_id=adapter.adapter_id,
-            proposal_id=proposal["id"],
-            run_id=run["id"],
-            step_id=step["id"],
-            execution_envelope={
-                "tool": "external_tool",
-                "credential_reference": "encrypted-db://credential/example",
-            },
-            tool_spec_hash=HASH_A,
-            arguments_digest=HASH_B,
+        _authorized_dispatch(
+            repository, external, context, proposal, run, adapter,
+            arguments={"credential_reference": "encrypted-db://credential/example"},
         )
     )
 
@@ -351,15 +435,8 @@ def test_external_enforcer_rejects_tampering_and_untrusted_bindings(
 
     with pytest.raises(EnforcementDispatchIndeterminateError) as captured:
         asyncio.run(
-            external.dispatch(
-                context,
-                adapter_id=adapter.adapter_id,
-                proposal_id=proposal["id"],
-                run_id=run["id"],
-                step_id=step["id"],
-                execution_envelope={"tool": "external_tool"},
-                tool_spec_hash=HASH_A,
-                arguments_digest=HASH_B,
+            _authorized_dispatch(
+                repository, external, context, proposal, run, adapter,
             )
         )
     assert captured.value.metadata["cause"] == "unverifiable_receipt"
@@ -382,30 +459,17 @@ def test_external_enforcer_rejects_revoked_key_and_secret_bearing_request(
     context, proposal, run, step = _proposal_and_run(repository, enforcement)
     with pytest.raises(EnforcementDispatchIndeterminateError) as captured:
         asyncio.run(
-            external.dispatch(
-                context,
-                adapter_id=adapter.adapter_id,
-                proposal_id=proposal["id"],
-                run_id=run["id"],
-                step_id=step["id"],
-                execution_envelope={"tool": "external_tool"},
-                tool_spec_hash=HASH_A,
-                arguments_digest=HASH_B,
+            _authorized_dispatch(
+                repository, external, context, proposal, run, adapter,
             )
         )
     assert captured.value.metadata["cause"] == "unverifiable_receipt"
 
     with pytest.raises(InvalidExecutionPolicyError, match="credential references"):
         asyncio.run(
-            external.dispatch(
-                context,
-                adapter_id=adapter.adapter_id,
-                proposal_id=proposal["id"],
-                run_id=run["id"],
-                step_id=step["id"],
-                execution_envelope={"api_key": "do-not-send"},
-                tool_spec_hash=HASH_A,
-                arguments_digest=HASH_B,
+            _authorized_dispatch(
+                repository, external, context, proposal, run, adapter,
+                arguments={"api_key": "do-not-send"},
             )
         )
 
@@ -419,15 +483,8 @@ def test_indeterminate_dispatch_requires_signed_reconciliation(tmp_path) -> None
     context, proposal, run, step = _proposal_and_run(repository, enforcement)
 
     receipt = asyncio.run(
-        external.dispatch(
-            context,
-            adapter_id=adapter.adapter_id,
-            proposal_id=proposal["id"],
-            run_id=run["id"],
-            step_id=step["id"],
-            execution_envelope={"operation": "tool.execute.v1"},
-            tool_spec_hash=HASH_A,
-            arguments_digest=HASH_B,
+        _authorized_dispatch(
+            repository, external, context, proposal, run, adapter,
             binding_id="binding-1",
         )
     )
@@ -440,15 +497,8 @@ def test_indeterminate_dispatch_requires_signed_reconciliation(tmp_path) -> None
     )[0]["id"] == root_dispatch_id
     with pytest.raises(EnforcementDispatchIndeterminateError) as conflict:
         asyncio.run(
-            external.dispatch(
-                context,
-                adapter_id=adapter.adapter_id,
-                proposal_id=proposal["id"],
-                run_id=run["id"],
-                step_id=step["id"],
-                execution_envelope={"operation": "tool.execute.v1"},
-                tool_spec_hash=HASH_A,
-                arguments_digest=HASH_B,
+            _authorized_dispatch(
+                repository, external, context, proposal, run, adapter,
                 binding_id="second-binding",
             )
         )
@@ -501,15 +551,8 @@ def test_live_dispatch_cannot_be_reconciled_and_cancellation_becomes_indetermina
 
     async def scenario():
         task = asyncio.create_task(
-            external.dispatch(
-                context,
-                adapter_id=adapter.adapter_id,
-                proposal_id=proposal["id"],
-                run_id=run["id"],
-                step_id=step["id"],
-                execution_envelope={"operation": "tool.execute.v1"},
-                tool_spec_hash=HASH_A,
-                arguments_digest=HASH_B,
+            _authorized_dispatch(
+                repository, external, context, proposal, run, adapter,
                 binding_id="binding-live",
             )
         )
@@ -581,7 +624,16 @@ def test_tool_catalog_routes_bound_tool_only_through_external_enforcer(
         repository_provider=lambda: repository,
     )
     provider = Provider()
-    catalog = ToolCatalog([provider], external_tool_executor=router)
+    provision_external_grant(
+        repository, context, action="sensitive_action",
+        target="provider:sensitive-provider", max_calls=1,
+    )
+    gate = ToolAuthorizationGate(lambda: repository)
+    gate._qualification.refresh_receipt_binding = lambda *_args: None
+    catalog = ToolCatalog(
+        [provider], authorization_gate=gate.authorize_and_consume,
+        external_tool_executor=router,
+    )
 
     async def invoke():
         session = await catalog.open(context, run_id=run["id"])
@@ -648,7 +700,16 @@ def test_signed_network_denial_blocks_budget_escape_without_local_fallback(
         repository_provider=lambda: repository,
     )
     provider = Provider()
-    catalog = ToolCatalog([provider], external_tool_executor=router)
+    provision_external_grant(
+        repository, context, action="budget_escape_canary",
+        target="provider:budget-escape-provider", max_calls=1,
+    )
+    gate = ToolAuthorizationGate(lambda: repository)
+    gate._qualification.refresh_receipt_binding = lambda *_args: None
+    catalog = ToolCatalog(
+        [provider], authorization_gate=gate.authorize_and_consume,
+        external_tool_executor=router,
+    )
     endpoint = "https://unapproved.example.test/v1/chat"
 
     async def invoke():
@@ -712,7 +773,16 @@ def test_tool_catalog_blocks_reentry_while_external_state_is_indeterminate(
         repository_provider=lambda: repository,
     )
     provider = Provider()
-    catalog = ToolCatalog([provider], external_tool_executor=router)
+    grant = provision_external_grant(
+        repository, context, action="blocked_action",
+        target="provider:blocked-provider", max_calls=2,
+    )
+    gate = ToolAuthorizationGate(lambda: repository)
+    gate._qualification.refresh_receipt_binding = lambda *_args: None
+    catalog = ToolCatalog(
+        [provider], authorization_gate=gate.authorize_and_consume,
+        external_tool_executor=router,
+    )
 
     async def invoke_twice():
         session = await catalog.open(context, run_id=run["id"])
@@ -728,6 +798,10 @@ def test_tool_catalog_blocks_reentry_while_external_state_is_indeterminate(
     assert json.loads(second.content)["error"] == "enforcement_dispatch_indeterminate"
     assert len(adapter.requests) == 1
     assert provider.calls == 0
+    assert next(
+        value for value in repository.list_authorization_grants(context.workspace_id)
+        if value["id"] == grant["id"]
+    )["calls_used"] == 1
     assert (
         first.metadata["external_enforcement"]["dispatch_id"]
         == second.metadata["external_enforcement"]["dispatch_id"]

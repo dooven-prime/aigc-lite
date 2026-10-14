@@ -6,6 +6,9 @@ import json
 import uuid
 from typing import Any
 
+from ..core.authority import AuthorityContext
+from ..core.contracts import RequestContext
+from ..core.errors import AuthorityDeniedError
 from .common import decode_list as _decode_list
 from .common import decode_metadata as _decode_metadata
 from .common import utc_now
@@ -642,7 +645,9 @@ class SQLiteResearchRepositoryMixin:
         return [_decode_verification_execution(row) for row in rows]
 
     def create_research_promotion_evaluation(
-        self, tenant_id: str, values: dict[str, Any], *, promote: bool
+        self, tenant_id: str, values: dict[str, Any], *, promote: bool,
+        context: RequestContext | None = None,
+        authority: AuthorityContext | None = None,
     ) -> dict:
         value = {
             "id": str(uuid.uuid4()),
@@ -666,6 +671,15 @@ class SQLiteResearchRepositoryMixin:
             "created_at": utc_now(),
         }
         with self._connect() as db:
+            if context is not None or authority is not None or promote:
+                db.execute("BEGIN IMMEDIATE")
+                if context is None or authority is None:
+                    raise AuthorityDeniedError("workflow:promote")
+                if tenant_id != context.workspace_id:
+                    raise AuthorityDeniedError("workflow:promote")
+                self._assert_admin_write_authority(
+                    db, context, authority, "workflow:promote"
+                )
             claim = db.execute(
                 "SELECT promotion_stage FROM research_claim_revisions "
                 "WHERE tenant_id = ? AND id = ? AND research_case_id = ?",
@@ -1316,7 +1330,9 @@ class PostgresResearchRepositoryMixin:
         ]
 
     def create_research_promotion_evaluation(
-        self, tenant_id: str, values: dict[str, Any], *, promote: bool
+        self, tenant_id: str, values: dict[str, Any], *, promote: bool,
+        context: RequestContext | None = None,
+        authority: AuthorityContext | None = None,
     ) -> dict:
         value = {
             "id": str(uuid.uuid4()),
@@ -1342,6 +1358,14 @@ class PostgresResearchRepositoryMixin:
         from sqlalchemy import text
 
         with self.engine.begin() as connection:
+            if context is not None or authority is not None or promote:
+                if context is None or authority is None:
+                    raise AuthorityDeniedError("workflow:promote")
+                if tenant_id != context.workspace_id:
+                    raise AuthorityDeniedError("workflow:promote")
+                self._assert_admin_write_authority(
+                    connection, context, authority, "workflow:promote"
+                )
             claim = (
                 connection.execute(
                     text(

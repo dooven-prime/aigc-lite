@@ -20,9 +20,11 @@ from ..config import settings
 from ..core.contracts import (
     RequestContext,
     ToolInvocationResult,
+    ToolProviderResult,
     ToolRisk,
     ToolSpec,
 )
+from ..core.enforcement import enforcement_payload_hash, tool_spec_value
 from ..core.errors import ErrorCode
 from ..database import get_repository
 from ..ports.enforcer import ExternalToolExecutor
@@ -54,10 +56,7 @@ class ToolSession:
         *,
         context: RequestContext,
         access_policy: ToolAccessPolicy | None = None,
-        authorization_gate: Callable[
-            [RequestContext, ToolSpec, dict[str, Any]], dict[str, Any] | None
-        ]
-        | None = None,
+        authorization_gate: Callable[..., dict[str, Any] | None] | None = None,
         external_tool_executor: ExternalToolExecutor | None = None,
         run_id: str | None = None,
     ) -> None:
@@ -108,18 +107,47 @@ class ToolSession:
             )
 
         authorization_metadata: dict[str, Any] = {}
-        authorization_spec = self._authorization_spec(spec)
+        dispatch_binding = None
+        if self._external_tool_executor is not None:
+            try:
+                prepared = self._external_tool_executor.prepare_if_bound(
+                    self._context, self._run_id, spec
+                )
+            except Exception:  # noqa: BLE001 - never spend on an unknown binding state
+                prepared = ({}, ToolProviderResult(
+                    content=json.dumps({"error": ErrorCode.TOOL_PROVIDER_UNAVAILABLE.value}),
+                    failed=True,
+                    metadata={"error_code": ErrorCode.TOOL_PROVIDER_UNAVAILABLE.value},
+                ))
+            if prepared is not None:
+                dispatch_binding, blocked = prepared
+                if blocked is not None:
+                    return self._provider_result(spec, decoded, blocked)
+        authorization_spec = self._authorization_spec(
+            spec, force_required=dispatch_binding is not None
+        )
         requirement = tool_authorization_requirement(authorization_spec)
         if requirement is not None:
             grant = None
             if self._authorization_gate is not None:
                 try:
-                    grant = self._authorization_gate(
-                        self._context, authorization_spec, decoded
-                    )
+                    if dispatch_binding is not None:
+                        grant = self._authorization_gate(
+                            self._context,
+                            authorization_spec,
+                            decoded,
+                            run_id=self._run_id,
+                            dispatch_binding=dispatch_binding,
+                            tool_spec_hash=enforcement_payload_hash(tool_spec_value(spec)),
+                            dispatch_spec=spec,
+                        )
+                    else:
+                        grant = self._authorization_gate(
+                            self._context, authorization_spec, decoded
+                        )
                 except Exception:  # noqa: BLE001 - fail closed without leaking policy state
                     grant = None
-            if not grant:
+            if not grant or (dispatch_binding is not None and not grant.get("authorization_invocation_id")):
                 error_code = ErrorCode.TOOL_AUTHORIZATION_REQUIRED.value
                 error = json.dumps({"error": error_code})
                 return ToolInvocationResult(
@@ -150,6 +178,8 @@ class ToolSession:
                     ),
                     "calls_used": grant.get("calls_used"),
                     "max_calls": grant.get("max_calls"),
+                    "authorization_invocation_id": grant.get("authorization_invocation_id"),
+                    "invocation_digest": grant.get("invocation_digest"),
                 }
             }
 
@@ -164,6 +194,8 @@ class ToolSession:
                         decoded,
                         authorization_metadata.get("authorization"),
                     )
+                if dispatch_binding is not None and result is None:
+                    raise RuntimeError("External tool binding disappeared after authorization")
                 if result is None:
                     result = await provider.call_tool(spec.native_name, decoded)
         except TimeoutError:
@@ -198,9 +230,17 @@ class ToolSession:
                     "error_code": error_code,
                 },
             )
-        model_content = result.content[: settings.max_tool_result_chars]
+        return self._provider_result(spec, decoded, result, authorization_metadata)
+
+    def _provider_result(
+        self,
+        spec: ToolSpec,
+        decoded: dict[str, Any],
+        result: ToolProviderResult,
+        authorization_metadata: dict[str, Any] | None = None,
+    ) -> ToolInvocationResult:
         return ToolInvocationResult(
-            content=model_content,
+            content=result.content[: settings.max_tool_result_chars],
             failed=result.failed,
             ledger_input=json.dumps(redact(decoded), ensure_ascii=False, default=str)[
                 : settings.max_tool_record_chars
@@ -208,16 +248,16 @@ class ToolSession:
             ledger_output=_ledger_text(result.content, failed=result.failed),
             metadata={
                 **self._metadata(spec),
-                **authorization_metadata,
+                **(authorization_metadata or {}),
                 **result.metadata,
             },
             artifacts=result.artifacts,
             citations=result.citations,
         )
 
-    def _authorization_spec(self, spec: ToolSpec) -> ToolSpec:
-        if self._access_policy is None or not self._access_policy.requires_authorization(
-            spec
+    def _authorization_spec(self, spec: ToolSpec, *, force_required: bool = False) -> ToolSpec:
+        if not force_required and (
+            self._access_policy is None or not self._access_policy.requires_authorization(spec)
         ):
             return spec
         extensions = dict(spec.extensions)
@@ -255,10 +295,7 @@ class ToolCatalog:
         providers: list[ToolProvider] | None = None,
         provider_sources: list[ToolProviderSource] | None = None,
         *,
-        authorization_gate: Callable[
-            [RequestContext, ToolSpec, dict[str, Any]], dict[str, Any] | None
-        ]
-        | None = None,
+        authorization_gate: Callable[..., dict[str, Any] | None] | None = None,
         external_tool_executor: ExternalToolExecutor | None = None,
     ) -> None:
         self._providers: dict[str, ToolProvider] = {}

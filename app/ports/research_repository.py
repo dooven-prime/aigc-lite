@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from ..core.authority import AuthorityContext
+from ..core.contracts import RequestContext
+
 
 class ResearchRepository(Protocol):
     def create_research_registry(
@@ -90,7 +93,9 @@ class ResearchRepository(Protocol):
     ) -> list[dict]: ...
 
     def create_research_promotion_evaluation(
-        self, tenant_id: str, values: dict[str, Any], *, promote: bool
+        self, tenant_id: str, values: dict[str, Any], *, promote: bool,
+        context: RequestContext | None = None,
+        authority: AuthorityContext | None = None,
     ) -> dict: ...
 
     def list_research_promotion_evaluations(
