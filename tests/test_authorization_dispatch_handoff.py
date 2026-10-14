@@ -367,6 +367,30 @@ def test_expired_unclaimed_handoff_cannot_dispatch(tmp_path) -> None:
     assert _dispatch_count(harness) == 0
 
 
+def test_expired_grant_cannot_be_consumed_or_reach_external_dispatch(tmp_path) -> None:
+    harness = _harness(tmp_path)
+    with harness.repository._connect() as connection:
+        connection.execute(
+            "UPDATE authorization_grants SET expires_at = ? WHERE tenant_id = ? AND id = ?",
+            ("2000-01-01T00:00:00+00:00", harness.context.workspace_id, harness.grant["id"]),
+        )
+    grant = harness.repository.list_authorization_grants(harness.context.workspace_id)[0]
+    assert grant["state"] == "active"  # Expiry must be checked, not inferred from stored state.
+    assert grant["calls_used"] == 0
+
+    result = asyncio.run(_invoke(harness, {"value": 7}))
+    assert result.failed
+    assert json.loads(result.content) == {"error": "tool_authorization_required"}
+    assert harness.provider.calls == 0
+    assert harness.adapter.requests == []
+    assert _dispatch_count(harness) == 0
+    with harness.repository._connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM authorization_invocations").fetchone()[0] == 0
+    grant = harness.repository.list_authorization_grants(harness.context.workspace_id)[0]
+    assert grant["calls_used"] == 0
+    assert grant["state"] == "expired"
+
+
 def test_repository_cannot_relabel_grant_consumer_or_bypass_conditions(tmp_path) -> None:
     harness = _harness(tmp_path, conditions={"arguments": {"value": {"$lte": 5}}})
     spec = harness.provider.spec

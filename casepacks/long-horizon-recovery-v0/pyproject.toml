@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aigc-lite-long-horizon-recovery-casepack"
+version = "0.1.0.dev0"
+description = "Candidate-only long-horizon progress and recovery research contract"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["aigc_lite_casepacks*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"aigc_lite_casepacks.long_horizon_recovery_v0" = ["contract_v0.json"]

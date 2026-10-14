@@ -1,0 +1,115 @@
+{
+  "contract_id": "long-horizon.recovery.v0",
+  "release_state": "candidate_research_only",
+  "authority_effect": "none",
+  "packaging": {
+    "core_schema_changes": false,
+    "automatic_registration": false,
+    "automatic_recovery_execution": false,
+    "source_of_facts": "host-exported Protocol, Run, Step, Artifact, Receipt and scheduler records"
+  },
+  "input": {
+    "required": ["goal", "ledger", "checkpoints"],
+    "optional": ["compaction_view"],
+    "goal_contract": "LongHorizonGoal.v0",
+    "ledger_contract": "LongHorizonLedger.v0",
+    "checkpoints": ["previous_sequence", "current_sequence", "previous_at", "current_at"],
+    "goal_fields": ["contract", "protocol", "target", "policy"],
+    "ledger_fields": ["contract", "workspace_id", "run", "steps", "receipts", "artifacts", "scheduler_firings"],
+    "host_projection_requirements": [
+      "Run binds protocol_id, protocol_version and domain-separated goal_sha256.",
+      "Scheduler firings are timestamped immutable events, not only current mutable rows.",
+      "Environment revision is monotone across accepted observations and a revision has one version identity.",
+      "The host exporter authenticates Receipt output and metadata-to-fact mapping; this checker does not establish it.",
+      "Verification and reconciliation Step kinds are host-exported roles, not self-authenticating verifier identities."
+    ]
+  },
+  "documents": {
+    "StateSnapshot.v0": {
+      "purpose": "Reconstruct time- and source-bound observations under an unchanged frozen goal.",
+      "required_semantics": [
+        "goal and protocol version identity",
+        "specific source Run, Step, Artifact and Receipt references",
+        "observation time, freshness bound and environment state version where applicable",
+        "resources and unresolved or indeterminate operations",
+        "explicit stale, missing or conflicting observations and monitored resources"
+      ]
+    },
+    "ProgressAssessment.v0": {
+      "purpose": "Compare source-bound snapshots without reducing progress to a single score.",
+      "vector": {
+        "M": "host-reported verification milestones, conditional on exporter authenticity, which may be invalidated",
+        "R": "observed resources and recoverability, including losses",
+        "E": "new host-projected goal-relevant evidence, excluding candidate-only activity and without independent verifier authentication",
+        "U": "unresolved blockers and indeterminate operations",
+        "B": "consumed and remaining budget"
+      },
+      "required_semantics": [
+        "before and after snapshot identity",
+        "source-bound non-monotonic changes and evidence limits",
+        "lost verified milestones or scoped evidence immediately trigger reassessment, never ordinary continuation",
+        "an explicitly invalidated goal milestone or evidence criterion remains blocking across later checkpoints until a new valid host-projected Receipt replaces it",
+        "activity count is not a substitute for a milestone or effective evidence"
+      ]
+    },
+    "RecoveryDecision.v0": {
+      "status": "PROPOSED",
+      "allowed_proposals": [
+        "CONTINUE",
+        "REOBSERVE",
+        "REPLAN",
+        "REASSESS",
+        "WAIT_FOR_EVIDENCE",
+        "PAUSE",
+        "STOP"
+      ],
+      "required_semantics": [
+        "snapshot and assessment identity",
+        "source-bound reason and unresolved preconditions",
+        "mandatory host recheck of current state, policy, budgets and grants before action",
+        "indeterminate external effects do not permit automatic retry",
+        "historical checkpoints cannot produce an actionable CONTINUE proposal"
+      ],
+      "execution_authorized": false
+    },
+    "CompactionReceipt.v0": {
+      "purpose": "Audit a compressed context view against its original ledger and frozen goal.",
+      "required_semantics": [
+        "source snapshot and goal identity",
+        "structured target, completion predicate, stop conditions and forbidden actions are retained from the frozen goal",
+        "unrepaired goal milestone and evidence invalidations remain structured compaction invariants",
+        "retained invariants and source references",
+        "omitted or unresolved facts",
+        "unchanged budget and pending-operation constraints",
+        "retained Receipt sources for current uncertainties and unchanged open-uncertainty and stale-state constraints"
+      ],
+      "cannot_replace_ledger": true
+    }
+  },
+  "authority_effects_of_this_replay_only": {
+    "candidate_only": true,
+    "qualification_receipt_created": false,
+    "current_use_binding_created": false,
+    "authorization_grant_created": false,
+    "dispatch_performed": false,
+    "proposal_execution_authorized": false
+  },
+  "hash": {
+    "encoding": "UTF-8 JSON with sorted keys, compact separators, ensure_ascii=false, allow_nan=false",
+    "algorithm": "SHA-256",
+    "domain_separator": "aigc-lite.long-horizon-recovery.v0\n",
+    "excludes": "top-level sha256 self-hash field",
+    "external_pins": "Expected goal, ledger and checkpoints digests use this domain separator. The checker digest covers all Python files via a domain-separated filename-and-binary-digest manifest; contract_v0.json uses plain SHA-256. All pins must be supplied outside the candidate input. The CLI self-check does not authenticate its own executable."
+  },
+  "non_claims": [
+    "A replayed ledger export is not an independently authenticated observation of the environment.",
+    "A well-formed Receipt output_digest or projected metadata fact does not authenticate the host export mapping.",
+    "A raw Protocol.content_hash does not establish canonical goal identity.",
+    "A source hash is not a signature or an independent verification of a research claim.",
+    "A conditional MDE certificate does not authenticate its source history.",
+    "One Receipt invalidation is not a source-level dependency closure; a host must explicitly export every affected Receipt invalidation.",
+    "A proposed recovery is not an AuthorizationGrant, a dispatch permit, or a scheduler command.",
+    "Context compaction does not change knowledge qualification, current use or execution authority.",
+    "Persisting an Artifact can redact or reformat content; compare stored bytes and digest before equating it to the replay output."
+  ]
+}
