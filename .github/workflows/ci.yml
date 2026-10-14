@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -84,11 +86,13 @@ jobs:
       AIGC_LITE_TEST_POSTGRES_URL: postgresql+psycopg://aigc_lite:contract-password@127.0.0.1:5432/aigc_lite_test
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev,postgres]"
-      - run: pytest tests/test_postgres_contract.py -q
+      - run: pytest tests/test_postgres_contract.py tests/test_release_v0_7_upgrade.py -q
 
   docker-smoke:
     runs-on: ubuntu-latest

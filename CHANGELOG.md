@@ -5,12 +5,19 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
-This is a development ledger for changes merged after `v0.6.0` through
-`main` commit `be13369` (2026-10-14), plus the separately marked candidate
-branch delta. The source metadata targets `0.7.0`, but this is **not** a tagged
-release or a completed `v0.7.0` release closure.
+No changes recorded after `v0.7.0`.
 
-### Scope on main
+## 0.7.0 - 2026-10-14
+
+This is a release of the core software's engineering capabilities and
+authority boundaries, not certification of domain research conclusions. Core
+and ROS 2 bridge are version `0.7.0`; the optional MDE casepack is an
+experimental, candidate-only `0.1.0` extension. See
+`docs/releases/v0.7.0.md` for the exact source, checks, artifacts, upgrade
+acceptance, and non-claims. The earlier `v0.7.0-candidate.md` remains a
+historical candidate record.
+
+### Release scope
 
 - Added versioned research source importers and candidate-only OpenAI math
   catalog ingestion. The fixed Math Project 003 path pins source and dependency
@@ -49,16 +56,16 @@ release or a completed `v0.7.0` release closure.
   not constitute OS isolation from arbitrary in-process code with database
   access.
 
-### Current candidate delta (not yet on main)
+### Final fixes merged into main
 
 - Normalized integer and float tool timeouts before hashing an authorization
   invocation. Previously a bound tool could spend its Grant and then fail the
   external-dispatch digest comparison for an integer timeout.
-- Set the core and ROS 2 package metadata to the `0.7.0` release candidate.
+- Set the core and ROS 2 package metadata to `0.7.0`.
   The optional MDE casepack must pin its first compatible core release
   exactly; compatibility with the tagged `v0.6.0` core was never established.
 
-### Verification recorded so far
+### Verification evidence
 
 - The artifact-specific `rime-consumer-finite-replay-r2` handoff records an
   Ubuntu same-checker replay of three positive witnesses and seven negative
@@ -74,7 +81,7 @@ release or a completed `v0.7.0` release closure.
 - For `91c38f7`, a Python 3.12 cloud checkout reported `400 passed, 3 skipped`
   with Ruff and byte compilation passing. That report is development test
   evidence; it is not a committed test receipt or the full release checklist.
-- Before this candidate's version metadata changed, the merged authority
+- Before the version metadata changed, the merged authority
   branch reported `480 passed, 14 skipped` locally, with focused live
   PostgreSQL contract tests, Ruff, and byte compilation passing. The timeout
   normalization then passed 24 handoff tests and 11 neighboring tests (2
@@ -82,9 +89,12 @@ release or a completed `v0.7.0` release closure.
   development checks. The final candidate code commit's Python 3.12 suite,
   three clean-install wheels, frontend audit/build, PostgreSQL 17/18 contract,
   and hardened/insecure Docker checks are recorded separately in
-  `docs/releases/v0.7.0-candidate.md`; that local evidence is not a tag or
-  published release. GitHub CI for the pushed candidate remains a separate
-  acceptance check.
+  `docs/releases/v0.7.0-candidate.md`; that document remains a historical
+  candidate record. The merged `main` commit `77504ff` then passed all five
+  GitHub CI jobs (test, frontend, wheel smoke, PostgreSQL, and Docker smoke)
+  in run `38506560310`. Final artifact digests and the historical-data
+  `0020` to `0025` upgrade acceptance are recorded in the separate formal
+  release closure.
 
 ### Non-claims and release gate
 
@@ -105,11 +115,11 @@ release or a completed `v0.7.0` release closure.
   The application does not provide a complete OS sandbox or external
   trust-domain attestation. Candidate imports and diagnostic Cases cannot
   issue QualificationReceipts, CurrentUseBindings, or AuthorizationGrants.
-- Do not tag the next software release from this ledger alone. Recheck the
-  final source and dependency identities, full test/Ruff/byte-compilation
-  results, clean-install wheels, frontend audit/build, live PostgreSQL contract,
-  and hardened/insecure Docker smokes; then write a separate versioned release
-  closure and tag its exact commit.
+- Math Project 003 full replay and SandboxBroker acceptance remain unfinished
+  research/infrastructure tasks. `DisambiguationCertificate.v0` is on an
+  independent research branch and is not included in this release.
+- The annotated tag and GitHub release artifacts are governed by the separate
+  `docs/releases/v0.7.0.md` closure, not by this changelog alone.
 
 ## 0.6.0 - 2026-09-30
 
