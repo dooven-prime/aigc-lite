@@ -19,6 +19,7 @@ def test_casepack_has_its_own_distribution_and_packaged_contract() -> None:
     )
     assert core["tool"]["setuptools"]["packages"]["find"]["include"] == ["app*"]
     assert package["project"]["name"] == "aigc-lite-mde-casepack"
+    assert package["project"]["dependencies"] == ["aigc-lite==0.7.0"]
     assert package["tool"]["setuptools"]["packages"]["find"]["include"] == [
         "aigc_lite_casepacks*"
     ]

@@ -54,6 +54,11 @@ jobs:
       - run: python -m venv /tmp/aigc-lite-wheel
       - run: /tmp/aigc-lite-wheel/bin/pip install wheelhouse/*.whl
       - run: cd /tmp && /tmp/aigc-lite-wheel/bin/python "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py"
+      - run: python -m pip wheel ./casepacks/mde-v0 --no-deps --wheel-dir mde-wheelhouse
+      - run: python casepacks/mde-v0/check_wheels.py wheelhouse/*.whl mde-wheelhouse/*.whl
+      - run: python -m venv /tmp/aigc-lite-mde-wheel
+      - run: /tmp/aigc-lite-mde-wheel/bin/pip install wheelhouse/*.whl mde-wheelhouse/*.whl
+      - run: cd /tmp && /tmp/aigc-lite-mde-wheel/bin/python "$GITHUB_WORKSPACE/casepacks/mde-v0/smoke_installed_wheel.py"
       - run: python -m pip wheel ./extensions/ros2-bridge --no-deps --wheel-dir ros2-wheelhouse
       - run: python -m venv /tmp/aigc-lite-ros2-wheel
       - run: /tmp/aigc-lite-ros2-wheel/bin/pip install ros2-wheelhouse/*.whl
@@ -118,4 +123,4 @@ jobs:
             curl --fail --silent http://127.0.0.1:8013/ready && break
             sleep 1
           done
-          curl --fail --silent http://127.0.0.1:8013/ui/ | grep 'react-v0.6'
+          curl --fail --silent http://127.0.0.1:8013/ui/ | grep 'react-v0.7'

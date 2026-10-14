@@ -9,7 +9,7 @@ description = "Candidate-only Bio and Citation minimal-disambiguating-evidence r
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = ["aigc-lite>=0.6,<0.7"]
+dependencies = ["aigc-lite==0.7.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
