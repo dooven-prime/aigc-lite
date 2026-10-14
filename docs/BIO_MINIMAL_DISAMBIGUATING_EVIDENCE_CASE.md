@@ -7,6 +7,9 @@ instrument and sample-mapping observation. This candidate diagnostic adds a
 separate, signed sample-to-parent statement. The v1 projection, counterworlds,
 and case lock remain unchanged.
 
+The shared fibre criterion, counterexample condition, and limits of
+minimality are defined in [Minimal disambiguating evidence](MINIMAL_DISAMBIGUATING_EVIDENCE.md).
+
 The packaged [source contract](../casepacks/mde-v0/src/aigc_lite_casepacks/mde_v0/bio_lineage_contract_v0.json)
 is `bio.sample-lineage.mde.v0`. The caller supplies
 the **original UTF-8 JSON bytes** of both L1 records, one or more lineage-record

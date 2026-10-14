@@ -6,6 +6,9 @@ matches have disjoint **primary evidence roots**. This is narrower than
 independent studies, independent analysis, or support for a scientific claim.
 The v1 visible bundle and Case lock are unchanged.
 
+The shared fibre criterion, counterexample condition, and limits of
+minimality are defined in [Minimal disambiguating evidence](MINIMAL_DISAMBIGUATING_EVIDENCE.md).
+
 The additional information has two separately authenticated layers:
 
 1. An enrolled bibliographic identity issuer signs each exact
