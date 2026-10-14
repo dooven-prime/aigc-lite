@@ -180,8 +180,14 @@ def _dispatch_count(harness: Harness) -> int:
     return len(harness.repository.list_enforcement_dispatches(harness.context.workspace_id))
 
 
-def test_bound_tool_requires_one_grant_and_claims_one_dispatch(tmp_path) -> None:
+@pytest.mark.parametrize("timeout_seconds", (30, 30.0))
+def test_bound_tool_requires_one_grant_and_claims_one_dispatch(
+    tmp_path, timeout_seconds: float
+) -> None:
     harness = _harness(tmp_path)
+    harness.provider.spec = replace(
+        harness.provider.spec, timeout_seconds=timeout_seconds
+    )
     result = asyncio.run(_invoke(harness, {"value": 7}))
     assert result.failed is False
     assert harness.provider.calls == 0
@@ -332,6 +338,19 @@ def test_dispatch_cannot_exceed_consumed_tool_timeout(tmp_path) -> None:
     receipt = asyncio.run(harness.external.dispatch(harness.context, **request))
     assert receipt["dispatch_id"]
     assert len(harness.adapter.requests) == 1
+
+
+def test_integer_timeout_consumed_handoff_dispatches_once(tmp_path) -> None:
+    harness = _harness(tmp_path)
+    harness.provider.spec = replace(harness.provider.spec, timeout_seconds=30)
+    request = _consumed_request(harness)
+    receipt = asyncio.run(harness.external.dispatch(harness.context, **request))
+    assert receipt["dispatch_id"]
+    assert len(harness.adapter.requests) == 1
+    assert _dispatch_count(harness) == 1
+    assert harness.repository.list_authorization_grants(harness.context.workspace_id)[0][
+        "calls_used"
+    ] == 1
 
 
 def test_expired_unclaimed_handoff_cannot_dispatch(tmp_path) -> None:

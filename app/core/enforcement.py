@@ -352,7 +352,7 @@ def authorization_invocation_facts(
         "adapter_target_type": adapter_target_type,
         "adapter_target_id": adapter_target_id,
         "tool_spec_hash": tool_spec_hash,
-        "tool_timeout_seconds": tool_timeout_seconds,
+        "tool_timeout_seconds": float(tool_timeout_seconds),
         "arguments_digest": arguments_digest,
     }
 
