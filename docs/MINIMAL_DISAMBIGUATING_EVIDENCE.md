@@ -133,3 +133,9 @@ authenticated new records, and restore `UNRESOLVED` when a required binding,
 identity, coverage, or lineage component is removed. This tests the v0
 diagnostic's conditional decision rule, not global minimality or an
 independently verified laboratory or publication history.
+
+A separate [finite Bio ablation experiment](BIO_FINITE_MINIMALITY_EXPERIMENT.md)
+constructs explicit counterworld pairs after removing either of two shared-parent
+mappings. It establishes only an inclusion-minimal refutation subset in that
+fixed synthetic three-sample world domain; it does not revise the v0 diagnostic
+or establish global minimality.
