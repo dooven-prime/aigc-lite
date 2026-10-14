@@ -136,8 +136,26 @@ def redact_record_text(content: str, *, max_chars: int | None = None) -> str:
         rendered = json.dumps(
             redact(json.loads(content)), ensure_ascii=False, default=str
         )
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError:
+        # Text that begins as JSON but is malformed cannot be safely redacted
+        # by field name. Plain prose still takes the existing text-redaction
+        # path; a broken structured payload is omitted instead of echoed.
+        rendered = (
+            "[malformed structured content omitted]"
+            if content.lstrip().startswith(("{", "["))
+            else redact_text(content)
+        )
+    except TypeError:
         rendered = redact_text(content)
+    except (RecursionError, OverflowError, ValueError):
+        # A model can return deeply nested or otherwise unrecordable JSON. Do
+        # not let the audit write crash, and do not echo a structured payload
+        # whose sensitive fields could not be redacted safely.
+        rendered = "[unrecordable structured content omitted]"
+    try:
+        rendered.encode("utf-8")
+    except UnicodeEncodeError:
+        rendered = "[invalid Unicode content omitted]"
     return rendered if max_chars is None else rendered[:max_chars]
 
 
