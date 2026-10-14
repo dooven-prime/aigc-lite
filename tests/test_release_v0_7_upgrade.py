@@ -50,7 +50,7 @@ V0_6_COMMIT = "0ca02fe91dcd6e2188c91fc159eb0aab60f559f2"
 
 
 def _published_v0_6_app_root(tmp_path: Path) -> Path:
-    """Use the real release tag when available; CI shallow clones may omit tags."""
+    """Require the published release tag, never substitute current migrations."""
 
     current = Path(__file__).resolve().parents[1] / "app"
     commit = subprocess.run(
@@ -58,7 +58,7 @@ def _published_v0_6_app_root(tmp_path: Path) -> Path:
         cwd=current.parent, capture_output=True, text=True, check=False,
     )
     if commit.returncode != 0:
-        return current
+        pytest.fail("v0.6.0 tag is required for historical upgrade acceptance")
     assert commit.stdout.strip() == V0_6_COMMIT
     archive = subprocess.run(
         ["git", "archive", "--format=tar", "v0.6.0", "app/alembic", "app/alembic.ini"],
