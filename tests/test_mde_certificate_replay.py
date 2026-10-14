@@ -94,6 +94,10 @@ def test_lock_pins_replay_code_and_version_without_pretending_to_authenticate_it
     assert _sha256(source.read_bytes()) == LOCK["certificate_replay_source_sha256"]
     assert LOCK["certificate_contract_sha256"] == CERTIFICATE_CONTRACT_SHA256
     assert LOCK["casepack_research_version"] == "0.2.0.dev0"
+    assert LOCK["casepack_windows_wheel_sha256"] != LOCK["casepack_ubuntu_wheel_sha256"]
+    assert LOCK["replayed_dependency_versions"] == {
+        "cryptography": "50.0.2", "pypdf": "6.20.1",
+    }
     assert "not independently authenticate" in LOCK["trust_boundary"]
 
 

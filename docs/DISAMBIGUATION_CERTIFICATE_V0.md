@@ -70,7 +70,16 @@ is the unpublished `0.2.0.dev0` research candidate.
 
 From a clean environment outside the source checkout, install the pinned
 `aigc-lite` `0.7.0` wheel and a casepack wheel built from the exact research
-commit. Verify their SHA-256 before installation. For each input, invoke the
+commit. Verify the core wheel SHA-256 before installation. The research
+casepack wheel is not yet bitwise reproducible across Windows and Ubuntu:
+the two observed whole-wheel digests are separately recorded in the lock.
+For the checked builds, all nine code/contract members plus `WHEEL` and
+`top_level.txt` had identical extracted content, while `METADATA` differed
+only by CRLF/LF, `RECORD` reflected that difference, and ZIP member OS/mode
+attributes differed. Check the appropriate host-specific wheel digest and
+installed code/contract bytes; do not infer whole-wheel identity from the
+source commit alone. The replay used `cryptography 50.0.2` and `pypdf 6.20.1`
+on Python 3.12.6 (Windows) and 3.12.3 (Ubuntu). For each input, invoke the
 module with **both expected digests supplied outside the input file**:
 
 ```text

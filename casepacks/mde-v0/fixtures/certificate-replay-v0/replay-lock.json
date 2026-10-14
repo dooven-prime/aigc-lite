@@ -3,8 +3,13 @@
   "core_tag_target": "834ebff7ac17f7825d8afab0c7e277f9185bd853",
   "core_wheel_sha256": "ccd720cc198f763aa1a9cc57c050735b5ea756d87eb65875686ff4e0d03c7f8c",
   "casepack_research_version": "0.2.0.dev0",
-  "casepack_development_wheel_sha256": "f7611eb142dc1c39cdefc7a5636df287f99bc053f2b9406d5d474461509f6d6d",
+  "casepack_windows_wheel_sha256": "f7611eb142dc1c39cdefc7a5636df287f99bc053f2b9406d5d474461509f6d6d",
+  "casepack_ubuntu_wheel_sha256": "61771458e13f952eb9483998ac4e407d10c12382d64367a06f66a4efd3c8bf63",
   "wheel_source_date_epoch": 1791950000,
+  "replayed_dependency_versions": {
+    "cryptography": "50.0.2",
+    "pypdf": "6.20.1"
+  },
   "certificate_replay_source_sha256": "6cf404b88905b8c8a68af5756f94c1d911c1986f10d0b598e5325f3106dcfc2f",
   "certificate_contract_sha256": "b1b5a13870a33ca6a9fa71e117f9307535b02d416b133c8ccd5f3f9a6a4388f3",
   "cases": [
