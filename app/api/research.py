@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..auth import current_admin_user
+from ..auth import current_admin_user, request_authority
 from ..core.contracts import RequestContext
 from ..core.errors import InvalidEvidenceError
 from ..core.invalidation import (
@@ -214,12 +213,6 @@ def create_research_router(
             http_request, Tenant(user["tenant_id"], user["tenant_id"])
         )
 
-    def invalidation_context(http_request: Request, user: dict) -> RequestContext:
-        context = admin_context(http_request, user)
-        return replace(
-            context, scopes=context.scopes | {"qualification:invalidate"}
-        )
-
     @router.get("/api/evidence/protocols")
     async def evidence_protocols(
         http_request: Request,
@@ -413,8 +406,9 @@ def create_research_router(
         user: dict = Depends(current_admin_user),
     ) -> dict:
         result = invalidation_service.verify_notice(
-            invalidation_context(http_request, user),
+            admin_context(http_request, user),
             NoticeVerificationDraft(source_commit=payload.source_commit),
+            authority=request_authority(http_request, user),
         )
         get_repository().write_audit(
             user["tenant_id"],
@@ -432,7 +426,7 @@ def create_research_router(
         user: dict = Depends(current_admin_user),
     ) -> dict:
         result = invalidation_service.decide(
-            invalidation_context(http_request, user),
+            admin_context(http_request, user),
             InvalidationDecisionDraft(
                 notice_verification_id=payload.notice_verification_id,
                 target_claim_revision_id=payload.target_claim_revision_id,
@@ -444,6 +438,7 @@ def create_research_router(
                 target_receipt_id=payload.target_receipt_id,
                 target_attempt_id=payload.target_attempt_id,
             ),
+            authority=request_authority(http_request, user),
         )
         get_repository().write_audit(
             user["tenant_id"],
@@ -512,6 +507,7 @@ def create_research_router(
                 admission_policy_id=payload.admission_policy_id,
                 rationale=payload.rationale,
             ),
+            authority=request_authority(http_request, user),
         )
         admission = result["knowledge_admission_receipt"]
         get_repository().write_audit(
@@ -563,6 +559,7 @@ def create_research_router(
                 budget=payload.budget,
                 max_calls=payload.max_calls,
             ),
+            authority=request_authority(http_request, user),
         )
         get_repository().write_audit(
             user["tenant_id"],
@@ -802,6 +799,7 @@ def create_research_router(
             claim_id,
             payload.target_stage,
             apply_transition=True,
+            authority=request_authority(http_request, user),
         )
         evaluation = result["evaluation"]
         get_repository().write_audit(

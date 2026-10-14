@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..core.contracts import RequestContext, ToolProviderResult, ToolSpec
 from ..core.enforcement import (
@@ -27,6 +27,10 @@ class EnforcerAdapter(Protocol):
 
 class ExternalToolExecutor(Protocol):
     """Optional Tool Catalog projection of deployer-owned enforcement bindings."""
+
+    def prepare_if_bound(
+        self, context: RequestContext, run_id: str | None, spec: ToolSpec
+    ) -> tuple[dict[str, Any], ToolProviderResult | None] | None: ...
 
     async def execute_if_bound(
         self,

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from ..core.authority import AuthorityContext
+from ..core.contracts import RequestContext
+
 
 class EnforcementRepository(Protocol):
     def create_policy_proposal(
@@ -24,7 +27,13 @@ class EnforcementRepository(Protocol):
     ) -> list[dict]: ...
 
     def create_enforcement_dispatch(
-        self, tenant_id: str, values: dict[str, Any]
+        self,
+        tenant_id: str,
+        values: dict[str, Any],
+        *,
+        context: RequestContext | None = None,
+        authority: AuthorityContext | None = None,
+        authorization_invocation: dict[str, Any] | None = None,
     ) -> dict: ...
 
     def get_enforcement_dispatch(

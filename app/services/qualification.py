@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from ..core.artifacts import ArtifactDraft, ArtifactKind
+from ..core.authority import AuthorityContext
 from ..core.contracts import RequestContext
 from ..core.errors import InvalidEvidenceError, ResourceNotFoundError
 from ..core.evidence import ExecutionReceiptDraft, ProtocolDraft, ProtocolStatus
@@ -47,6 +48,7 @@ from ..profiles.propositional_entailment import PropositionalABVerifier
 from ..redaction import redact, redact_record_text
 from ..repository import Repository
 from .artifacts import ArtifactService
+from .authority import require_admin_authority
 from .evidence import EvidenceService
 
 RepositoryProvider = Callable[[], Repository]
@@ -1008,17 +1010,16 @@ class QualificationService:
         self,
         context: RequestContext,
         draft: KnowledgeAdmissionDraft,
+        *,
+        authority: AuthorityContext | None = None,
     ) -> dict[str, Any]:
         """Explicitly select a qualified historical receipt for knowledge use."""
 
-        if not context.principal_id:
-            raise InvalidEvidenceError(
-                "approver", "Knowledge admission requires an authenticated approver"
-            )
+        repository = self._repository_provider()
+        require_admin_authority(repository, context, authority, "qualification:admit")
         if draft.admission_policy_id != DEFAULT_KNOWLEDGE_ADMISSION_POLICY.policy_id:
             raise ResourceNotFoundError("knowledge_admission_policy", draft.admission_policy_id)
         rationale = self._text("rationale", draft.rationale, 4_000)
-        repository = self._repository_provider()
         receipt = repository.get_qualification_receipt(
             context.workspace_id, draft.qualification_receipt_id
         )
@@ -1065,6 +1066,8 @@ class QualificationService:
                 },
                 "receipt_hash": admission_receipt.content_hash,
             },
+            context=context,
+            authority=authority,
         )
         return {
             **result,
@@ -1110,8 +1113,11 @@ class QualificationService:
         context: RequestContext,
         actor_id: str,
         draft: AuthorizationGrantDraft,
+        *,
+        authority: AuthorityContext | None = None,
     ) -> dict:
         repository = self._repository_provider()
+        require_admin_authority(repository, context, authority, "authorization:grant")
         receipt = repository.get_qualification_receipt(
             context.workspace_id, draft.qualification_receipt_id
         )
@@ -1173,6 +1179,8 @@ class QualificationService:
                 "grant_receipt": canonical_hash(grant_payload),
                 "created_by": context.principal_id,
             },
+            context=context,
+            authority=authority,
         )
 
     def qualified_search(

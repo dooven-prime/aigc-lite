@@ -26,6 +26,7 @@ class ErrorCode(StrEnum):
     TOOL_TIMEOUT = "tool_timeout"
     TOOL_RESULT_TOO_LARGE = "tool_result_too_large"
     CHAT_CAPABILITY_NOT_ALLOWED = "chat_capability_not_allowed"
+    AUTHORITY_DENIED = "authority_denied"
     CREDENTIAL_NOT_CONFIGURED = "credential_not_configured"
     CREDENTIAL_KEY_NOT_CONFIGURED = "credential_key_not_configured"
     CREDENTIAL_DECRYPTION_FAILED = "credential_decryption_failed"
@@ -74,6 +75,18 @@ class ApplicationError(RuntimeError):
     def __init__(self, message: str, *, metadata: dict[str, Any] | None = None):
         super().__init__(message)
         self.metadata = metadata or {}
+
+
+class AuthorityDeniedError(ApplicationError):
+    """The caller lacks a current server-authenticated application authority."""
+
+    code = ErrorCode.AUTHORITY_DENIED
+
+    def __init__(self, required_scope: str):
+        super().__init__(
+            "Authenticated workspace administrator authority is required",
+            metadata={"required_scope": required_scope},
+        )
 
 
 class ResourceNotFoundError(ApplicationError):

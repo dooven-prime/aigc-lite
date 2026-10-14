@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aigc-lite-mde-casepack"
+version = "0.1.0"
+description = "Candidate-only Bio and Citation minimal-disambiguating-evidence research cases"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["aigc-lite>=0.6,<0.7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["aigc_lite_casepacks*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"aigc_lite_casepacks.mde_v0" = ["bio_lineage_contract_v0.json"]

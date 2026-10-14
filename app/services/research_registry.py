@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 from ..adapters.research_import.frontier import FrontierRegistryAdapter
 from ..core.artifacts import ArtifactDraft, ArtifactKind
+from ..core.authority import AuthorityContext
 from ..core.contracts import RequestContext
 from ..core.errors import InvalidEvidenceError, ResourceNotFoundError
 from ..core.evidence import (
@@ -43,6 +44,7 @@ from ..profiles.frontier import IMPORTER_VERSION, PROFILE_ID, PROMOTION_POLICY_V
 from ..redaction import redact, redact_record_text, redact_text
 from ..repository import Repository
 from .artifacts import ArtifactService
+from .authority import require_admin_authority
 from .evidence import EvidenceService
 from .qualification import QualificationService
 
@@ -626,14 +628,17 @@ class ResearchRegistryService:
         *,
         required_attempt_id: str | None = None,
         apply_transition: bool = False,
+        authority: AuthorityContext | None = None,
     ) -> dict:
         """Evaluate a workflow gate, applying it only with explicit authority.
 
         The safe service default is proposal-only. Agent/plan execution may
-        request an evaluation, but only an explicit control-plane caller may
-        set ``apply_transition=True``.
+        request an evaluation, but applying the transition also requires a
+        current, session-bound administrator authority context.
         """
         repository = self._repository_provider()
+        if apply_transition:
+            require_admin_authority(repository, context, authority, "workflow:promote")
         claim = repository.get_research_claim(context.workspace_id, claim_id)
         if claim is None:
             raise ResourceNotFoundError("research_claim", claim_id)
@@ -759,6 +764,8 @@ class ResearchRegistryService:
                     apply_transition
                     and decision is PromotionGateDecision.PASSED
                 ),
+                context=context if apply_transition else None,
+                authority=authority if apply_transition else None,
             )
         except KeyError as exc:
             raise InvalidEvidenceError(

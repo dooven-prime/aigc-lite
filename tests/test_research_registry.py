@@ -3,12 +3,13 @@ import json
 import zipfile
 
 import pytest
+from authority_support import provision_admin
 from fastapi.testclient import TestClient
 
 from app import database, main
 from app.core.artifacts import ArtifactDraft, ArtifactKind
 from app.core.contracts import RequestContext
-from app.core.errors import InvalidEvidenceError, ResourceNotFoundError
+from app.core.errors import AuthorityDeniedError, InvalidEvidenceError, ResourceNotFoundError
 from app.core.qualification import MathTheoremCandidateDraft, ValidationModality
 from app.core.research import (
     ClaimPromotionStage,
@@ -252,6 +253,7 @@ def test_claim_relations_verification_and_fail_closed_promotion(tmp_path) -> Non
         workspace_id="workspace-a",
         principal_id="admin-a",
     )
+    context, authority = provision_admin(repository, context)
     imported = service.import_frontier(
         context,
         source_name="Promotion fixture",
@@ -297,11 +299,20 @@ def test_claim_relations_verification_and_fail_closed_promotion(tmp_path) -> Non
         ),
     )
     assert attempt["receipt"]["artifact_ids"] == [artifact["id"]]
+    with pytest.raises(AuthorityDeniedError):
+        service.evaluate_promotion(
+            context,
+            closed["id"],
+            ClaimPromotionStage.EVIDENCE_READY,
+            apply_transition=True,
+        )
+    assert service.get_claim(context, closed["id"])["promotion_stage"] == "registered"
     promoted = service.evaluate_promotion(
         context,
         closed["id"],
         ClaimPromotionStage.EVIDENCE_READY,
         apply_transition=True,
+        authority=authority,
     )
     assert promoted["evaluation"]["decision"] == "passed"
     assert promoted["transition_applied"] is True
@@ -552,8 +563,13 @@ def test_research_registry_http_import_is_workspace_scoped(tmp_path, monkeypatch
                 json={"target_stage": "evidence_ready"},
             )
             assert related.status_code == 201
-            assert gated.status_code == 200
-            assert gated.json()["evaluation"]["decision"] == "blocked"
+            # The synthetic dependency override is not an authenticated
+            # administrator session and cannot request an applied transition.
+            assert gated.status_code == 403
+            assert gated.json()["error"]["code"] == "authority_denied"
+            assert main.research_registry_service.get_claim(
+                RequestContext("promotion-after-denial", "workspace-a"), source["id"]
+            )["promotion_stage"] == "registered"
             withdrawn = client.post(
                 f"/api/research-registry/claims/{source['id']}/relations/"
                 f"{related.json()['id']}/withdraw",

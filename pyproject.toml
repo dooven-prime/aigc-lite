@@ -48,7 +48,7 @@ app = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".", "extensions/ros2-bridge/src"]
+pythonpath = [".", "extensions/ros2-bridge/src", "casepacks/mde-v0/src"]
 
 [tool.ruff]
 line-length = 100

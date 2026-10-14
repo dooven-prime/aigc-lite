@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from .contracts import ToolSpec
 from .qualification import canonical_hash
 
 EXECUTION_POLICY_CONTRACT_VERSION = "execution.policy.v1"
@@ -274,6 +275,86 @@ def canonical_enforcement_json(value: object) -> bytes:
 
 def enforcement_payload_hash(value: object) -> str:
     return hashlib.sha256(canonical_enforcement_json(value)).hexdigest()
+
+
+def tool_spec_value(spec: ToolSpec) -> dict[str, Any]:
+    """The exact host-visible tool contract committed to an external request."""
+
+    return {
+        "name": spec.name,
+        "native_name": spec.native_name,
+        "description": spec.description,
+        "input_schema": spec.input_schema,
+        "source": spec.source.value,
+        "provider_id": spec.provider_id,
+        "workspace_id": spec.workspace_id,
+        "risk": spec.risk.value,
+        "required_scopes": sorted(spec.required_scopes),
+        "timeout_seconds": spec.timeout_seconds,
+        "execution_mode": spec.execution_mode.value if spec.execution_mode else None,
+        "hints": {
+            "readOnlyHint": spec.hints.read_only,
+            "destructiveHint": spec.hints.destructive,
+            "idempotentHint": spec.hints.idempotent,
+            "openWorldHint": spec.hints.open_world,
+        },
+        "extensions": spec.extensions,
+    }
+
+
+def authorization_invocation_digest(facts: dict[str, Any]) -> str:
+    """Commit one grant use to one run, call, binding, and frozen policy."""
+
+    return enforcement_payload_hash(
+        {"contract_version": "authorization.invocation.v1", **facts}
+    )
+
+
+def authorization_invocation_facts(
+    *,
+    workspace_id: str,
+    actor_id: str,
+    request_id: str,
+    run_id: str,
+    action: str,
+    target: str,
+    provider_id: str,
+    native_name: str,
+    public_name: str,
+    source: str,
+    binding_id: str,
+    binding_hash: str,
+    adapter_id: str,
+    proposal_id: str,
+    policy_hash: str,
+    adapter_target_type: str,
+    adapter_target_id: str,
+    tool_spec_hash: str,
+    tool_timeout_seconds: float,
+    arguments_digest: str,
+) -> dict[str, Any]:
+    return {
+        "workspace_id": workspace_id,
+        "actor_id": actor_id,
+        "request_id": request_id,
+        "run_id": run_id,
+        "action": action,
+        "target": target,
+        "provider_id": provider_id,
+        "native_name": native_name,
+        "public_name": public_name,
+        "source": source,
+        "binding_id": binding_id,
+        "binding_hash": binding_hash,
+        "adapter_id": adapter_id,
+        "proposal_id": proposal_id,
+        "policy_hash": policy_hash,
+        "adapter_target_type": adapter_target_type,
+        "adapter_target_id": adapter_target_id,
+        "tool_spec_hash": tool_spec_hash,
+        "tool_timeout_seconds": tool_timeout_seconds,
+        "arguments_digest": arguments_digest,
+    }
 
 
 @dataclass(frozen=True, slots=True)

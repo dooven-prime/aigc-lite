@@ -49,6 +49,7 @@ from .core.errors import (
     AgentLimitError,
     AgentWallTimeLimitError,
     ApplicationError,
+    AuthorityDeniedError,
     ChatCapabilityDeniedError,
     EnforcementDispatchIndeterminateError,
     EnforcerNotConfiguredError,
@@ -399,7 +400,7 @@ async def application_error_handler(_request: Request, exc: ApplicationError) ->
         exc, (ResourceConflictError, RunNotActiveError, ScheduleNotActiveError)
     ):
         status_code = 409
-    elif isinstance(exc, ChatCapabilityDeniedError):
+    elif isinstance(exc, (AuthorityDeniedError, ChatCapabilityDeniedError)):
         status_code = 403
     elif isinstance(
         exc,

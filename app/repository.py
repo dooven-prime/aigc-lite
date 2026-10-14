@@ -12,10 +12,13 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .core.authority import ADMIN_AUTHORITY_SCOPES, AuthorityContext
+from .core.contracts import RequestContext
 from .core.credentials import (
     encrypted_credential_id,
     validate_workspace_credential_map,
 )
+from .core.errors import AuthorityDeniedError
 from .ports.enforcement_repository import EnforcementRepository
 from .ports.import_repository import ImportRepository
 from .ports.invalidation_repository import InvalidationRepository
@@ -57,6 +60,20 @@ from .repositories.review import (
 
 if TYPE_CHECKING:
     from .ports.search import SearchBackend
+
+
+def _admin_authority_claims_match(
+    context: RequestContext, authority: AuthorityContext | None, scope: str
+) -> bool:
+    return bool(
+        scope in ADMIN_AUTHORITY_SCOPES
+        and authority is not None
+        and scope in authority.scopes
+        and authority.session_hash
+        and context.principal_id
+        and authority.principal_id == context.principal_id
+        and authority.workspace_id == context.workspace_id
+    )
 
 
 class Repository(
@@ -432,6 +449,36 @@ class SQLiteRepository(
         connection.row_factory = sqlite3.Row
         return connection
 
+    @staticmethod
+    def _assert_admin_write_authority(
+        db: sqlite3.Connection,
+        context: RequestContext,
+        authority: AuthorityContext,
+        scope: str,
+    ) -> None:
+        """Check authority inside a BEGIN IMMEDIATE protected write transaction.
+
+        The caller must begin the transaction before this check. SQLite's writer
+        lock orders this read and its subsequent write against session deletion.
+        """
+
+        if not _admin_authority_claims_match(context, authority, scope):
+            raise AuthorityDeniedError(scope)
+        active = db.execute(
+            "SELECT 1 FROM auth_sessions s JOIN users u ON u.id = s.user_id "
+            "AND u.tenant_id = s.tenant_id WHERE s.token_hash = ? "
+            "AND s.user_id = ? AND s.tenant_id = ? AND s.expires_at > ? "
+            "AND u.role = 'admin' AND u.is_active = 1",
+            (
+                authority.session_hash,
+                context.principal_id,
+                context.workspace_id,
+                utc_now(),
+            ),
+        ).fetchone()
+        if active is None:
+            raise AuthorityDeniedError(scope)
+
     def init(self) -> None:
         from sqlalchemy import create_engine
         from sqlalchemy.engine import URL
@@ -646,6 +693,7 @@ class SQLiteRepository(
 
     def revoke_auth_session(self, token_hash: str, user_id: str) -> bool:
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             result = db.execute(
                 "DELETE FROM auth_sessions WHERE token_hash = ? AND user_id = ?",
                 (token_hash, user_id),
@@ -1782,6 +1830,37 @@ class PostgresRepository(
         with self.engine.connect() as connection:
             rows = connection.execute(text(statement), values or {}).mappings().all()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _assert_admin_write_authority(
+        connection: Any,
+        context: RequestContext,
+        authority: AuthorityContext,
+        scope: str,
+    ) -> None:
+        """Lock the session and administrator until the protected write commits."""
+
+        from sqlalchemy import text
+
+        if not _admin_authority_claims_match(context, authority, scope):
+            raise AuthorityDeniedError(scope)
+        active = connection.execute(
+            text(
+                "SELECT s.token_hash FROM auth_sessions s JOIN users u "
+                "ON u.id = s.user_id AND u.tenant_id = s.tenant_id "
+                "WHERE s.token_hash = :token_hash AND s.user_id = :user_id "
+                "AND s.tenant_id = :tenant_id AND s.expires_at > :now "
+                "AND u.role = 'admin' AND u.is_active = 1 FOR UPDATE OF s, u"
+            ),
+            {
+                "token_hash": authority.session_hash,
+                "user_id": context.principal_id,
+                "tenant_id": context.workspace_id,
+                "now": utc_now(),
+            },
+        ).first()
+        if active is None:
+            raise AuthorityDeniedError(scope)
 
     def create_session(self, tenant_id: str, title: str = "New conversation") -> dict:
         value = {

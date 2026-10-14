@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import Depends, Header, HTTPException, Request
 
 from .config import settings
+from .core.authority import ADMIN_AUTHORITY_SCOPES, AuthorityContext
 from .database import get_repository
 from .tenancy import Tenant, _role_scopes
 
@@ -67,6 +68,9 @@ async def current_user(
     request.state.user_id = user["id"]
     request.state.tenant_id = user["tenant_id"]
     request.state.scopes = _role_scopes(user["role"])
+    request.state.authority_scopes = (
+        ADMIN_AUTHORITY_SCOPES if user["role"] == "admin" else frozenset()
+    )
     return user
 
 
@@ -78,6 +82,28 @@ async def current_admin_user(user: dict = Depends(current_user)) -> dict:
 
 def user_tenant(user: dict) -> Tenant:
     return Tenant(user["tenant_id"], user["tenant_id"])
+
+
+def request_authority(request: Request, user: dict) -> AuthorityContext | None:
+    """Project authenticated administrator session state for final mutations.
+
+    The service rechecks the session, role and tenant; this function does not
+    grant authority merely because a route supplied a user dictionary.
+    """
+
+    session_hash = getattr(request.state, "auth_token_hash", None)
+    if (
+        not session_hash
+        or getattr(request.state, "user_id", None) != user.get("id")
+        or getattr(request.state, "tenant_id", None) != user.get("tenant_id")
+    ):
+        return None
+    return AuthorityContext(
+        workspace_id=user["tenant_id"],
+        principal_id=user["id"],
+        session_hash=session_hash,
+        scopes=getattr(request.state, "authority_scopes", frozenset()),
+    )
 
 
 def ensure_bootstrap_admin() -> None:

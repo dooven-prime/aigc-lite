@@ -179,6 +179,7 @@ The concrete transition owners and choke points are enumerated in
 |---|---|
 | Immutable Claim revisions, evidence closure, Qualification Gate and Receipts | Implemented at the application and database layer. |
 | Candidate versus qualified retrieval | Implemented as distinct search paths; imports remain candidate-only. |
+| Knowledge admission, grant issuance, invalidation, workflow-stage application, and enforcer reconciliation authority | Separate action-scoped administrator authority context, rechecked against the active session, user role, principal, and workspace at the application service boundary. Not inherited by Chat or Tool scopes. |
 | Chat capability selection and Tool Catalog scopes | Implemented and server-owned, but still application-layer enforcement. |
 | Narrow AuthorizationGrant consumption | Implemented for delegated and physical dispatch, including invocation restrictions and currentness checks. |
 | PolicyProposal and server-derived PermissionDiff | Implemented as an immutable request ledger. Proposals do not approve or apply themselves. |
@@ -191,6 +192,20 @@ The concrete transition owners and choke points are enumerated in
 | Independent quarantine/watchdog trust domain | Not implemented. |
 | Hardware attestation or safety-rated physical interlock | Not implemented and outside the core project's authority. |
 | Controlled failure reproduction and source patching | Security contract frozen in [PATCH_RUNNER.md](PATCH_RUNNER.md); no patch runner or source-mutation API is implemented. |
+
+The service recheck does not make Python code in the same process an
+independent security domain. Code with arbitrary repository or session-table
+access can bypass application methods. Untrusted source execution therefore
+still requires the separate OS/external-enforcer boundary described above.
+For the privileged knowledge, grant, invalidation, workflow, and reconciliation
+writes, the final session/role recheck and protected write share one database
+transaction. A revocation that commits first denies the write; an already
+authorized committed write is not retroactively erased. A bound external tool
+dispatch atomically claims one persisted, invocation-specific consumed Grant;
+replay and parameter or policy substitution cannot spend that handoff again.
+This does not make the repository an untrusted-code sandbox. A plugin allowed
+to call arbitrary grant-consumption or database ports can forge its own
+application-layer facts; those ports remain restricted to trusted host code.
 
 ### Collaborative research boundary
 

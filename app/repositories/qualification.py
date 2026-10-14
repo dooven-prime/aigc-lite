@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from ..core.authority import AuthorityContext
+from ..core.authorization import grant_allows, invocation_view
+from ..core.contracts import RequestContext
+from ..core.enforcement import authorization_invocation_digest, enforcement_payload_hash
+from ..core.errors import AuthorityDeniedError
 from .common import authorization_not_expired as _authorization_not_expired
 from .common import decode_list as _decode_list
 from .common import decode_metadata as _decode_metadata
@@ -44,6 +50,88 @@ def _decode_authorization_grant(row: Any) -> dict[str, Any]:
     value["max_calls"] = int(value.get("max_calls") or 0)
     value["calls_used"] = int(value.get("calls_used") or 0)
     return value
+
+
+_INVOCATION_FIELDS = (
+    "actor_id", "request_id", "run_id", "action", "target", "provider_id",
+    "native_name", "public_name", "source", "binding_id", "binding_hash",
+    "adapter_id", "proposal_id", "policy_hash", "adapter_target_type",
+    "adapter_target_id", "tool_spec_hash", "arguments_digest", "invocation_digest",
+    "tool_timeout_seconds",
+)
+
+
+def _invocation_row(
+    tenant_id: str, grant: dict[str, Any], invocation: dict[str, Any], used_at: str
+) -> dict[str, Any]:
+    consumed = datetime.fromisoformat(used_at.replace("Z", "+00:00")).astimezone(UTC)
+    claim_expiry = consumed + timedelta(seconds=60)
+    if grant.get("expires_at"):
+        grant_expiry = datetime.fromisoformat(
+            str(grant["expires_at"]).replace("Z", "+00:00")
+        ).astimezone(UTC)
+        claim_expiry = min(claim_expiry, grant_expiry)
+    return {
+        "id": invocation["id"],
+        "tenant_id": tenant_id,
+        "grant_id": grant["id"],
+        "grant_call_number": int(grant["calls_used"]) + 1,
+        **{field: invocation[field] for field in _INVOCATION_FIELDS},
+        "consumed_at": used_at,
+        "claim_expires_at": claim_expiry.isoformat(),
+    }
+
+
+def _invocation_matches_grant(
+    tenant_id: str,
+    actor_id: str,
+    action: str,
+    target: str,
+    grant: dict[str, Any],
+    invocation: dict[str, Any],
+) -> bool:
+    try:
+        spec = invocation["spec_snapshot"]
+        arguments = invocation["arguments"]
+        if not isinstance(spec, dict) or not isinstance(arguments, dict):
+            return False
+        extensions = spec.get("extensions")
+        extensions = extensions if isinstance(extensions, dict) else {}
+        declared = extensions.get("authority_requirement")
+        declared = declared if isinstance(declared, dict) else {}
+        provider_target = f"provider:{invocation['provider_id']}"
+        expected_target = provider_target
+        suffix = declared.get("target")
+        if isinstance(suffix, str) and suffix.strip():
+            candidate = f"{provider_target}/{suffix.strip()}"
+            if len(candidate) <= 1_000:
+                expected_target = candidate
+        if any((
+            invocation["workspace_id"] != tenant_id,
+            invocation["actor_id"] != actor_id,
+            invocation["action"] != action,
+            invocation["target"] != target,
+            invocation["native_name"] != action,
+            target != expected_target,
+            spec["name"] != invocation["public_name"],
+            spec["native_name"] != invocation["native_name"],
+            spec["provider_id"] != invocation["provider_id"],
+            spec["source"] != invocation["source"],
+            spec.get("workspace_id") not in {None, tenant_id},
+            enforcement_payload_hash(spec) != invocation["tool_spec_hash"],
+            spec["timeout_seconds"] != invocation["tool_timeout_seconds"],
+            enforcement_payload_hash(arguments) != invocation["arguments_digest"],
+            authorization_invocation_digest({
+                field: invocation[field]
+                for field in ("workspace_id", *_INVOCATION_FIELDS)
+                if field != "invocation_digest"
+            }) != invocation["invocation_digest"],
+        )):
+            return False
+        decoded = _decode_authorization_grant(grant)
+        return grant_allows(decoded, invocation_view(tenant_id, spec, arguments))
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _decode_knowledge_admission_receipt(row: Any) -> dict[str, Any]:
@@ -242,7 +330,10 @@ class SQLiteQualificationRepositoryMixin:
             ).fetchone()
         return dict(row)
 
-    def admit_knowledge(self, tenant_id: str, values: dict[str, Any]) -> dict:
+    def admit_knowledge(
+        self, tenant_id: str, values: dict[str, Any], *,
+        context: RequestContext, authority: AuthorityContext,
+    ) -> dict:
         """Atomically append an admission receipt and select its qualification."""
 
         now = utc_now()
@@ -281,6 +372,11 @@ class SQLiteQualificationRepositoryMixin:
         }
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if tenant_id != context.workspace_id:
+                raise AuthorityDeniedError("qualification:admit")
+            self._assert_admin_write_authority(
+                db, context, authority, "qualification:admit"
+            )
             db.execute(
                 "INSERT INTO knowledge_admission_receipts(id, tenant_id, "
                 "contract_version, qualification_receipt_id, qualification_receipt_hash, claim_revision_id, "
@@ -363,7 +459,10 @@ class SQLiteQualificationRepositoryMixin:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def create_authorization_grant(self, tenant_id: str, values: dict[str, Any]) -> dict:
+    def create_authorization_grant(
+        self, tenant_id: str, values: dict[str, Any], *,
+        context: RequestContext, authority: AuthorityContext,
+    ) -> dict:
         value = {
             "id": values.get("id") or str(uuid.uuid4()),
             "tenant_id": tenant_id,
@@ -384,6 +483,12 @@ class SQLiteQualificationRepositoryMixin:
             "created_at": utc_now(),
         }
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if tenant_id != context.workspace_id:
+                raise AuthorityDeniedError("authorization:grant")
+            self._assert_admin_write_authority(
+                db, context, authority, "authorization:grant"
+            )
             if (
                 db.execute(
                     "SELECT 1 FROM qualification_receipts WHERE tenant_id = ? AND id = ?",
@@ -426,11 +531,17 @@ class SQLiteQualificationRepositoryMixin:
         used_at: str,
         *,
         grant_id: str | None = None,
+        invocation: dict[str, Any] | None = None,
     ) -> dict | None:
         """Atomically consume one grant backed by the exact current receipt."""
 
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if invocation is not None and db.execute(
+                "SELECT 1 FROM agent_runs WHERE tenant_id = ? AND id = ?",
+                (tenant_id, invocation["run_id"]),
+            ).fetchone() is None:
+                return None
             grant_filter = " AND g.id = ?" if grant_id is not None else ""
             rows = db.execute(
                 "SELECT g.* FROM authorization_grants g "
@@ -451,6 +562,10 @@ class SQLiteQualificationRepositoryMixin:
             ).fetchall()
             for row in rows:
                 grant = dict(row)
+                if invocation is not None and not _invocation_matches_grant(
+                    tenant_id, actor_id, action, target, grant, invocation
+                ):
+                    continue
                 if not _authorization_not_expired(grant.get("expires_at"), used_at):
                     db.execute(
                         "UPDATE authorization_grants SET state = 'expired' "
@@ -465,6 +580,13 @@ class SQLiteQualificationRepositoryMixin:
                     (tenant_id, grant["id"], grant["calls_used"]),
                 )
                 if updated.rowcount == 1:
+                    if invocation is not None:
+                        use = _invocation_row(tenant_id, grant, invocation, used_at)
+                        db.execute(
+                            "INSERT INTO authorization_invocations(" + ", ".join(use) + ") "
+                            "VALUES (" + ", ".join("?" for _ in use) + ")",
+                            tuple(use.values()),
+                        )
                     grant["calls_used"] = int(grant["calls_used"]) + 1
                     return _decode_authorization_grant(grant)
         return None
@@ -657,7 +779,10 @@ class PostgresQualificationRepositoryMixin:
             or value
         )
 
-    def admit_knowledge(self, tenant_id: str, values: dict[str, Any]) -> dict:
+    def admit_knowledge(
+        self, tenant_id: str, values: dict[str, Any], *,
+        context: RequestContext, authority: AuthorityContext,
+    ) -> dict:
         """Atomically append an admission receipt and select its qualification."""
 
         from sqlalchemy import text
@@ -697,6 +822,11 @@ class PostgresQualificationRepositoryMixin:
             "updated_at": now,
         }
         with self.engine.begin() as connection:
+            if tenant_id != context.workspace_id:
+                raise AuthorityDeniedError("qualification:admit")
+            self._assert_admin_write_authority(
+                connection, context, authority, "qualification:admit"
+            )
             connection.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"{tenant_id}:{admission['claim_revision_id']}"},
@@ -802,7 +932,10 @@ class PostgresQualificationRepositoryMixin:
             },
         )
 
-    def create_authorization_grant(self, tenant_id: str, values: dict[str, Any]) -> dict:
+    def create_authorization_grant(
+        self, tenant_id: str, values: dict[str, Any], *,
+        context: RequestContext, authority: AuthorityContext,
+    ) -> dict:
         value = {
             "id": values.get("id") or str(uuid.uuid4()),
             "tenant_id": tenant_id,
@@ -822,17 +955,34 @@ class PostgresQualificationRepositoryMixin:
             "created_by": values.get("created_by"),
             "created_at": utc_now(),
         }
-        if not self.get_qualification_receipt(tenant_id, value["qualification_receipt_id"]):
-            raise KeyError(value["qualification_receipt_id"])
-        self._execute(
-            "INSERT INTO authorization_grants(id, tenant_id, qualification_receipt_id, "
-            "actor_id, action, target, scope, conditions, expires_at, budget, max_calls, "
-            "calls_used, policy_version, state, grant_receipt, created_by, created_at) "
-            "VALUES (:id, :tenant_id, :qualification_receipt_id, :actor_id, :action, "
-            ":target, :scope, :conditions, :expires_at, :budget, :max_calls, :calls_used, "
-            ":policy_version, :state, :grant_receipt, :created_by, :created_at)",
-            value,
-        )
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            if tenant_id != context.workspace_id:
+                raise AuthorityDeniedError("authorization:grant")
+            self._assert_admin_write_authority(
+                connection, context, authority, "authorization:grant"
+            )
+            receipt = connection.execute(
+                text(
+                    "SELECT 1 FROM qualification_receipts WHERE tenant_id = :tenant_id "
+                    "AND id = :qualification_receipt_id"
+                ),
+                value,
+            ).first()
+            if receipt is None:
+                raise KeyError(value["qualification_receipt_id"])
+            connection.execute(
+                text(
+                    "INSERT INTO authorization_grants(id, tenant_id, qualification_receipt_id, "
+                    "actor_id, action, target, scope, conditions, expires_at, budget, max_calls, "
+                    "calls_used, policy_version, state, grant_receipt, created_by, created_at) "
+                    "VALUES (:id, :tenant_id, :qualification_receipt_id, :actor_id, :action, "
+                    ":target, :scope, :conditions, :expires_at, :budget, :max_calls, :calls_used, "
+                    ":policy_version, :state, :grant_receipt, :created_by, :created_at)"
+                ),
+                value,
+            )
         return _decode_authorization_grant(value)
 
     def list_authorization_grants(
@@ -861,6 +1011,7 @@ class PostgresQualificationRepositoryMixin:
         used_at: str,
         *,
         grant_id: str | None = None,
+        invocation: dict[str, Any] | None = None,
     ) -> dict | None:
         """Atomically consume one grant backed by the exact current receipt."""
 
@@ -875,6 +1026,11 @@ class PostgresQualificationRepositoryMixin:
         }
         grant_filter = " AND g.id = :grant_id" if grant_id is not None else ""
         with self.engine.begin() as connection:
+            if invocation is not None and connection.execute(
+                text("SELECT 1 FROM agent_runs WHERE tenant_id = :tenant_id AND id = :run_id"),
+                {"tenant_id": tenant_id, "run_id": invocation["run_id"]},
+            ).first() is None:
+                return None
             rows = connection.execute(
                 text(
                     "SELECT g.* FROM authorization_grants g "
@@ -897,6 +1053,10 @@ class PostgresQualificationRepositoryMixin:
             ).mappings().all()
             for row in rows:
                 grant = dict(row)
+                if invocation is not None and not _invocation_matches_grant(
+                    tenant_id, actor_id, action, target, grant, invocation
+                ):
+                    continue
                 if not _authorization_not_expired(grant.get("expires_at"), used_at):
                     connection.execute(
                         text(
@@ -921,5 +1081,14 @@ class PostgresQualificationRepositoryMixin:
                     },
                 ).mappings().first()
                 if updated is not None:
+                    if invocation is not None:
+                        use = _invocation_row(tenant_id, grant, invocation, used_at)
+                        connection.execute(
+                            text(
+                                "INSERT INTO authorization_invocations(" + ", ".join(use)
+                                + ") VALUES (" + ", ".join(":" + key for key in use) + ")"
+                            ),
+                            use,
+                        )
                     return _decode_authorization_grant(updated)
         return None

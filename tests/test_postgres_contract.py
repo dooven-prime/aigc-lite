@@ -4,20 +4,26 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from authority_support import provision_admin
 from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DatabaseError, IntegrityError
 
 from app.adapters.research_import import OpenAIMathReleaseAdapter
 from app.config import settings
-from app.core.contracts import RequestContext
+from app.core.contracts import RequestContext, ToolSource, ToolSpec
 from app.core.enforcement import (
     ENFORCEMENT_DISPATCH_CONTRACT_VERSION,
     EnforcementTargetType,
     ExecutionPolicySnapshot,
     PermissionDomain,
     PolicyPermission,
+    authorization_invocation_digest,
+    authorization_invocation_facts,
+    enforcement_payload_hash,
+    tool_spec_value,
 )
+from app.core.errors import InvalidExecutionPolicyError
 from app.core.scheduling import ScheduleKind, ScheduleSpec, ScheduleTaskCommand
 from app.repository import PostgresRepository
 from app.services.conversation_import_registry import ConversationImportRegistry
@@ -73,7 +79,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
     repository = PostgresRepository(POSTGRES_URL)
     repository.init()
-    assert repository.schema_revision() == "0023_scheduled_firings"
+    assert repository.schema_revision() == "0025_invocation_timeout"
     workspace_id = f"contract-{uuid4()}"
     repository.create_tenant("PostgreSQL contract", workspace_id)
     context = RequestContext(request_id="postgres-contract", workspace_id=workspace_id)
@@ -233,24 +239,11 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
         "expires_at": "2026-09-30T00:00:30+00:00",
         "state": "dispatching",
     }
-    dispatch = repository.create_enforcement_dispatch(
-        workspace_id, dispatch_values
-    )
-    assert dispatch["state"] == "dispatching"
-    with pytest.raises(IntegrityError):
+    with pytest.raises(InvalidExecutionPolicyError, match="consumed grant"):
         repository.create_enforcement_dispatch(
-            workspace_id, {**dispatch_values, "id": str(uuid4())}
+            workspace_id, dispatch_values, context=context
         )
-    repository.finish_enforcement_dispatch(
-        workspace_id, dispatch["id"], state="terminal"
-    )
-    replacement = repository.create_enforcement_dispatch(
-        workspace_id, {**dispatch_values, "id": str(uuid4())}
-    )
-    assert replacement["state"] == "dispatching"
-    repository.finish_enforcement_dispatch(
-        workspace_id, replacement["id"], state="terminal"
-    )
+    assert repository.list_enforcement_dispatches(workspace_id) == []
     review = ReviewService(lambda: repository).review_execution_run(
         context, run["id"], "execution.integrity.v1"
     )
@@ -286,6 +279,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
                 "issued_at": now,
             },
         )
+    write_context, write_authority = provision_admin(repository, context)
     admission = repository.admit_knowledge(
         workspace_id,
         {
@@ -306,6 +300,8 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
             "receipt_hash": "0" * 64,
             "issued_at": now,
         },
+        context=write_context,
+        authority=write_authority,
     )
     assert admission["current_use_binding"]["qualification_receipt_id"] == receipt_id
     grant = repository.create_authorization_grant(
@@ -319,6 +315,8 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
             "policy_version": "authorization.policy.v1",
             "grant_receipt": "e" * 64,
         },
+        context=write_context,
+        authority=write_authority,
     )
     consumed = repository.consume_authorization_grant(
         workspace_id,
@@ -341,6 +339,125 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
         )
         is None
     )
+
+    spec = ToolSpec(
+        name="postgres_bound_tool",
+        native_name="postgres_bound_tool",
+        description="PostgreSQL handoff contract",
+        input_schema={"type": "object"},
+        source=ToolSource.LOCAL,
+        provider_id="postgres-provider",
+        timeout_seconds=30.0,
+        extensions={"authority_requirement": {"required": True}},
+    )
+    spec_snapshot = tool_spec_value(spec)
+    arguments = {"value": 7}
+
+    def consumed_handoff(request_id: str):
+        actor_context = RequestContext(request_id, workspace_id, "contract-actor")
+        narrow_grant = repository.create_authorization_grant(
+            workspace_id,
+            {
+                "qualification_receipt_id": receipt_id,
+                "actor_id": actor_context.principal_id,
+                "action": spec.native_name,
+                "target": "provider:postgres-provider",
+                "max_calls": 1,
+                "policy_version": "authorization.policy.v1",
+                "grant_receipt": "e" * 64,
+            },
+            context=write_context,
+            authority=write_authority,
+        )
+        facts = authorization_invocation_facts(
+            workspace_id=workspace_id,
+            actor_id=actor_context.principal_id,
+            request_id=request_id,
+            run_id=run["id"],
+            action=spec.native_name,
+            target="provider:postgres-provider",
+            provider_id=spec.provider_id,
+            native_name=spec.native_name,
+            public_name=spec.name,
+            source=spec.source.value,
+            binding_id="postgres-binding",
+            binding_hash="f" * 64,
+            adapter_id="postgres-adapter",
+            proposal_id=proposal["id"],
+            policy_hash=proposal["candidate_policy_hash"],
+            adapter_target_type="tool_execution_backend",
+            adapter_target_id="postgres-enforcer",
+            tool_spec_hash=enforcement_payload_hash(spec_snapshot),
+            tool_timeout_seconds=spec.timeout_seconds,
+            arguments_digest=enforcement_payload_hash(arguments),
+        )
+        digest = authorization_invocation_digest(facts)
+        handoff_id = str(uuid4())
+        used_at = datetime.now(UTC).isoformat()
+        consumed_grant = repository.consume_authorization_grant(
+            workspace_id,
+            actor_context.principal_id,
+            spec.native_name,
+            "provider:postgres-provider",
+            used_at,
+            grant_id=narrow_grant["id"],
+            invocation={
+                "id": handoff_id,
+                **facts,
+                "invocation_digest": digest,
+                "spec_snapshot": spec_snapshot,
+                "arguments": arguments,
+            },
+        )
+        assert consumed_grant is not None
+        values = {
+            **dispatch_values,
+            "id": str(uuid4()),
+            "tool_spec_hash": facts["tool_spec_hash"],
+            "arguments_digest": facts["arguments_digest"],
+            "requested_at": used_at,
+            "expires_at": (datetime.fromisoformat(used_at) + timedelta(seconds=10)).isoformat(),
+        }
+        claim = {
+            "id": handoff_id,
+            "grant_id": narrow_grant["id"],
+            "grant_call_number": consumed_grant["calls_used"],
+            **facts,
+            "invocation_digest": digest,
+        }
+        return actor_context, values, claim
+
+    actor_context, authorized_values, claim = consumed_handoff("postgres-handoff-1")
+    with pytest.raises(InvalidExecutionPolicyError, match="dispatching state"):
+        repository.create_enforcement_dispatch(
+            workspace_id, {**authorized_values, "state": "terminal"},
+            context=actor_context, authorization_invocation=claim,
+        )
+    dispatch = repository.create_enforcement_dispatch(
+        workspace_id, authorized_values,
+        context=actor_context, authorization_invocation=claim,
+    )
+    assert dispatch["state"] == "dispatching"
+    with pytest.raises(InvalidExecutionPolicyError, match="already claimed"):
+        repository.create_enforcement_dispatch(
+            workspace_id, {**authorized_values, "id": str(uuid4())},
+            context=actor_context, authorization_invocation=claim,
+        )
+    second_context, second_values, second_claim = consumed_handoff("postgres-handoff-2")
+    with pytest.raises(IntegrityError):
+        repository.create_enforcement_dispatch(
+            workspace_id, second_values,
+            context=second_context, authorization_invocation=second_claim,
+        )
+    with pytest.raises(InvalidExecutionPolicyError, match="verified receipt"):
+        repository.finish_enforcement_dispatch(
+            workspace_id, dispatch["id"], state="terminal"
+        )
+    with pytest.raises(IntegrityError):
+        repository.create_enforcement_dispatch(
+            workspace_id, second_values,
+            context=second_context, authorization_invocation=second_claim,
+        )
     notice_id = str(uuid4())
     repository.record_notice_verification(
         workspace_id,
@@ -356,6 +473,8 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
             "requested_by": "contract-admin",
             "verified_at": now,
         },
+        context=write_context,
+        authority=write_authority,
     )
     assert repository.get_notice_verification(workspace_id, notice_id) is not None
     decision = repository.apply_invalidation_decision(
@@ -379,6 +498,8 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
             "decision_hash": "4" * 64,
             "decided_at": now,
         },
+        context=write_context,
+        authority=write_authority,
     )
     assert decision["affected_binding_ids"] == [admission["current_use_binding"]["id"]]
     assert repository.get_current_use_binding(workspace_id, claim_id, "contract.profile.v1")[
@@ -411,7 +532,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
                 )
             )
         }
-    assert revision == "0023_scheduled_firings"
+    assert revision == "0025_invocation_timeout"
     assert {
         "signature_verified",
         "enforcement_request_id",

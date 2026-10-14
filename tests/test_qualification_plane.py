@@ -4,6 +4,7 @@ import sqlite3
 import zipfile
 
 import pytest
+from authority_support import provision_admin
 
 from app.core.artifacts import ArtifactDraft, ArtifactKind
 from app.core.contracts import RequestContext, ToolHints, ToolRisk, ToolSource, ToolSpec
@@ -88,6 +89,7 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
         workspace_id="workspace-a",
         principal_id="reviewer-a",
     )
+    context, admin_authority = provision_admin(repository, context)
     registered = qualification.register_math_theorem(
         context,
         MathTheoremCandidateDraft(
@@ -265,12 +267,13 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
             admission_policy_id="knowledge.default.v1",
             rationale="Admit the reviewed theorem to the workspace knowledge view.",
         ),
+        authority=admin_authority,
     )
     assert (
         admission["knowledge_admission_receipt"]["contract_version"]
         == "knowledge.admission.v1"
     )
-    assert admission["knowledge_admission_receipt"]["approved_by"] == "reviewer-a"
+    assert admission["knowledge_admission_receipt"]["approved_by"] == context.principal_id
     assert admission["current_use_binding"]["state"] == "current"
     assert (
         admission["current_use_binding"]["knowledge_admission_receipt_id"]
@@ -297,6 +300,8 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
                 "qualification_receipt_hash": "0" * 64,
                 "receipt_hash": "1" * 64,
             },
+            context=context,
+            authority=admin_authority,
         )
     with repository._connect() as connection, pytest.raises(
         sqlite3.IntegrityError, match="immutable"
@@ -330,6 +335,7 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
             scope={"claim_revision_id": claim["id"]},
             max_calls=1,
         ),
+        authority=admin_authority,
     )
     assert grant["qualification_receipt_id"] == receipt["id"]
     assert grant["state"] == "active"
@@ -382,6 +388,7 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
             admission_policy_id="knowledge.default.v1",
             rationale="Select the newer qualification receipt for current use.",
         ),
+        authority=admin_authority,
     )
     assert second_admission["current_use_binding"]["qualification_receipt_id"] == (
         current_receipt["id"]
@@ -396,6 +403,7 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
                 target="knowledge/math",
                 scope={"claim_revision_id": claim["id"]},
             ),
+            authority=admin_authority,
         )
     qualification.create_authorization(
         context,
@@ -406,6 +414,7 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
             target="knowledge/math",
             scope={"claim_revision_id": claim["id"]},
         ),
+        authority=admin_authority,
     )
     restrictive_physical_grant = qualification.create_authorization(
         context,
@@ -423,6 +432,7 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
             },
             budget={"arguments": {"action_timeout_seconds": 60}},
         ),
+        authority=admin_authority,
     )
     physical_grant = qualification.create_authorization(
         context,
@@ -440,6 +450,7 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
             },
             budget={"arguments": {"action_timeout_seconds": 60}},
         ),
+        authority=admin_authority,
     )
     authorization_gate = ToolAuthorizationGate(lambda: repository)
     physical_spec = ToolSpec(
@@ -533,6 +544,7 @@ def test_math_formal_gate_earns_receipt_and_keeps_authority_separate(tmp_path) -
                 admission_policy_id="knowledge.default.v1",
                 rationale="This stale receipt must not be re-admitted.",
             ),
+            authority=admin_authority,
         )
     assert qualification.qualified_search(context, "even integers", PROFILE_ID) == []
     assert qualification.get_receipt(context, receipt["id"])["receipt_hash"] == receipt[

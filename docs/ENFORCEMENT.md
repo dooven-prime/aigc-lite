@@ -110,6 +110,11 @@ tool_catalog = create_default_tool_catalog(
 )
 ```
 
+The excerpt shows deployment-owned binding configuration, not a runnable
+authorization setup. The composition root must also supply a repository-backed
+`ToolAuthorizationGate` to the Tool Catalog, and the actor must hold a current,
+narrow `AuthorizationGrant`; without either, bound calls fail closed.
+
 The public key is deployer-owned configuration. Authentication headers, mTLS
 client material, or workload credentials should be supplied by deployment code
 through the adapter's `header_provider` or a lower-level transport; they must
@@ -134,12 +139,19 @@ Execution envelopes containing credential-shaped material are rejected.
 Credentials should be referenced and injected by the external enforcer only at
 the policy-authorized endpoint.
 
-Before network dispatch, the application writes an `enforcement.dispatch.v1`
-row in `dispatching`. A signed terminal response moves it to `terminal`.
+Before network dispatch, a bound tool must consume an applicable Grant and
+persist its actor, Run, tool, target, arguments, policy, binding, and frozen
+timeout as a single-use invocation. Dispatch atomically claims that record and
+writes an `enforcement.dispatch.v1` row in `dispatching`; it does not consume
+the Grant again. Unclaimed, expired, mismatched, or replayed handoffs fail
+before the adapter is called. A signed terminal response moves it to `terminal`.
 Transport failure, cancellation, invalid signature, `timed_out`, or an explicit
 `indeterminate` outcome moves it to `indeterminate`. `dispatching` and
 `indeterminate` both occupy the adapter execution slot, including after process
-restart, so a second action cannot bypass an uncertain workload.
+restart, so a second action cannot bypass an uncertain workload. Repository
+state transitions require the matching verified receipt or a constrained
+indeterminate transition; callers cannot simply mark an uncertain row terminal
+to release its slot.
 
 An administrator may request reconciliation for an existing uncertain dispatch.
 The fresh nonce-bound request contains only the original request ID/hash and

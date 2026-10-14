@@ -8,17 +8,23 @@ kernel certificates exercise qualification plumbing; they are not Lean runs.
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app import auth, tenancy
 from app.api import research as research_api
-from app.auth import current_admin_user
+from app.auth import token_hash
 from app.core.artifacts import ArtifactDraft, ArtifactKind
+from app.core.authority import ADMIN_AUTHORITY_SCOPES, AuthorityContext
 from app.core.contracts import RequestContext
-from app.core.errors import InvalidEvidenceError
+from app.core.errors import AuthorityDeniedError, InvalidEvidenceError
 from app.core.invalidation import (
     InvalidationDecisionDraft,
     InvalidationReason,
@@ -42,7 +48,23 @@ from app.services.evidence import EvidenceService
 from app.services.invalidation import InvalidationService
 from app.services.qualification import QualificationService
 from app.services.research_registry import ResearchRegistryService
-from app.tenancy import Tenant, current_tenant
+
+
+def provision_admin(repository, context: RequestContext) -> tuple[RequestContext, AuthorityContext]:
+    if repository.get_tenant(context.workspace_id) is None:
+        repository.create_tenant("Withdrawal test workspace", context.workspace_id)
+    user = repository.create_user(
+        context.workspace_id, f"withdrawal-{uuid4()}@example.test",
+        "Withdrawal test admin", "unused-test-password-hash", role="admin",
+    )
+    session_hash = uuid4().hex + uuid4().hex
+    repository.save_auth_session(
+        session_hash, user["id"], context.workspace_id,
+        (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+    return replace(context, principal_id=user["id"]), AuthorityContext(
+        context.workspace_id, user["id"], session_hash, ADMIN_AUTHORITY_SCOPES
+    )
 
 
 def _services(tmp_path):
@@ -58,7 +80,8 @@ def _services(tmp_path):
         provider, artifact_service=artifacts, evidence_service=evidence
     )
     context = RequestContext("withdrawal-fixture", "workspace-a", "reviewer-a")
-    return repository, artifacts, research, qualification, context
+    context, authority = provision_admin(repository, context)
+    return repository, artifacts, research, qualification, context, authority
 
 
 def _register(qualification, context, key, statement, *, dependencies=(), parent=None):
@@ -75,7 +98,7 @@ def _register(qualification, context, key, statement, *, dependencies=(), parent
     )["claim"]
 
 
-def _qualify(artifacts, research, qualification, context, claim, *, admit=True):
+def _qualify(artifacts, research, qualification, context, authority, claim, *, admit=True):
     """Use a deliberately synthetic certificate to exercise gate and binding logic."""
 
     proof = artifacts.create_artifact(
@@ -166,13 +189,14 @@ def _qualify(artifacts, research, qualification, context, claim, *, admit=True):
                 admission_policy_id="knowledge.default.v1",
                 rationale="Synthetic fixture: explicitly select this receipt for current use.",
             ),
+            authority=authority,
         )
         assert admission["current_use_binding"]["state"] == CurrentUseState.CURRENT
     return receipt, kernel_attempt
 
 
 def test_withdrawn_construction_taints_hard_dependents_but_not_citation_only(tmp_path):
-    repository, artifacts, research, qualification, context = _services(tmp_path)
+    repository, artifacts, research, qualification, context, authority = _services(tmp_path)
     source = _register(
         qualification, context, "WEIL-R1", "A construction proves the original claim."
     )
@@ -198,7 +222,7 @@ def test_withdrawn_construction_taints_hard_dependents_but_not_citation_only(tmp
     )
     original_receipts = {}
     for claim in (source, dependent, transitive, citation_only):
-        receipt, _attempt = _qualify(artifacts, research, qualification, context, claim)
+        receipt, _attempt = _qualify(artifacts, research, qualification, context, authority, claim)
         original_receipts[claim["id"]] = receipt
 
     source_binding = repository.get_current_use_binding(
@@ -261,7 +285,7 @@ def test_withdrawn_construction_taints_hard_dependents_but_not_citation_only(tmp
     assert before_repair["qualification_receipt"] is None
 
     repaired_receipt, _attempt = _qualify(
-        artifacts, research, qualification, context, revised, admit=False
+        artifacts, research, qualification, context, authority, revised, admit=False
     )
     assert repaired_receipt["id"] != original_receipts[source["id"]]["id"]
     assert repaired_receipt["claim_revision_id"] == revised["id"]
@@ -277,6 +301,7 @@ def test_withdrawn_construction_taints_hard_dependents_but_not_citation_only(tmp
             admission_policy_id="knowledge.default.v1",
             rationale="Synthetic fixture: explicitly admit the repaired revision.",
         ),
+        authority=authority,
     )
     assert (
         repository.get_current_use_binding(context.workspace_id, source["id"], PROFILE_ID)["state"]
@@ -291,10 +316,10 @@ def test_withdrawn_construction_taints_hard_dependents_but_not_citation_only(tmp
 
 
 def test_failed_review_proposal_cannot_directly_revoke_old_receipt(tmp_path):
-    repository, artifacts, research, qualification, context = _services(tmp_path)
+    repository, artifacts, research, qualification, context, authority = _services(tmp_path)
     source = _register(qualification, context, "WEIL-AUDIT-R1", "The original construction works.")
     original_receipt, original_attempt = _qualify(
-        artifacts, research, qualification, context, source
+        artifacts, research, qualification, context, authority, source
     )
     failure = artifacts.create_artifact(
         context,
@@ -338,13 +363,8 @@ def test_failed_review_proposal_cannot_directly_revoke_old_receipt(tmp_path):
     )
 
 
-def _verified_notice(repository, artifacts, context):
-    admin = RequestContext(
-        "invalidation-admin",
-        context.workspace_id,
-        "workspace-admin",
-        scopes=frozenset({"qualification:invalidate"}),
-    )
+def _verified_notice(repository, artifacts, context, authority):
+    admin = context
 
     def fetch(url):
         assert url == f"https://raw.githubusercontent.com/openai/math/{'a' * 40}/history.md"
@@ -353,12 +373,14 @@ def _verified_notice(repository, artifacts, context):
     service = InvalidationService(
         lambda: repository, artifact_service=artifacts, source_fetcher=fetch
     )
-    verified = service.verify_notice(admin, NoticeVerificationDraft(source_commit="a" * 40))
+    verified = service.verify_notice(
+        admin, NoticeVerificationDraft(source_commit="a" * 40), authority=authority
+    )
     return service, admin, verified
 
 
 def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_path):
-    repository, artifacts, research, qualification, context = _services(tmp_path)
+    repository, artifacts, research, qualification, context, authority = _services(tmp_path)
     old = _register(qualification, context, "WEIL-OLD", "Original broad statement.")
     child = _register(
         qualification,
@@ -374,9 +396,9 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
         "A narrower repaired statement.",
         parent=old["id"],
     )
-    old_receipt, _ = _qualify(artifacts, research, qualification, context, old)
-    child_receipt, _ = _qualify(artifacts, research, qualification, context, child)
-    new_receipt, _ = _qualify(artifacts, research, qualification, context, repaired)
+    old_receipt, _ = _qualify(artifacts, research, qualification, context, authority, old)
+    child_receipt, _ = _qualify(artifacts, research, qualification, context, authority, child)
+    new_receipt, _ = _qualify(artifacts, research, qualification, context, authority, repaired)
     qualification.create_authorization(
         context,
         "publisher-a",
@@ -386,8 +408,9 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
             target="knowledge/math",
             scope={"claim_revision_id": old["id"]},
         ),
+        authority=authority,
     )
-    service, admin, verified = _verified_notice(repository, artifacts, context)
+    service, admin, verified = _verified_notice(repository, artifacts, context, authority)
     old_binding = repository.get_current_use_binding(context.workspace_id, old["id"], PROFILE_ID)
     assert old_binding["state"] == CurrentUseState.CURRENT
     draft = InvalidationDecisionDraft(
@@ -398,7 +421,7 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
         reason_code=InvalidationReason.WITHDRAWN_UPSTREAM_CONSTRUCTION,
         rationale="The pinned notice withdraws the original construction.",
     )
-    with pytest.raises(InvalidEvidenceError, match="administrator"):
+    with pytest.raises(AuthorityDeniedError, match="administrator"):
         service.decide(context, draft)
     with pytest.raises(InvalidEvidenceError, match="semantic hash"):
         service.decide(
@@ -411,6 +434,7 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
                 reason_code=InvalidationReason.WITHDRAWN_UPSTREAM_CONSTRUCTION,
                 rationale="Wrong-target hostile fixture.",
             ),
+            authority=authority,
         )
     with pytest.raises(InvalidEvidenceError, match="another revision"):
         service.decide(
@@ -424,8 +448,9 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
                 rationale="The repaired receipt belongs to another revision.",
                 target_receipt_id=new_receipt["id"],
             ),
+            authority=authority,
         )
-    decision = service.decide(admin, draft)
+    decision = service.decide(admin, draft, authority=authority)
     assert decision["affected_binding_ids"] == [old_binding["id"]]
     assert decision["evidence_artifact_ids"] == [verified["source_artifact_id"]]
     assert (
@@ -460,6 +485,7 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
                 admission_policy_id="knowledge.default.v1",
                 rationale="A withdrawn receipt cannot be re-admitted.",
             ),
+            authority=authority,
         )
     with pytest.raises(InvalidEvidenceError, match="current qualification binding"):
         qualification.create_authorization(
@@ -471,6 +497,7 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
                 target="knowledge/math",
                 scope={"claim_revision_id": old["id"]},
             ),
+            authority=authority,
         )
     with pytest.raises(sqlite3.IntegrityError, match="invalidated qualification"):
         repository.upsert_current_use_binding(
@@ -487,10 +514,12 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
 
 
 def test_invalidating_attempt_a_does_not_revoke_repaired_attempt_b(tmp_path):
-    repository, artifacts, research, qualification, context = _services(tmp_path)
+    repository, artifacts, research, qualification, context, authority = _services(tmp_path)
     claim = _register(qualification, context, "TWO-PROOFS", "Two proof attempts.")
-    receipt_a, attempt_a = _qualify(artifacts, research, qualification, context, claim)
-    service, admin, verified = _verified_notice(repository, artifacts, context)
+    receipt_a, attempt_a = _qualify(
+        artifacts, research, qualification, context, authority, claim
+    )
+    service, admin, verified = _verified_notice(repository, artifacts, context, authority)
     decision = service.decide(
         admin,
         InvalidationDecisionDraft(
@@ -503,13 +532,16 @@ def test_invalidating_attempt_a_does_not_revoke_repaired_attempt_b(tmp_path):
             target_receipt_id=receipt_a["id"],
             target_attempt_id=attempt_a["id"],
         ),
+        authority=authority,
     )
     assert decision["affected_binding_ids"]
     assert (
         repository.get_current_use_binding(context.workspace_id, claim["id"], PROFILE_ID)["state"]
         == CurrentUseState.STALE
     )
-    receipt_b, attempt_b = _qualify(artifacts, research, qualification, context, claim)
+    receipt_b, attempt_b = _qualify(
+        artifacts, research, qualification, context, authority, claim
+    )
     assert receipt_b["id"] != receipt_a["id"]
     assert attempt_b["id"] != attempt_a["id"]
     with pytest.raises(InvalidEvidenceError, match="not selected"):
@@ -525,6 +557,7 @@ def test_invalidating_attempt_a_does_not_revoke_repaired_attempt_b(tmp_path):
                 target_receipt_id=receipt_b["id"],
                 target_attempt_id=attempt_a["id"],
             ),
+            authority=authority,
         )
     assert (
         qualification.refresh_receipt_binding(context, receipt_b["id"])["state"]
@@ -538,13 +571,14 @@ def test_invalidating_attempt_a_does_not_revoke_repaired_attempt_b(tmp_path):
                 admission_policy_id="knowledge.default.v1",
                 rationale="Attempt A's receipt remains invalidated.",
             ),
+            authority=authority,
         )
 
 
 def test_tampered_notice_artifact_cannot_back_a_decision(tmp_path):
-    repository, artifacts, _research, qualification, context = _services(tmp_path)
+    repository, artifacts, _research, qualification, context, authority = _services(tmp_path)
     claim = _register(qualification, context, "TAMPER-CASE", "A candidate statement.")
-    service, admin, verified = _verified_notice(repository, artifacts, context)
+    service, admin, verified = _verified_notice(repository, artifacts, context, authority)
     with repository._connect() as connection:
         connection.execute(
             "UPDATE artifacts SET content_text = ? WHERE tenant_id = ? AND id = ?",
@@ -561,14 +595,22 @@ def test_tampered_notice_artifact_cannot_back_a_decision(tmp_path):
                 reason_code=InvalidationReason.WITHDRAWN_UPSTREAM_CONSTRUCTION,
                 rationale="Forged content must fail closed.",
             ),
+            authority=authority,
         )
     assert service.list_decisions(context, claim["id"]) == []
 
 
 def test_http_invalidation_requires_admin_route_and_exposes_decision(tmp_path, monkeypatch):
-    repository, artifacts, _research, qualification, context = _services(tmp_path)
+    repository, artifacts, _research, qualification, context, authority = _services(tmp_path)
     claim = _register(qualification, context, "HTTP-WITHDRAWAL", "A candidate statement.")
-    service, _admin, _verified = _verified_notice(repository, artifacts, context)
+    service, _admin, _verified = _verified_notice(repository, artifacts, context, authority)
+    token = secrets.token_urlsafe(32)
+    repository.save_auth_session(
+        token_hash(token),
+        context.principal_id,
+        context.workspace_id,
+        (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
     app = FastAPI()
     app.include_router(
         research_api.create_research_router(
@@ -581,26 +623,26 @@ def test_http_invalidation_requires_admin_route_and_exposes_decision(tmp_path, m
             research_registry_service=None,
             verification_runner=None,
             request_context_factory=lambda request, tenant: RequestContext(
-                "http-invalidation", tenant.id, "workspace-admin"
+                "http-invalidation",
+                tenant.id,
+                getattr(request.state, "user_id", None),
             ),
         )
     )
-    app.dependency_overrides[current_admin_user] = lambda: {
-        "id": "workspace-admin",
-        "tenant_id": context.workspace_id,
-        "role": "admin",
-    }
-    app.dependency_overrides[current_tenant] = lambda: Tenant(context.workspace_id, "Workspace A")
+    monkeypatch.setattr(auth, "get_repository", lambda: repository)
+    monkeypatch.setattr(tenancy, "get_repository", lambda: repository)
     monkeypatch.setattr(research_api, "get_repository", lambda: repository)
     with TestClient(app) as client:
         verified = client.post(
             "/api/qualification/invalidation-notices/verify",
             json={"source_commit": "a" * 40},
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert verified.status_code == 201
         assert (
             client.get(
-                f"/api/qualification/invalidation-notices/{verified.json()['id']}"
+                f"/api/qualification/invalidation-notices/{verified.json()['id']}",
+                headers={"Authorization": f"Bearer {token}"},
             ).status_code
             == 200
         )
@@ -614,11 +656,19 @@ def test_http_invalidation_requires_admin_route_and_exposes_decision(tmp_path, m
                 "reason_code": "WITHDRAWN_UPSTREAM_CONSTRUCTION",
                 "rationale": "HTTP contract test of a pinned withdrawal notice.",
             },
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert decided.status_code == 201
         assert (
-            client.get(f"/api/qualification/claims/{claim['id']}/invalidation-decisions").json()[0][
+            client.get(
+                f"/api/qualification/claims/{claim['id']}/invalidation-decisions",
+                headers={"Authorization": f"Bearer {token}"},
+            ).json()[0][
                 "id"
             ]
             == decided.json()["id"]
         )
+    with repository._connect() as connection:
+        audit_rows = connection.execute("SELECT metadata FROM audit_logs").fetchall()
+    assert audit_rows
+    assert all(token_hash(token) not in row["metadata"] for row in audit_rows)
