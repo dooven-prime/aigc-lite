@@ -6,9 +6,9 @@ roadmap items remain in `docs/DESIGN.md`.
 ## Unreleased
 
 This is a development ledger for changes merged after `v0.6.0` through
-`main` commit `91c38f7` (2026-10-13), **not** a `v0.7.0` release closure.
-The package version remains `0.6.0`. The separately marked working-branch
-delta below is not yet on `main` or part of a tagged release.
+`main` commit `be13369` (2026-10-14), plus the separately marked candidate
+branch delta. The source metadata targets `0.7.0`, but this is **not** a tagged
+release or a completed `v0.7.0` release closure.
 
 ### Scope on main
 
@@ -37,23 +37,26 @@ delta below is not yet on `main` or part of a tagged release.
   tightened scheduler multi-worker lease/idempotency behavior, and improved
   the manual chat/research workflow UI without changing MCP's scoped projection
   role.
+- Moved candidate-only Bio/Citation Minimal Disambiguating Evidence v0
+  diagnostics into an optional casepack. Previously frozen v1 Case locks and
+  domain contracts remain unchanged; the core does not auto-discover the pack.
+- Added service-level, session-bound administrator checks for knowledge
+  admission, AuthorizationGrant issuance, invalidation writes, applied
+  workflow transitions, and external-enforcer reconciliation. Session
+  revocation and protected writes now have a transactional ordering. A
+  consumed Grant is bound to one exact external invocation and dispatch; an
+  indeterminate result keeps its execution slot. These application checks do
+  not constitute OS isolation from arbitrary in-process code with database
+  access.
 
-### Working-branch delta (not yet on main)
+### Current candidate delta (not yet on main)
 
-- Moved the candidate-only Bio/Citation Minimal Disambiguating Evidence v0
-  diagnostics into an optional, separately installable casepack. The core
-  wheel does not include it or discover it automatically; previously frozen
-  v1 Case locks and domain contracts remain unchanged. The Bio regression
-  helper tests changed for the authority check, so a separate harness
-  revision pins their new bytes without rewriting the historical v1 lock.
-- Added service-level, session-bound administrator checks for explicit
-  knowledge admission, AuthorizationGrant issuance, invalidation notice/
-  decision writes, applied workflow-stage transitions, and external-enforcer
-  reconciliation. This authority context is separate from Agent/Tool scopes.
-  Deterministic Qualification Gate evaluation still has its existing CLI and
-  internal Case callers and is not covered by this new session check. The
-  lower-level external dispatch port still lacks a one-time, invocation-bound
-  grant handoff; it is not safe to expose to untrusted in-process plugins.
+- Normalized integer and float tool timeouts before hashing an authorization
+  invocation. Previously a bound tool could spend its Grant and then fail the
+  external-dispatch digest comparison for an integer timeout.
+- Set the core and ROS 2 package metadata to the `0.7.0` release candidate.
+  The optional MDE casepack must pin its first compatible core release
+  exactly; compatibility with the tagged `v0.6.0` core was never established.
 
 ### Verification recorded so far
 
@@ -71,14 +74,17 @@ delta below is not yet on `main` or part of a tagged release.
 - For `91c38f7`, a Python 3.12 cloud checkout reported `400 passed, 3 skipped`
   with Ruff and byte compilation passing. That report is development test
   evidence; it is not a committed test receipt or the full release checklist.
-- On the working branch, authority-focused tests reported `41 passed` and
-  MDE/casepack tests `51 passed`. An earlier pair of wheels passed temporary
-  install/import smoke; after the final service reconciliation change, both
-  wheels were rebuilt and their contents passed the core/casepack boundary
-  check, but those final wheels were not clean-installed. The full local
-  Python 3.13 suite passed (`455 passed, 11 skipped`); Ruff and byte
-  compilation passed. These are development checks, not a release closure or
-  a Python 3.12 CI result.
+- Before this candidate's version metadata changed, the merged authority
+  branch reported `480 passed, 14 skipped` locally, with focused live
+  PostgreSQL contract tests, Ruff, and byte compilation passing. The timeout
+  normalization then passed 24 handoff tests and 11 neighboring tests (2
+  opt-in PostgreSQL tests skipped), plus Ruff and byte compilation. These are
+  development checks. The final candidate code commit's Python 3.12 suite,
+  three clean-install wheels, frontend audit/build, PostgreSQL 17/18 contract,
+  and hardened/insecure Docker checks are recorded separately in
+  `docs/releases/v0.7.0-candidate.md`; that local evidence is not a tag or
+  published release. GitHub CI for the pushed candidate remains a separate
+  acceptance check.
 
 ### Non-claims and release gate
 
