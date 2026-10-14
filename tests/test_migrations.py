@@ -63,7 +63,7 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "last_latency_ms",
         "last_tool_count",
     } <= columns
-    assert revision == "0025_invocation_timeout"
+    assert revision == "0026_model_usage_receipts"
     assert {
         "artifacts",
         "citations",
@@ -181,8 +181,9 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
 
 def test_repository_repairs_unreleased_sqlite_revision_alias(tmp_path) -> None:
     path = tmp_path / "provisional-revision.db"
-    repository = SQLiteRepository(path)
-    repository.init()
+    # This alias belonged to an unreleased 0017-era checkout. Recreate its
+    # schema at the previous head, not at 0026, before replaying later DDL.
+    command.upgrade(_alembic_config(path), "0025_invocation_timeout")
     with sqlite3.connect(path) as connection:
         connection.execute(
             "UPDATE alembic_version SET version_num = ?",
@@ -196,7 +197,7 @@ def test_repository_repairs_unreleased_sqlite_revision_alias(tmp_path) -> None:
         revision = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-    assert revision == "0025_invocation_timeout"
+    assert revision == "0026_model_usage_receipts"
 
 
 def test_knowledge_admission_migration_does_not_silently_grandfather_bindings(

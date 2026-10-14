@@ -491,6 +491,7 @@ def request_context(request: Request, tenant: Tenant) -> RequestContext:
         request_id=str(uuid4()),
         workspace_id=tenant.id,
         principal_id=getattr(request.state, "user_id", None),
+        api_key_id=getattr(request.state, "api_key_id", None),
         scopes=getattr(request.state, "scopes", frozenset()),
     )
 
@@ -722,6 +723,18 @@ async def run_detail(
     tenant: Tenant = Depends(current_tenant),
 ) -> dict:
     return memory_service.get_run(request_context(http_request, tenant), run_id)
+
+
+@app.get("/api/runs/{run_id}/model-usage")
+async def run_model_usage(
+    run_id: str,
+    http_request: Request,
+    tenant: Tenant = Depends(current_tenant),
+) -> list[dict]:
+    # Resolve the Run through the application service before projecting its
+    # host-owned accounting receipts; a receipt ID is never a cross-tenant key.
+    memory_service.get_run(request_context(http_request, tenant), run_id)
+    return get_repository().list_model_usage(tenant.id, run_id)
 
 
 @app.get("/api/artifacts")

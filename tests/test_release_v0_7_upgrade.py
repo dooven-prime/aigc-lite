@@ -218,7 +218,7 @@ def test_v0_6_0_history_upgrades_on_a_copy_without_authority_reinterpretation(
         source.backup(target)
     assert _historical_rows(upgraded) == before
 
-    command.upgrade(_config(upgraded), "head")
+    command.upgrade(_config(upgraded), NEW_HEAD)
     assert _revision(historical) == OLD_HEAD
     assert _historical_rows(historical) == before
     assert _revision(upgraded) == NEW_HEAD
@@ -335,7 +335,7 @@ def test_v0_6_0_postgres_history_upgrades_on_a_database_copy(tmp_path: Path) -> 
             created.append(copy_name)
         assert _postgres_rows(copy_url) == before
 
-        command.upgrade(_config(copy_url), "head")
+        command.upgrade(_config(copy_url), NEW_HEAD)
         assert _postgres_revision(old_url) == OLD_HEAD
         assert _postgres_revision(copy_url) == NEW_HEAD
         assert _postgres_rows(old_url) == before

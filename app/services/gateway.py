@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+from .. import providers as model_providers
 from ..adapters.credentials import EncryptedCredentialProvider
 from ..agent import run_agent
 from ..audit import usage_from_response
@@ -39,6 +41,7 @@ from ..providers import stream_completion
 from ..repository import Repository
 from .artifacts import ArtifactService
 from .chat_capabilities import ChatCapabilityPolicy
+from .model_usage import ModelUsageObserver
 from .tool_catalog import ToolCatalog, create_default_tool_catalog
 
 AgentRunner = Callable[..., Awaitable[str]]
@@ -147,13 +150,17 @@ class GatewayService:
         )
         sequence = 0
 
-        def record_step(step: AgentStepRecord) -> None:
+        def reserve_sequence() -> int:
             nonlocal sequence
             sequence += 1
+            return sequence
+
+        def record_step(step: AgentStepRecord) -> None:
+            current_sequence = reserve_sequence()
             stored_step = repository.append_run_step(
                 context.workspace_id,
                 run["id"],
-                sequence,
+                current_sequence,
                 step.kind.value,
                 step.name,
                 step.status.value,
@@ -170,7 +177,23 @@ class GatewayService:
                     citations=step.citations,
                 )
 
+        use_receipts = self._agent_runner is run_agent
+        observer = ModelUsageObserver(
+            repository, context, run["id"], selected_model, model_config,
+            default_input_price=settings.default_input_price,
+            default_output_price=settings.default_output_price,
+            default_pricing_known=(
+                "AIGC_LITE_DEFAULT_INPUT_PRICE" in os.environ
+                and "AIGC_LITE_DEFAULT_OUTPUT_PRICE" in os.environ
+            ),
+            reserve_sequence=reserve_sequence,
+            step_metadata={"chat_capability": capability_metadata},
+        ) if use_receipts else None
+
         def record_usage(usage: dict) -> None:
+            if observer is not None:
+                observer.observe_usage(usage)
+                return
             pricing = model_config or {
                 "input_price": settings.default_input_price,
                 "output_price": settings.default_output_price,
@@ -193,6 +216,16 @@ class GatewayService:
                         access_policy=capability,
                         run_id=run["id"],
                     )
+                    runner_options: dict[str, Any] = {
+                        "provider": provider,
+                        "usage_callback": record_usage,
+                        "step_callback": record_step,
+                        "available_tools": tool_session.model_schemas(),
+                        "tool_invoker": tool_session.invoke,
+                        "max_tool_calls": settings.max_agent_tool_calls,
+                    }
+                    if observer is not None:
+                        runner_options["model_call_observer"] = observer
                     content = await self._agent_runner(
                         model_prompt,
                         command.system,
@@ -200,12 +233,7 @@ class GatewayService:
                         settings.max_agent_steps,
                         history,
                         context.workspace_id,
-                        provider=provider,
-                        usage_callback=record_usage,
-                        step_callback=record_step,
-                        available_tools=tool_session.model_schemas(),
-                        tool_invoker=tool_session.invoke,
-                        max_tool_calls=settings.max_agent_tool_calls,
+                        **runner_options,
                     )
             except TimeoutError as exc:
                 error = AgentWallTimeLimitError(settings.max_agent_run_seconds)
@@ -337,11 +365,15 @@ class GatewayService:
         sequence = 0
         events: asyncio.Queue[dict[str, Any] | BaseException | None] = asyncio.Queue()
 
-        def record_step(step: AgentStepRecord) -> None:
+        def reserve_sequence() -> int:
             nonlocal sequence
             sequence += 1
+            return sequence
+
+        def record_step(step: AgentStepRecord) -> None:
+            current_sequence = reserve_sequence()
             stored_step = repository.append_run_step(
-                context.workspace_id, run["id"], sequence, step.kind.value,
+                context.workspace_id, run["id"], current_sequence, step.kind.value,
                 step.name, step.status.value, step.input_content,
                 step.output_content,
                 {**step.metadata, "chat_capability": capability_metadata, "stream": True},
@@ -352,18 +384,28 @@ class GatewayService:
                     artifacts=step.artifacts, citations=step.citations,
                 )
             events.put_nowait({
-                "event": "step", "sequence": sequence, "kind": step.kind.value,
+                "event": "step", "sequence": current_sequence, "kind": step.kind.value,
                 "name": step.name, "status": step.status.value,
             })
 
+        observer = ModelUsageObserver(
+            repository, context, run["id"], selected_model, model_config,
+            default_input_price=settings.default_input_price,
+            default_output_price=settings.default_output_price,
+            default_pricing_known=(
+                "AIGC_LITE_DEFAULT_INPUT_PRICE" in os.environ
+                and "AIGC_LITE_DEFAULT_OUTPUT_PRICE" in os.environ
+            ),
+            reserve_sequence=reserve_sequence,
+            step_metadata={"chat_capability": capability_metadata, "stream": True},
+            on_step=lambda index, kind, status: events.put_nowait({
+                "event": "step", "sequence": index, "kind": kind,
+                "name": selected_model, "status": status,
+            }) if status == "succeeded" else None,
+        )
+
         def record_usage(usage: dict) -> None:
-            pricing = model_config or {
-                "input_price": settings.default_input_price,
-                "output_price": settings.default_output_price,
-            }
-            self._usage_recorder(
-                usage, selected_model, context.workspace_id, pricing
-            )
+            observer.observe_usage(usage)
 
         async def execute() -> None:
             turn = 0
@@ -375,6 +417,7 @@ class GatewayService:
 
                 async def on_delta(content: str) -> None:
                     nonlocal stream_bytes
+                    observer.observe_output(content)
                     stream_bytes += len(content.encode())
                     if stream_bytes > _MAX_STREAM_BYTES:
                         raise UpstreamResponseError("LLM stream exceeds the output size limit")
@@ -389,6 +432,15 @@ class GatewayService:
                         parts.append(part)
                         await on_delta(part)
                     return {"role": "assistant", "content": "".join(parts)}
+                if stream_completion is model_providers.stream_completion:
+                    return await stream_completion(
+                        messages, model, tools, selected_provider, on_delta=on_delta,
+                        usage_callback=observer.observe_usage,
+                        metadata_callback=observer.observe_provider_metadata,
+                    )
+                # Keep the existing injectable stream adapter signature for
+                # tests and downstream in-process adapters. Its returned usage
+                # is still captured by the Agent observer.
                 return await stream_completion(
                     messages, model, tools, selected_provider, on_delta=on_delta
                 )
@@ -409,6 +461,7 @@ class GatewayService:
                             tool_invoker=tool_session.invoke,
                             max_tool_calls=settings.max_agent_tool_calls,
                             model_completion=model_completion,
+                            model_call_observer=observer,
                         )
                 except TimeoutError as exc:
                     error = AgentWallTimeLimitError(settings.max_agent_run_seconds)

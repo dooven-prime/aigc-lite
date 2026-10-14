@@ -126,7 +126,12 @@ def create_configuration_router(
                 detail="Credential reference is not active in this workspace",
             )
         return repository.save_model_config(
-            user["tenant_id"], request.model_dump()
+            user["tenant_id"], {
+                **request.model_dump(),
+                "pricing_confirmed": {
+                    "input_price", "output_price"
+                } <= request.model_fields_set,
+            }
         )
 
     @router.get("/api/mcp-servers")

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -23,6 +24,7 @@ from .ports.enforcement_repository import EnforcementRepository
 from .ports.import_repository import ImportRepository
 from .ports.invalidation_repository import InvalidationRepository
 from .ports.math_release_repository import MathReleaseRepository
+from .ports.model_usage import ModelUsageRepository
 from .ports.qualification_repository import QualificationRepository
 from .ports.research_repository import ResearchRepository
 from .ports.review_repository import ReviewRepository
@@ -45,6 +47,10 @@ from .repositories.math_release import (
     PostgresMathReleaseRepositoryMixin,
     SQLiteMathReleaseRepositoryMixin,
 )
+from .repositories.model_usage import (
+    PostgresModelUsageRepositoryMixin,
+    SQLiteModelUsageRepositoryMixin,
+)
 from .repositories.qualification import (
     PostgresQualificationRepositoryMixin,
     SQLiteQualificationRepositoryMixin,
@@ -60,6 +66,48 @@ from .repositories.review import (
 
 if TYPE_CHECKING:
     from .ports.search import SearchBackend
+
+
+def _usage_summary_rows(legacy_rows: Any, receipt_rows: Any) -> dict:
+    """Sum rows in Python: SQLite integer SUM can overflow before returning."""
+    prompt_tokens = completion_tokens = requests = legacy_requests = 0
+    receipt_attempts = unknown_requests = invalid_requests = 0
+    unpriced_reported_requests = 0
+    cost = Decimal("0")
+    for row in legacy_rows:
+        item = dict(row)
+        legacy_requests += 1
+        requests += 1
+        prompt_tokens += int(item["prompt_tokens"])
+        completion_tokens += int(item["completion_tokens"])
+        cost += Decimal(str(item["cost"]))
+    for row in receipt_rows:
+        item = dict(row)
+        receipt_attempts += 1
+        requests += 1
+        status = item["usage_status"]
+        if status == "REPORTED":
+            prompt_tokens += int(item["prompt_tokens"])
+            completion_tokens += int(item["completion_tokens"])
+            if item["estimated_cost"] is None:
+                unpriced_reported_requests += 1
+        elif status in {"IN_FLIGHT", "UNKNOWN"}:
+            unknown_requests += 1
+        elif status == "INVALID":
+            invalid_requests += 1
+        if item["estimated_cost"] is not None:
+            cost += Decimal(str(item["estimated_cost"]))
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cost": float(cost),
+        "requests": requests,
+        "legacy_requests": legacy_requests,
+        "receipt_attempts": receipt_attempts,
+        "unknown_requests": unknown_requests,
+        "invalid_requests": invalid_requests,
+        "unpriced_reported_requests": unpriced_reported_requests,
+    }
 
 
 def _admin_authority_claims_match(
@@ -83,6 +131,7 @@ class Repository(
     ReviewRepository,
     ImportRepository,
     MathReleaseRepository,
+    ModelUsageRepository,
     EnforcementRepository,
     Protocol,
 ):
@@ -427,6 +476,7 @@ def _decode_decision_case(row: Any) -> dict[str, Any]:
 
 
 class SQLiteRepository(
+    SQLiteModelUsageRepositoryMixin,
     SQLiteResearchRepositoryMixin,
     SQLiteQualificationRepositoryMixin,
     SQLiteReviewRepositoryMixin,
@@ -710,6 +760,7 @@ class SQLiteRepository(
             "output_price": values.get("output_price", 0), "is_default": int(values.get("is_default", False)),
             "created_at": values.get("created_at", utc_now()),
             "credential_reference": credential_reference,
+            "pricing_confirmed": int(bool(values.get("pricing_confirmed", False))),
         }
         with self._connect() as db:
             credential = db.execute(
@@ -725,7 +776,7 @@ class SQLiteRepository(
             db.execute(
                 "INSERT INTO model_configs(id, tenant_id, name, base_url, model, "
                 "api_key, input_price, output_price, is_default, created_at, "
-                "credential_reference) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "credential_reference, pricing_confirmed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(model.values()),
             )
         return {key: value for key, value in model.items() if key != "api_key"}
@@ -733,7 +784,7 @@ class SQLiteRepository(
     def list_model_configs(self, tenant_id: str) -> list[dict]:
         with self._connect() as db:
             rows = db.execute(
-                "SELECT id, tenant_id, name, base_url, model, input_price, output_price, is_default, created_at, credential_reference "
+                "SELECT id, tenant_id, name, base_url, model, input_price, output_price, is_default, created_at, credential_reference, pricing_confirmed "
                 "FROM model_configs WHERE tenant_id = ? ORDER BY name", (tenant_id,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -1116,12 +1167,16 @@ class SQLiteRepository(
 
     def usage_summary(self, tenant_id: str) -> dict:
         with self._connect() as db:
-            row = db.execute(
-                "SELECT COALESCE(SUM(prompt_tokens), 0) prompt_tokens, COALESCE(SUM(completion_tokens), 0) "
-                "completion_tokens, COALESCE(SUM(cost), 0) cost, COUNT(*) requests FROM usage_records WHERE tenant_id = ?",
+            legacy = db.execute(
+                "SELECT prompt_tokens, completion_tokens, cost FROM usage_records WHERE tenant_id = ?",
                 (tenant_id,),
-            ).fetchone()
-        return dict(row)
+            )
+            receipts = db.execute(
+                "SELECT usage_status, prompt_tokens, completion_tokens, estimated_cost "
+                "FROM model_usage_receipts WHERE tenant_id = ?",
+                (tenant_id,),
+            )
+            return _usage_summary_rows(legacy, receipts)
 
     def create_run(
         self,
@@ -1781,6 +1836,7 @@ class SQLiteRepository(
 
 
 class PostgresRepository(
+    PostgresModelUsageRepositoryMixin,
     PostgresResearchRepositoryMixin,
     PostgresQualificationRepositoryMixin,
     PostgresReviewRepositoryMixin,
@@ -2045,22 +2101,23 @@ class PostgresRepository(
             "output_price": values.get("output_price", 0), "is_default": int(values.get("is_default", False)),
             "created_at": values.get("created_at", utc_now()),
             "credential_reference": credential_reference,
+            "pricing_confirmed": int(bool(values.get("pricing_confirmed", False))),
         }
         self._execute(
             "DELETE FROM model_configs WHERE tenant_id = :tenant_id AND name = :name", model
         )
         self._execute(
             "INSERT INTO model_configs(id, tenant_id, name, base_url, model, api_key, "
-            "input_price, output_price, is_default, created_at, credential_reference) "
+            "input_price, output_price, is_default, created_at, credential_reference, pricing_confirmed) "
             "VALUES (:id, :tenant_id, :name, :base_url, :model, :api_key, "
-            ":input_price, :output_price, :is_default, :created_at, :credential_reference)",
+            ":input_price, :output_price, :is_default, :created_at, :credential_reference, :pricing_confirmed)",
             model,
         )
         return {key: value for key, value in model.items() if key != "api_key"}
 
     def list_model_configs(self, tenant_id: str) -> list[dict]:
         return self._many(
-            "SELECT id, tenant_id, name, base_url, model, input_price, output_price, is_default, created_at, credential_reference "
+            "SELECT id, tenant_id, name, base_url, model, input_price, output_price, is_default, created_at, credential_reference, pricing_confirmed "
             "FROM model_configs WHERE tenant_id = :tenant_id ORDER BY name", {"tenant_id": tenant_id},
         )
 
@@ -2433,11 +2490,20 @@ class PostgresRepository(
         )
 
     def usage_summary(self, tenant_id: str) -> dict:
-        return self._one(
-            "SELECT COALESCE(SUM(prompt_tokens), 0) prompt_tokens, COALESCE(SUM(completion_tokens), 0) completion_tokens, "
-            "COALESCE(SUM(cost), 0) cost, COUNT(*) requests FROM usage_records WHERE tenant_id = :tenant_id",
-            {"tenant_id": tenant_id},
-        ) or {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0, "requests": 0}
+        from sqlalchemy import text
+
+        with self.engine.connect() as connection:
+            legacy = connection.execute(
+                text("SELECT prompt_tokens, completion_tokens, cost FROM usage_records "
+                     "WHERE tenant_id = :tenant_id"),
+                {"tenant_id": tenant_id},
+            ).mappings()
+            receipts = connection.execute(
+                text("SELECT usage_status, prompt_tokens, completion_tokens, estimated_cost "
+                     "FROM model_usage_receipts WHERE tenant_id = :tenant_id"),
+                {"tenant_id": tenant_id},
+            ).mappings()
+            return _usage_summary_rows(legacy, receipts)
 
     def create_run(
         self,

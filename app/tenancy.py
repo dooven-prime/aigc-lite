@@ -62,6 +62,16 @@ def _same_secret(left: str, right: str) -> bool:
     return hmac.compare_digest(hashlib.sha256(left.encode()).digest(), hashlib.sha256(right.encode()).digest())
 
 
+def _api_key_identity(token: str) -> str:
+    """Non-reversible, host-derived attribution; never persist bearer bytes."""
+    digest = hmac.new(
+        settings.auth_secret.encode("utf-8"),
+        b"aigc-lite:api-key-id:v1:" + token.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"api-key:v1:{digest}"
+
+
 async def current_tenant(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -95,6 +105,7 @@ async def current_tenant(
         if _same_secret(token, secret):
             check_rate_limit(tenant.id)
             request.state.tenant_id = tenant.id
+            request.state.api_key_id = _api_key_identity(token)
             request.state.scopes = _role_scopes("admin")
             return tenant
     raise HTTPException(status_code=401, detail="Invalid API key")

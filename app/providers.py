@@ -120,7 +120,13 @@ async def completion(
     data: dict[str, Any] = response.json()
     try:
         message = dict(data["choices"][0]["message"])
-        message["_usage"] = data.get("usage") or {}
+        # Preserve absence and malformed usage for the host-owned accounting
+        # observer; they must never be normalized to reported zero tokens.
+        message["_usage"] = data.get("usage")
+        if data.get("id") is not None:
+            message["_provider_request_id"] = data["id"]
+        if data["choices"][0].get("finish_reason") is not None:
+            message["_finish_reason"] = data["choices"][0]["finish_reason"]
         return message
     except (KeyError, IndexError, TypeError) as exc:
         raise UpstreamResponseError("LLM returned an invalid response") from exc
@@ -183,6 +189,8 @@ async def stream_completion(
     provider: dict[str, Any] | None = None,
     *,
     on_delta: Callable[[str], Awaitable[None]],
+    usage_callback: Callable[[Any], None] | None = None,
+    metadata_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Stream one model turn, assembling tool calls before the shared Agent loop acts."""
     api_key, base_url, values = _provider_connection(provider)
@@ -197,7 +205,9 @@ async def stream_completion(
         payload.update(tools=tools, tool_choice="auto")
     content: list[str] = []
     calls: dict[int, dict[str, Any]] = {}
-    usage: dict[str, Any] = {}
+    usage: Any = None
+    provider_request_id: Any = None
+    finish_reason: Any = None
     done = False
     try:
         async with (
@@ -220,16 +230,28 @@ async def stream_completion(
                 data = json.loads(item)
                 if not isinstance(data, dict):
                     raise UpstreamResponseError("LLM returned an invalid stream event")
-                if isinstance(data.get("usage"), dict):
+                # OpenAI-compatible streams commonly send `usage: null` on
+                # ordinary delta frames before the final usage-only frame.
+                if "usage" in data and data["usage"] is not None:
                     usage = data["usage"]
+                    if usage_callback is not None:
+                        usage_callback(usage)
+                if "id" in data:
+                    provider_request_id = data["id"]
+                    if metadata_callback is not None:
+                        metadata_callback({"id": provider_request_id})
                 choices = data.get("choices") or []
                 if not choices:
                     continue
                 choice = choices[0]
                 if not isinstance(choice, dict) or not isinstance(choice.get("delta"), dict):
                     raise UpstreamResponseError("LLM returned an invalid stream delta")
+                if choice.get("finish_reason") is not None and metadata_callback is not None:
+                    metadata_callback({"finish_reason": choice["finish_reason"]})
                 if choice.get("finish_reason") == "length":
                     raise UpstreamResponseError("LLM truncated a streamed model turn")
+                if choice.get("finish_reason") is not None:
+                    finish_reason = choice["finish_reason"]
                 delta = choice["delta"]
                 fragment = delta.get("content")
                 if fragment is not None:
@@ -276,7 +298,12 @@ async def stream_completion(
     ordered = [calls[index] for index in sorted(calls)]
     if any(not call["id"] or not call["function"]["name"] for call in ordered):
         raise UpstreamResponseError("LLM returned an incomplete tool call")
-    return {
+    result = {
         "role": "assistant", "content": "".join(content),
         "tool_calls": ordered, "_usage": usage,
     }
+    if provider_request_id is not None:
+        result["_provider_request_id"] = provider_request_id
+    if finish_reason is not None:
+        result["_finish_reason"] = finish_reason
+    return result
