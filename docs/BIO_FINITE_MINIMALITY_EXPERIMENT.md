@@ -77,6 +77,21 @@ set, or a QualificationReceipt. No CurrentUseBinding or AuthorizationGrant
 is created. The experiment remains candidate-only, separate from software
 release and from any claim about real source provenance.
 
+## Source-specific CI verification
+
+The pushed source commit
+[`a222dc00859eb354759f31755eeafc3db5215328`](https://github.com/dooven-prime/aigc-lite/commit/a222dc00859eb354759f31755eeafc3db5215328)
+on `codex/bio-finite-minimality` was checked by
+[GitHub Actions run 38550738327](https://github.com/dooven-prime/aigc-lite/actions/runs/38550738327)
+on 2026-10-14. All five jobs completed successfully: `test`, `frontend`,
+`wheel-smoke`, `postgres`, and `docker-smoke`. The `test` job reported
+**495 passed, 7 skipped**. This is a CI result for that exact Bio source
+commit, not for this later documentation-only commit or for another branch.
+In particular, it does not validate the separate Long-Horizon Recovery
+candidate-only contract, whose reported 64 focused tests are a distinct
+result. Passing repository CI also does not authenticate real biological
+source claims or expand the experiment's conditional scientific conclusion.
+
 Run the focused check with:
 
 ```sh
