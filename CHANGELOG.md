@@ -5,6 +5,106 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+This is a development ledger for changes merged after `v0.6.0` through
+`main` commit `91c38f7` (2026-10-13), **not** a `v0.7.0` release closure.
+The package version remains `0.6.0`. The separately marked working-branch
+delta below is not yet on `main` or part of a tagged release.
+
+### Scope on main
+
+- Added versioned research source importers and candidate-only OpenAI math
+  catalog ingestion. The fixed Math Project 003 path pins source and dependency
+  bytes, separates paper-to-challenge alignment from challenge-first Comparator
+  and Lean replay, and records bounded build/sandbox diagnostics.
+- Added authenticated, policy-bound Invalidation Decisions. A notice or failed
+  review is evidence for a decision, not its authority; decisions retain exact
+  revision/receipt/attempt targets and historical receipts while propagating
+  stale current-use bindings.
+- Added the finite RIME consumer witness Case, a pinned r2 replay ZIP and host
+  pre-execution checks, and a separate narrow finite reference oracle. Added
+  an isolated Fibre Criterion Lean delivery verifier and public source locks;
+  neither path is joined to Math Project 003 qualification.
+- Added candidate-only citation extraction with occurrence, bibliography-match,
+  and claim-relation boundaries; a sealed deterministic blind-evaluation
+  protocol; retrospective paired in-vitro arithmetic and signed L1 record
+  binding; and frozen Bio/Citation information-sufficiency counterexample
+  Cases. These domain Cases do not introduce a new authority primitive.
+- Added propositional-entailment and other adversarial regressions for invalid
+  evidence combination, source identity, withdrawal propagation, correlated
+  agent agreement, and credential-budget escape.
+- Added replayable ROS 2 simulator fault-injection evaluation and a narrow
+  Nav2 graph evaluation path. Aligned SSE Chat with the synchronous tool loop,
+  tightened scheduler multi-worker lease/idempotency behavior, and improved
+  the manual chat/research workflow UI without changing MCP's scoped projection
+  role.
+
+### Working-branch delta (not yet on main)
+
+- Moved the candidate-only Bio/Citation Minimal Disambiguating Evidence v0
+  diagnostics into an optional, separately installable casepack. The core
+  wheel does not include it or discover it automatically; previously frozen
+  v1 Case locks and domain contracts remain unchanged. The Bio regression
+  helper tests changed for the authority check, so a separate harness
+  revision pins their new bytes without rewriting the historical v1 lock.
+- Added service-level, session-bound administrator checks for explicit
+  knowledge admission, AuthorizationGrant issuance, invalidation notice/
+  decision writes, applied workflow-stage transitions, and external-enforcer
+  reconciliation. This authority context is separate from Agent/Tool scopes.
+  Deterministic Qualification Gate evaluation still has its existing CLI and
+  internal Case callers and is not covered by this new session check. The
+  lower-level external dispatch port still lacks a one-time, invocation-bound
+  grant handoff; it is not safe to expose to untrusted in-process plugins.
+
+### Verification recorded so far
+
+- The artifact-specific `rime-consumer-finite-replay-r2` handoff records an
+  Ubuntu same-checker replay of three positive witnesses and seven negative
+  controls with expected verdicts and reasons. The independently written
+  finite oracle covers a narrower origin/history/carrier property. Its ZIP,
+  manifest, source identities, and unsigned runtime receipt are identified in
+  `docs/releases/rime-consumer-finite-replay-r2.md`.
+- The Fibre Criterion candidate pins seven Lean declarations and their expected
+  axiom sets. Local and cross-host same-verifier Lean 4.33.0 replays were
+  reported; `docs/FIBRE_CRITERION_CASE.md` states the exact source and
+  verification boundary. The Bio/Citation two-world regressions and locks
+  exercise synthetic observation-equivalence cases, not external provenance.
+- For `91c38f7`, a Python 3.12 cloud checkout reported `400 passed, 3 skipped`
+  with Ruff and byte compilation passing. That report is development test
+  evidence; it is not a committed test receipt or the full release checklist.
+- On the working branch, authority-focused tests reported `41 passed` and
+  MDE/casepack tests `51 passed`. An earlier pair of wheels passed temporary
+  install/import smoke; after the final service reconciliation change, both
+  wheels were rebuilt and their contents passed the core/casepack boundary
+  check, but those final wheels were not clean-installed. The full local
+  Python 3.13 suite passed (`455 passed, 11 skipped`); Ruff and byte
+  compilation passed. These are development checks, not a release closure or
+  a Python 3.12 CI result.
+
+### Non-claims and release gate
+
+- Math Project 003 has **no passing full Comparator/kernel replay**; statement
+  identity and kernel results remain undetermined after a bounded cold build
+  timed out. A cache hash, paper review of a different revision, or a weaker
+  theorem cannot substitute for the frozen `7/8` challenge.
+- A valid finite replay or Lean artifact does not establish checker correctness,
+  the intended paper theorem, organizational independence, knowledge admission,
+  or execution authorization. The RIME r2 runtime receipt is unsigned, and
+  Fibre Criterion is not a general image/kernel theorem.
+- Correct arithmetic or signed record binding does not authenticate a complete
+  experiment or biological independence. Citation anchors and bibliography
+  candidates do not establish real paper identity, claim support, or independent
+  evidence roots. The citation blind cohort remains **unscored** until complete
+  independent human Gold is sealed.
+- Simulator/graph acceptance is not real Nav2/Gazebo or hardware acceptance.
+  The application does not provide a complete OS sandbox or external
+  trust-domain attestation. Candidate imports and diagnostic Cases cannot
+  issue QualificationReceipts, CurrentUseBindings, or AuthorizationGrants.
+- Do not tag the next software release from this ledger alone. Recheck the
+  final source and dependency identities, full test/Ruff/byte-compilation
+  results, clean-install wheels, frontend audit/build, live PostgreSQL contract,
+  and hardened/insecure Docker smokes; then write a separate versioned release
+  closure and tag its exact commit.
+
 ## 0.6.0 - 2026-09-30
 
 - Made `/mcp/` the canonical Streamable HTTP endpoint and internally

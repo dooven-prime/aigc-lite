@@ -18,6 +18,7 @@ from uuid import uuid4
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from ..core.authority import AuthorityContext
 from ..core.contracts import RequestContext
 from ..core.enforcement import (
     ENFORCEMENT_DISPATCH_CONTRACT_VERSION,
@@ -50,6 +51,7 @@ from ..database import get_repository
 from ..ports.enforcer import EnforcerAdapter
 from ..redaction import redact
 from ..repository import Repository
+from .authority import require_admin_authority
 from .enforcement import EnforcementIssuerRegistry, EnforcementService
 
 RepositoryProvider = Callable[[], Repository]
@@ -925,7 +927,11 @@ class ExternalEnforcerService:
         dispatch_id: str,
         *,
         expires_in_seconds: float = 30.0,
+        authority: AuthorityContext | None = None,
     ) -> dict[str, Any]:
+        require_admin_authority(
+            self._repository_provider(), context, authority, "enforcement:reconcile"
+        )
         requested = self.get_dispatch(context, dispatch_id)
         root_id = requested.get("original_dispatch_id") or requested["id"]
         root = self.get_dispatch(context, root_id)

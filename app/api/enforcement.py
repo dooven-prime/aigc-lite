@@ -8,7 +8,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from ..auth import current_admin_user
+from ..auth import current_admin_user, request_authority
 from ..core.contracts import RequestContext
 from ..core.enforcement import (
     EnforcementDispatchState,
@@ -175,6 +175,7 @@ def create_enforcement_router(
             admin_context(http_request, user),
             dispatch_id,
             expires_in_seconds=payload.timeout_seconds,
+            authority=request_authority(http_request, user),
         )
 
     @router.post("/api/enforcement/policy-proposals", status_code=201)

@@ -7,6 +7,7 @@ import json
 import sqlite3
 
 import pytest
+from authority_support import provision_admin
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_bio_in_vitro_case import witness
@@ -425,8 +426,9 @@ def test_same_measurements_do_not_inherit_laboratory_provenance(tmp_path) -> Non
         len(repository.list_qualification_receipts(context.workspace_id, signed_claim["id"])) == 1
     )
     with pytest.raises(InvalidEvidenceError, match="stale qualification evidence"):
+        admin_context, authority = provision_admin(repository, context)
         gate.admit_knowledge(
-            context,
+            admin_context,
             KnowledgeAdmissionDraft(
                 qualification_receipt_id=signed["qualification_receipt"][
                     "qualification_receipt_id"
@@ -434,6 +436,7 @@ def test_same_measurements_do_not_inherit_laboratory_provenance(tmp_path) -> Non
                 admission_policy_id="knowledge.default.v1",
                 rationale="Trying to reuse a record-origin receipt after source tampering",
             ),
+            authority=authority,
         )
 
 

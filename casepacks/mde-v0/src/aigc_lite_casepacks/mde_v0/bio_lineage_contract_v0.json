@@ -1,0 +1,43 @@
+{
+  "contract_version": "bio.sample-lineage.mde.v0",
+  "case_id": "bio.biological-source-sufficiency.v1",
+  "target": "Each recorded measurement pair has a distinct biological parent source.",
+  "signature_algorithm": "ed25519",
+  "signing_domain_utf8": "aigc-lite.bio-sample-lineage.mde.v0\n",
+  "binding": [
+    "sha256 of exact original instrument JSON bytes",
+    "sha256 of exact original custodian JSON bytes"
+  ],
+  "host_enrolled_roles": [
+    "instrument",
+    "custodian",
+    "lineage issuer scoped to parent_registry"
+  ],
+  "envelope_fields": ["contract_version", "issuer_id", "key_id", "payload", "signature"],
+  "payload_fields": [
+    "case_id",
+    "target",
+    "instrument_sha256",
+    "custodian_sha256",
+    "parent_registry",
+    "lineage_semantics",
+    "complete_for_recorded_samples",
+    "sample_parents"
+  ],
+  "sample_parent_fields": ["sample_id", "canonical_parent_id"],
+  "lineage_semantics": "canonical_biological_parent_with_split_alias_resolution",
+  "completeness_meaning": "Issuer attests every recorded sample is mapped to its canonical biological parent after resolving splits and aliases within the enrolled registry.",
+  "positive_requires": "signed complete attestation and one distinct canonical parent per recorded sample",
+  "negative_requires": "signed same canonical parent for two different recorded samples",
+  "resource_limits": {
+    "l1_record_bytes_each": 1000000,
+    "lineage_record_bytes_each": 100000,
+    "lineage_records": 64,
+    "all_input_bytes": 3000000,
+    "json_nesting_levels": 64,
+    "trusted_keys_per_role_set": 64,
+    "host_key_metadata_chars_each": 256
+  },
+  "trust_report": "Sorted host-enrolled public-key role, issuer, key ID, parent registry, and public-key SHA-256 descriptors; a SHA-256 fingerprint of the entire configuration; and verified signer descriptors. No private keys or revocation status.",
+  "authority_effect": "separately installed candidate diagnostic only; no qualification, current-use binding, or execution authorization"
+}

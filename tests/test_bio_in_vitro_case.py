@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import replace
 
 import pytest
+from authority_support import provision_admin
 from fastapi.testclient import TestClient
 
 from app import database, main
@@ -128,13 +129,15 @@ def test_tampered_certificate_cannot_issue_another_receipt(tmp_path) -> None:
         context.workspace_id, value["claim_revision_id"]
     )) == 1  # Historical receipt is not erased by later tampering.
     with pytest.raises(InvalidEvidenceError, match="stale qualification evidence"):
+        admin_context, authority = provision_admin(repository, context)
         QualificationService(lambda: repository).admit_knowledge(
-            context,
+            admin_context,
             KnowledgeAdmissionDraft(
                 qualification_receipt_id=value["qualification_receipt"]["qualification_receipt_id"],
                 admission_policy_id="knowledge.default.v1",
                 rationale="Attempt to reuse a tampered certificate",
             ),
+            authority=authority,
         )
 
 
@@ -161,13 +164,15 @@ def test_changed_profile_cannot_reuse_historical_receipt_for_knowledge(tmp_path)
         PROFILE, description="Different checker policy"
     )
     with pytest.raises(InvalidEvidenceError, match="stale qualification evidence"):
+        admin_context, authority = provision_admin(repository, context)
         qualification.admit_knowledge(
-            context,
+            admin_context,
             KnowledgeAdmissionDraft(
                 qualification_receipt_id=value["qualification_receipt"]["qualification_receipt_id"],
                 admission_policy_id="knowledge.default.v1",
                 rationale="Attempt to reuse an old policy snapshot",
             ),
+            authority=authority,
         )
 
 

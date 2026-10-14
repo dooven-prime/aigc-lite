@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import secrets
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
 from app.api.research import VerificationPlanRequest
 from app.core.artifacts import ArtifactDraft, ArtifactKind
+from app.core.authority import ADMIN_AUTHORITY_SCOPES, AuthorityContext
 from app.core.contracts import RequestContext
-from app.core.errors import InvalidVerificationResultError
+from app.core.errors import AuthorityDeniedError, InvalidVerificationResultError
 from app.core.research import (
     ClaimPromotionStage,
     VerificationAttemptDraft,
@@ -22,6 +27,27 @@ from app.services.artifacts import ArtifactService
 from app.services.evidence import EvidenceService
 from app.services.research_registry import ResearchRegistryService
 from app.services.verification_runner import RESULT_CONTRACT_VERSION, VerificationRunner
+
+
+def provision_admin(repository, context: RequestContext) -> tuple[RequestContext, AuthorityContext]:
+    repository.create_tenant("Adversarial authority workspace", context.workspace_id)
+    user = repository.create_user(
+        context.workspace_id,
+        f"authority-{uuid4()}@example.test",
+        "Adversarial test administrator",
+        "unused-test-password-hash",
+        role="admin",
+    )
+    session_hash = secrets.token_hex(32)
+    repository.save_auth_session(
+        session_hash,
+        user["id"],
+        context.workspace_id,
+        (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+    return replace(context, principal_id=user["id"]), AuthorityContext(
+        context.workspace_id, user["id"], session_hash, ADMIN_AUTHORITY_SCOPES
+    )
 
 
 def _registry() -> bytes:
@@ -86,6 +112,7 @@ def _research(tmp_path):
         workspace_id="workspace-a",
         principal_id="admin-a",
     )
+    context, authority = provision_admin(repository, context)
     claim = service.import_frontier(
         context,
         source_name="Adversarial authority fixture",
@@ -113,7 +140,7 @@ def _research(tmp_path):
             artifact_ids=(artifact["id"],),
         ),
     )
-    return service, context, claim, attempt
+    return service, context, authority, claim, attempt
 
 
 def _valid_agent_result() -> dict:
@@ -173,7 +200,7 @@ def test_agent_result_cannot_smuggle_authority_fields(field: str, value: object)
 
 
 def test_proposal_only_gate_cannot_change_workflow_stage(tmp_path) -> None:
-    service, context, claim, attempt = _research(tmp_path)
+    service, context, _authority, claim, attempt = _research(tmp_path)
 
     proposal = service.evaluate_promotion(
         context,
@@ -191,7 +218,16 @@ def test_proposal_only_gate_cannot_change_workflow_stage(tmp_path) -> None:
 
 
 def test_only_explicit_apply_transition_changes_workflow_stage(tmp_path) -> None:
-    service, context, claim, attempt = _research(tmp_path)
+    service, context, authority, claim, attempt = _research(tmp_path)
+
+    with pytest.raises(AuthorityDeniedError):
+        service.evaluate_promotion(
+            context,
+            claim["id"],
+            ClaimPromotionStage.EVIDENCE_READY,
+            required_attempt_id=attempt["id"],
+            apply_transition=True,
+        )
 
     applied = service.evaluate_promotion(
         context,
@@ -199,6 +235,7 @@ def test_only_explicit_apply_transition_changes_workflow_stage(tmp_path) -> None
         ClaimPromotionStage.EVIDENCE_READY,
         required_attempt_id=attempt["id"],
         apply_transition=True,
+        authority=authority,
     )
 
     assert applied["evaluation"]["input_snapshot"]["evaluation_mode"] == (

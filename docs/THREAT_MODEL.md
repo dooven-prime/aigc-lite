@@ -179,6 +179,7 @@ The concrete transition owners and choke points are enumerated in
 |---|---|
 | Immutable Claim revisions, evidence closure, Qualification Gate and Receipts | Implemented at the application and database layer. |
 | Candidate versus qualified retrieval | Implemented as distinct search paths; imports remain candidate-only. |
+| Knowledge admission, grant issuance, invalidation, workflow-stage application, and enforcer reconciliation authority | Separate action-scoped administrator authority context, rechecked against the active session, user role, principal, and workspace at the application service boundary. Not inherited by Chat or Tool scopes. |
 | Chat capability selection and Tool Catalog scopes | Implemented and server-owned, but still application-layer enforcement. |
 | Narrow AuthorizationGrant consumption | Implemented for delegated and physical dispatch, including invocation restrictions and currentness checks. |
 | PolicyProposal and server-derived PermissionDiff | Implemented as an immutable request ledger. Proposals do not approve or apply themselves. |
@@ -191,6 +192,17 @@ The concrete transition owners and choke points are enumerated in
 | Independent quarantine/watchdog trust domain | Not implemented. |
 | Hardware attestation or safety-rated physical interlock | Not implemented and outside the core project's authority. |
 | Controlled failure reproduction and source patching | Security contract frozen in [PATCH_RUNNER.md](PATCH_RUNNER.md); no patch runner or source-mutation API is implemented. |
+
+The service recheck does not make Python code in the same process an
+independent security domain. Code with arbitrary repository or session-table
+access can bypass application methods. Untrusted source execution therefore
+still requires the separate OS/external-enforcer boundary described above.
+The session/role recheck is not yet in the same database transaction as every
+authority write, so a concurrent revocation race is not claimed closed.
+The lower-level external-enforcer `dispatch()` port does not independently
+consume a one-time grant bound to the exact invocation. The supported Tool
+Catalog path checks and consumes grants first, but direct access to this
+internal port must not be exposed to untrusted same-process extensions.
 
 ### Collaborative research boundary
 

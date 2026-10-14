@@ -26,3 +26,8 @@
 - Preserve the distinction between candidate storage, epistemic qualification,
   current-use binding, and execution authorization. Model output cannot mutate
   these authorities directly.
+- New research Cases default to separately installable `casepacks/` or
+  extensions, with versioned contracts and no automatic authority transition.
+  Do not add a core authority primitive unless at least two independent
+  domains cannot express the same need using existing primitives and a
+  deterministic, versioned, domain-neutral contract has been reviewed.

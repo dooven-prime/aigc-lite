@@ -16,6 +16,7 @@ from uuid import uuid4
 import httpx
 
 from ..core.artifacts import ArtifactDraft, ArtifactKind
+from ..core.authority import AuthorityContext
 from ..core.contracts import RequestContext
 from ..core.errors import InvalidEvidenceError, ResourceNotFoundError, UpstreamRequestError
 from ..core.invalidation import (
@@ -29,6 +30,7 @@ from ..core.invalidation import (
 from ..core.qualification import canonical_hash, claim_semantic_hash
 from ..database import get_repository
 from .artifacts import ArtifactService
+from .authority import require_admin_authority
 
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _MAX_NOTICE_BYTES = 256_000
@@ -84,15 +86,21 @@ class InvalidationService:
         )
         self._source_fetcher = source_fetcher
 
-    @staticmethod
-    def _require_authority(context: RequestContext) -> None:
-        if not context.principal_id or "qualification:invalidate" not in context.scopes:
-            raise InvalidEvidenceError(
-                "authority", "Invalidation requires an authenticated workspace administrator"
-            )
+    def _require_authority(
+        self, context: RequestContext, authority: AuthorityContext | None
+    ) -> None:
+        require_admin_authority(
+            self._repository_provider(), context, authority, "qualification:invalidate"
+        )
 
-    def verify_notice(self, context: RequestContext, draft: NoticeVerificationDraft) -> dict:
-        self._require_authority(context)
+    def verify_notice(
+        self,
+        context: RequestContext,
+        draft: NoticeVerificationDraft,
+        *,
+        authority: AuthorityContext | None = None,
+    ) -> dict:
+        self._require_authority(context, authority)
         if not _COMMIT.fullmatch(draft.source_commit):
             raise InvalidEvidenceError("source_commit", "An exact 40-character commit is required")
         url = f"https://raw.githubusercontent.com/openai/math/{draft.source_commit}/history.md"
@@ -140,8 +148,14 @@ class InvalidationService:
             context.workspace_id, verification
         )
 
-    def decide(self, context: RequestContext, draft: InvalidationDecisionDraft) -> dict:
-        self._require_authority(context)
+    def decide(
+        self,
+        context: RequestContext,
+        draft: InvalidationDecisionDraft,
+        *,
+        authority: AuthorityContext | None = None,
+    ) -> dict:
+        self._require_authority(context, authority)
         repository = self._repository_provider()
         verification = repository.get_notice_verification(
             context.workspace_id, draft.notice_verification_id

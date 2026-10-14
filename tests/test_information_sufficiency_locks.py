@@ -72,6 +72,38 @@ def _check_file(entry: dict, expected_path: str) -> None:
     assert hashlib.sha256((ROOT / expected_path).read_bytes()).hexdigest() == digest
 
 
+def _check_revised_bio_helpers(lock: dict, helpers: list[dict]) -> None:
+    """Keep the v1 source lock historical while pinning the current test harness."""
+    revision = _load_json(LOCKS / "bio" / "harness-revision-v2.json")
+    assert set(revision) == {
+        "schema",
+        "case_id",
+        "authority",
+        "scope",
+        "parent_case_lock_sha256",
+        "historical_source_commit",
+        "reason",
+        "helper_sources",
+    }
+    assert revision["schema"] == "information-sufficiency-test-harness-revision.v1"
+    assert revision["case_id"] == lock["case_id"]
+    assert revision["authority"] == "candidate_only"
+    assert revision["scope"] == "test_harness_only"
+    assert revision["historical_source_commit"] == (
+        "91c38f7f375d43d35125e3912c18059610644c3c"
+    )
+    assert revision["parent_case_lock_sha256"] == hashlib.sha256(
+        (LOCKS / "bio" / "case-lock.json").read_bytes()
+    ).hexdigest()
+    revised = revision["helper_sources"]
+    assert len(revised) == len(helpers) == len(HELPER_PATHS["bio"])
+    for original, current, path in zip(helpers, revised, HELPER_PATHS["bio"], strict=True):
+        assert set(current) == {"path", "historical_sha256", "current_sha256"}
+        assert original["path"] == current["path"] == path
+        assert original["sha256"] == current["historical_sha256"]
+        _check_file({"path": path, "sha256": current["current_sha256"]}, path)
+
+
 @pytest.mark.parametrize("domain", ["bio", "citation"])
 def test_case_lock_pins_sources_fixture_and_semantic_contract(domain: str) -> None:
     lock = _lock(domain)
@@ -83,8 +115,11 @@ def test_case_lock_pins_sources_fixture_and_semantic_contract(domain: str) -> No
         _check_file(lock["files"][role], path)
     helpers = lock["files"]["fixture_helper_sources"]
     assert len(helpers) == len(HELPER_PATHS[domain])
-    for entry, path in zip(helpers, HELPER_PATHS[domain], strict=True):
-        _check_file(entry, path)
+    if domain == "bio":
+        _check_revised_bio_helpers(lock, helpers)
+    else:
+        for entry, path in zip(helpers, HELPER_PATHS[domain], strict=True):
+            _check_file(entry, path)
 
     assert set(lock) == {
         "schema",

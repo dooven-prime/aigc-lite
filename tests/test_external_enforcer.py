@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from authority_support import provision_admin
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from httpx import AsyncClient, MockTransport, Request, Response
@@ -33,6 +34,7 @@ from app.core.enforcement import (
     canonical_enforcement_json,
 )
 from app.core.errors import (
+    AuthorityDeniedError,
     EnforcementDispatchIndeterminateError,
     InvalidEnforcementReceiptError,
     InvalidExecutionPolicyError,
@@ -456,8 +458,14 @@ def test_indeterminate_dispatch_requires_signed_reconciliation(tmp_path) -> None
     }
 
     adapter.outcome = "succeeded"
+    with pytest.raises(AuthorityDeniedError):
+        asyncio.run(external.reconcile_dispatch(context, root_dispatch_id))
+    assert len(adapter.requests) == 1
+    admin_context, authority = provision_admin(repository, context)
     reconciled = asyncio.run(
-        external.reconcile_dispatch(context, root_dispatch_id)
+        external.reconcile_dispatch(
+            admin_context, root_dispatch_id, authority=authority
+        )
     )
     assert reconciled["dispatch_state"] == "terminal"
     assert adapter.requests[-1].execution_envelope == {
@@ -489,6 +497,7 @@ def test_live_dispatch_cannot_be_reconciled_and_cancellation_becomes_indetermina
         tmp_path, adapter, private_key
     )
     context, proposal, run, step = _proposal_and_run(repository, enforcement)
+    admin_context, authority = provision_admin(repository, context)
 
     async def scenario():
         task = asyncio.create_task(
@@ -508,7 +517,9 @@ def test_live_dispatch_cannot_be_reconciled_and_cancellation_becomes_indetermina
             await asyncio.sleep(0)
         dispatch_id = adapter.requests[0].request_id
         with pytest.raises(InvalidExecutionPolicyError, match="active request window"):
-            await external.reconcile_dispatch(context, dispatch_id)
+            await external.reconcile_dispatch(
+                admin_context, dispatch_id, authority=authority
+            )
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

@@ -1,0 +1,21 @@
+{
+  "schema": "information-sufficiency-test-harness-revision.v1",
+  "case_id": "bio.biological-source-sufficiency.v1",
+  "authority": "candidate_only",
+  "scope": "test_harness_only",
+  "parent_case_lock_sha256": "1412c7ef497a2ad081559575697cc90e45c3267b00b510e3e1f83a0a0a0f937b",
+  "historical_source_commit": "91c38f7f375d43d35125e3912c18059610644c3c",
+  "reason": "The helper test files now provision an admin session for a separate application-service authority regression. The frozen Bio observation, diagnostic, fixture, and semantic contract are unchanged.",
+  "helper_sources": [
+    {
+      "path": "tests/test_bio_in_vitro_case.py",
+      "historical_sha256": "84d5f743b1dc68bdede1ade0ba47658cdb81e6ff31ce34d7b21b3a26a3dd0cf0",
+      "current_sha256": "e89069c3ec6dcba6f9ccd3382f7199c9a71f4e00c449329fbbc73ca565c3a10e"
+    },
+    {
+      "path": "tests/test_bio_observation_provenance.py",
+      "historical_sha256": "daf459c3281168fe22987551292339b072aaa38812b64caf6e1ae3e57920088c",
+      "current_sha256": "b6560de91526ff7bd6aa83d203db7a4116f29ed6fa00969089f56ca4d1e1af02"
+    }
+  ]
+}
