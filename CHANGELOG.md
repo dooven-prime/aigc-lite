@@ -79,8 +79,12 @@ release or a completed `v0.7.0` release closure.
   PostgreSQL contract tests, Ruff, and byte compilation passing. The timeout
   normalization then passed 24 handoff tests and 11 neighboring tests (2
   opt-in PostgreSQL tests skipped), plus Ruff and byte compilation. These are
-  development checks; final-source Python 3.12, clean-wheel, frontend,
-  PostgreSQL, and Docker results remain to be recorded separately.
+  development checks. The final candidate code commit's Python 3.12 suite,
+  three clean-install wheels, frontend audit/build, PostgreSQL 17/18 contract,
+  and hardened/insecure Docker checks are recorded separately in
+  `docs/releases/v0.7.0-candidate.md`; that local evidence is not a tag or
+  published release. GitHub CI for the pushed candidate remains a separate
+  acceptance check.
 
 ### Non-claims and release gate
 
