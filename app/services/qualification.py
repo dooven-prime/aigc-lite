@@ -1518,6 +1518,17 @@ class QualificationService:
             receipt.get("criteria", []), evaluation.get("evidence_closure", {}),
             receipt["profile_id"],
         )
+        if (
+            receipt.get("verdict") == QualificationVerdict.ADMITTED.value
+            and receipt["profile_id"] in {"math.formal.v1", "math.formal.project.v2"}
+            and not selected_attempts
+        ):
+            # An ADMITTED mathematical receipt with no reconstructible proof
+            # selection cannot be treated as proof-independent. This also
+            # covers historical receipts whose frozen inputs admit no eligible
+            # Attempt at all. Multiple possible historical selections remain
+            # a nonempty conservative set, not an exact reconstruction.
+            stale_reasons.append("proof_selection_unresolved")
         for invalidation in repository.list_invalidation_decisions(
             context.workspace_id, receipt["claim_revision_id"]
         ):

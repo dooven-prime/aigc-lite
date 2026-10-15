@@ -15,6 +15,7 @@ import pytest
 from authority_support import provision_admin
 from fastapi.testclient import TestClient
 
+import app.core.invalidation as invalidation_module
 import app.repositories.goal_progress_snapshot as snapshot_module
 import app.repository as repository_module
 import app.services.goal_progress_evidence as bridge_module
@@ -29,6 +30,7 @@ from app.core.invalidation import (
     InvalidationReason,
     InvalidationScope,
     NoticeVerificationDraft,
+    selected_kernel_attempt_ids_v1,
 )
 from app.core.kernel_verification import KERNEL_EXECUTION_CONTRACT_VERSION
 from app.core.qualification import (
@@ -304,7 +306,10 @@ def test_real_admitted_knowledge_is_supported_as_of_snapshot_without_writes(
         result = bridge.evaluate(context, run["id"])
 
     assert result["status"] == "SUPPORTED_AS_OF_SNAPSHOT"
+    assert result["contract"] == "GoalProgressEvidenceBridge.v0.1"
     assert result["rule_id"] == RULE_ID
+    assert result["rule_version"] == "0.1"
+    assert result["rule_sha256"] == bridge_module.RULE_SHA256
     assert result["run_id"] == run["id"]
     assert result["criterion"]["claim_revision_id"] == claim["id"]
     assert result["source"]["snapshot_sha256"]
@@ -322,6 +327,9 @@ def test_real_admitted_knowledge_is_supported_as_of_snapshot_without_writes(
     assert result["implementation_source_sha256"] == {
         "app/services/goal_progress_evidence.py": sha256(
             Path(bridge_module.__file__).read_bytes()
+        ).hexdigest(),
+        "app/core/invalidation.py": sha256(
+            Path(invalidation_module.__file__).read_bytes()
         ).hexdigest(),
         "app/repositories/goal_progress_snapshot.py": sha256(
             Path(snapshot_module.__file__).read_bytes()
@@ -635,6 +643,241 @@ def test_proof_attempt_invalidation_follows_selected_attempt_across_receipts(
     assert bridge.evaluate(context, run["id"])["status"] == "SUPPORTED_AS_OF_SNAPSHOT"
 
 
+def test_v0_1_bridge_agrees_with_exact_selection_when_certificate_is_shared(
+    tmp_path, monkeypatch,
+) -> None:
+    """An unrelated old proof invalidation does not taint an exact replacement."""
+    repository, context, authority, artifacts, qualification, research, bridge = _setup(
+        "sqlite", tmp_path,
+    )
+    claim = _register_claim(qualification, context)
+    old_receipt, _ = _qualify_claim(
+        artifacts, qualification, research, context, authority, claim,
+    )
+    old_attempt = next(
+        item for item in repository.list_research_verification_attempts(
+            context.workspace_id, claim["id"],
+        ) if item["validation_modality"] == "kernel_check"
+    )
+    verifier = RequestContext(
+        request_id=str(uuid4()), workspace_id=context.workspace_id,
+        principal_id="system:verifier:lean-kernel",
+    )
+    new_attempt = research.record_verification_attempt(
+        verifier, claim["id"],
+        VerificationAttemptDraft(
+            kind=VerificationKind.CALCULATION, outcome=VerificationOutcome.PASSED,
+            validation_modality=ValidationModality.KERNEL_CHECK,
+            method="Recheck the same certificate independently.",
+            scope="Frozen theorem.",
+            input_digest=claim["semantic_hash"],
+            output_digest=old_attempt["output_digest"],
+            artifact_ids=tuple(old_attempt["artifact_ids"]),
+        ),
+    )
+    new_receipt = qualification.evaluate(context, claim["id"], PROFILE_ID)[
+        "qualification_receipt"
+    ]
+    assert new_receipt is not None
+    selected = {
+        node_id for criterion in new_receipt["criteria"]
+        if criterion["code"] == "kernel_check"
+        for node_id in criterion["evidence_node_ids"]
+    }
+    assert selected == {new_attempt["id"]}
+    qualification.admit_knowledge(
+        context,
+        KnowledgeAdmissionDraft(
+            qualification_receipt_id=new_receipt["id"],
+            admission_policy_id="knowledge.default.v1",
+            rationale="Select the later exact proof attempt.",
+        ),
+        authority=authority,
+    )
+    run = _goal_run(repository, context, claim)
+    frozen = next(
+        item for item in repository.list_qualification_evaluations(
+            context.workspace_id, claim["id"], PROFILE_ID,
+        ) if item["id"] == new_receipt["evaluation_id"]
+    )["evidence_closure"]
+    assert selected_kernel_attempt_ids_v1(
+        new_receipt["criteria"], frozen, PROFILE_ID,
+    ) == {new_attempt["id"]}
+    assert bridge.evaluate(context, run["id"])["status"] == "SUPPORTED_AS_OF_SNAPSHOT"
+
+    decision = _verified_invalidation(
+        repository, artifacts, context, authority, claim,
+        scope=InvalidationScope.PROOF_ATTEMPT,
+        receipt_id=old_receipt["id"], attempt_id=old_attempt["id"],
+    )
+    # Both implementations now use the exact chosen Attempt even though the
+    # frozen closure retains the old proof and both reference one certificate.
+    assert repository.get_current_use_binding(
+        context.workspace_id, claim["id"], PROFILE_ID,
+    )["state"] == "current"
+    assert qualification._receipt_stale_reasons(context, new_receipt) == []
+    result = bridge.evaluate(context, run["id"])
+    assert result["status"] == "SUPPORTED_AS_OF_SNAPSHOT"
+    assert result["reasons"] == []
+
+    # Model the same frozen source rows under the old criterion that listed
+    # both possible selections. The authenticated decision then intersects the
+    # historical possible set even though the current exact receipt survives.
+    snapshot = repository.read_goal_progress_snapshot(
+        context.workspace_id, run["id"], claim["id"], PROFILE_ID,
+    )
+    assert snapshot is not None
+    snapshot = copy.deepcopy(snapshot)
+    subject = snapshot["subjects"][claim["id"]]
+    historical_receipt = subject["receipts"][0]
+    historical_evaluation = subject["evaluations"][0]
+    old_kernel_criterion = next(
+        criterion for criterion in historical_receipt["criteria"]
+        if criterion["code"] == "kernel_check"
+    )
+    old_kernel_criterion["evidence_node_ids"] = [old_attempt["id"], new_attempt["id"]]
+    historical_evaluation["criteria"] = copy.deepcopy(historical_receipt["criteria"])
+    assert selected_kernel_attempt_ids_v1(
+        historical_receipt["criteria"], historical_evaluation["evidence_closure"],
+        PROFILE_ID,
+    ) == {old_attempt["id"], new_attempt["id"]}
+    historical_receipt["receipt_hash"] = bridge_module.canonical_hash({
+        "qualification_receipt_id": historical_receipt["id"],
+        "profile": historical_receipt["profile_id"],
+        **{
+            field: historical_receipt[field]
+            for field in bridge_module._RECEIPT_FIELDS
+        },
+    })
+    historical_admission = subject["admissions"][0]
+    historical_admission["qualification_receipt_hash"] = historical_receipt["receipt_hash"]
+    historical_admission["receipt_hash"] = bridge_module.canonical_hash({
+        "knowledge_admission_receipt_id": historical_admission["id"],
+        **{
+            field: historical_admission[field]
+            for field in bridge_module._ADMISSION_FIELDS
+        },
+    })
+    monkeypatch.setattr(repository, "read_goal_progress_snapshot", lambda *_: snapshot)
+    historical = bridge.evaluate(context, run["id"])
+    assert historical["status"] == "BLOCKED"
+    assert historical["reasons"] == [f"invalidation_decision:{decision['id']}"]
+
+
+@pytest.mark.parametrize(
+    ("kernel_criterion_ids", "closure_attempt_ids", "core_selection", "bridge_selection"),
+    [
+        (["attempt-a"], ["attempt-a"], {"attempt-a"}, {"attempt-a"}),
+        (
+            ["attempt-a", "attempt-b"], ["attempt-a", "attempt-b"],
+            {"attempt-a", "attempt-b"}, {"attempt-a", "attempt-b"},
+        ),
+        (["attempt-a"], [], set(), None),
+    ],
+    ids=["exact", "historical-possible", "zero-candidate"],
+)
+def test_v0_1_attempt_resolver_and_core_projection_on_same_frozen_input(
+    kernel_criterion_ids, closure_attempt_ids, core_selection, bridge_selection,
+) -> None:
+    """The revised bridge projects exact, possible, and missing selections."""
+    criteria = [
+        {"code": "statement_identity", "evidence_node_ids": ["cert-1"]},
+        {"code": "kernel_check", "evidence_node_ids": kernel_criterion_ids},
+    ]
+    nodes = [
+        {
+            "node_type": "verification_attempt", "node_id": attempt_id,
+            "payload": {
+                "validation_modality": "kernel_check",
+                "artifact_ids": ["cert-1"], "outcome": "passed",
+                "invalidated_by": [],
+                "verifier_lineage": {
+                    "runtime_derived": True,
+                    "principal_id": "system:verifier:lean-kernel",
+                    "model_route": None,
+                },
+            },
+        }
+        for attempt_id in closure_attempt_ids
+    ]
+    receipt = {"criteria": criteria}
+    assert selected_kernel_attempt_ids_v1(
+        criteria, {"nodes": nodes}, PROFILE_ID,
+    ) == core_selection
+    if bridge_selection is None:
+        with pytest.raises(_Decision) as decision:
+            bridge_module.GoalProgressEvidenceBridgeService._selected_math_attempt_ids(
+                {"profile_id": PROFILE_ID, **receipt}, {"nodes": nodes},
+            )
+        assert (decision.value.status, decision.value.reason) == (
+            "UNRESOLVED", "selected_proof_attempt_unreconstructable",
+        )
+    else:
+        assert (
+            bridge_module.GoalProgressEvidenceBridgeService._selected_math_attempt_ids(
+                {"profile_id": PROFILE_ID, **receipt}, {"nodes": nodes},
+            ) == bridge_selection
+        )
+
+
+def test_v0_1_zero_candidate_historical_snapshot_must_not_support(
+    tmp_path, monkeypatch,
+) -> None:
+    """Adversarial historical shape, not evidence that a legitimate issuer made it."""
+    repository, context, authority, artifacts, qualification, research, bridge = _setup(
+        "sqlite", tmp_path,
+    )
+    claim = _register_claim(qualification, context)
+    _qualify_claim(artifacts, qualification, research, context, authority, claim)
+    run = _goal_run(repository, context, claim)
+    snapshot = repository.read_goal_progress_snapshot(
+        context.workspace_id, run["id"], claim["id"], PROFILE_ID,
+    )
+    assert snapshot is not None
+    snapshot = copy.deepcopy(snapshot)
+    subject = snapshot["subjects"][claim["id"]]
+    receipt = subject["receipts"][0]
+    evaluation = subject["evaluations"][0]
+    admission = subject["admissions"][0]
+    closure = evaluation["evidence_closure"]
+    removed = {
+        node["node_id"] for node in closure["nodes"]
+        if node["node_type"] == "verification_attempt"
+        and node["payload"].get("validation_modality") == "kernel_check"
+    }
+    assert removed
+    closure["nodes"] = [
+        node for node in closure["nodes"] if node["node_id"] not in removed
+    ]
+    closure["edges"] = [
+        edge for edge in closure["edges"]
+        if edge["source_node_id"] not in removed
+        and edge["target_node_id"] not in removed
+    ]
+    assert selected_kernel_attempt_ids_v1(
+        receipt["criteria"], closure, PROFILE_ID,
+    ) == frozenset()
+    closure_hash = bridge_module.canonical_hash(closure)
+    evaluation["evidence_closure_hash"] = closure_hash
+    receipt["evidence_closure_hash"] = closure_hash
+    receipt["receipt_hash"] = bridge_module.canonical_hash({
+        "qualification_receipt_id": receipt["id"],
+        "profile": receipt["profile_id"],
+        **{field: receipt[field] for field in bridge_module._RECEIPT_FIELDS},
+    })
+    admission["qualification_receipt_hash"] = receipt["receipt_hash"]
+    admission["receipt_hash"] = bridge_module.canonical_hash({
+        "knowledge_admission_receipt_id": admission["id"],
+        **{field: admission[field] for field in bridge_module._ADMISSION_FIELDS},
+    })
+    monkeypatch.setattr(repository, "read_goal_progress_snapshot", lambda *_: snapshot)
+    before = _authority_rows(repository, context.workspace_id)
+    result = bridge.evaluate(context, run["id"])
+    assert _authority_rows(repository, context.workspace_id) == before
+    assert result["status"] == "UNRESOLVED"
+    assert result["reasons"] == ["selected_proof_attempt_unreconstructable"]
+
+
 @pytest.mark.parametrize("mismatch", ["revision", "profile", "hash"])
 def test_frozen_identity_mismatch_never_supports(mismatch, tmp_path) -> None:
     repository, context, authority, artifacts, qualification, research, bridge = _setup(
@@ -867,6 +1110,9 @@ def test_http_goal_progress_is_member_read_only_and_workspace_scoped(
         assert supported.headers["cache-control"] == "no-store"
         value = supported.json()
         assert value["status"] == "SUPPORTED_AS_OF_SNAPSHOT"
+        assert value["contract"] == "GoalProgressEvidenceBridge.v0.1"
+        assert value["rule_version"] == "0.1"
+        assert value["rule_sha256"] == bridge_module.RULE_SHA256
         assert value["run_id"] == supported_run["id"]
         assert value["criterion"]["claim_revision_id"] == qualified["id"]
         assert value["source"]["snapshot_sha256"]
