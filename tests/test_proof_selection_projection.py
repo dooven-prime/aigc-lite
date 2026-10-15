@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -15,7 +16,9 @@ from authority_support import provision_admin
 
 from app.core.contracts import RequestContext
 from app.core.invalidation import selected_kernel_attempt_ids_v1
+from app.core.qualification import claim_semantic_hash
 from app.repository import SQLiteRepository
+from app.services.qualification import QualificationService
 
 
 def _attempt(
@@ -139,6 +142,75 @@ def test_current_theorem_receipt_keeps_exact_selected_attempt(selected_id: str) 
         migration._selected_kernel_attempt_ids_v1(criteria, closure, "math.formal.v1")
         == expected
     )
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected_stale"),
+    [
+        ("math.formal.v1", True),
+        ("math.formal.project.v2", True),
+        ("logic.propositional.ab.v1", False),
+    ],
+)
+def test_admitted_receipt_with_no_reconstructible_math_attempt_fails_closed(
+    profile_id: str, expected_stale: bool
+) -> None:
+    claim = {
+        "id": "claim-1",
+        "claim_key": "HISTORICAL-PROOF",
+        "claim_kind": "mathematical_theorem",
+        "statement": "A = A",
+        "scope": "Frozen historical statement.",
+    }
+    repository = MagicMock()
+    service = QualificationService(lambda: repository)
+    profile = service._registry.get(profile_id).profile
+    closure = {
+        "nodes": [
+            _attempt("attempt-1", principal="system:verifier:lean-kernel")
+        ]
+    }
+    # The frozen statement-identity criterion points at a certificate absent
+    # from every eligible Attempt, so the possible-selection set is empty.
+    criteria = [
+        {"code": "statement_identity", "evidence_node_ids": ["unmatched-cert"]},
+        {"code": "kernel_check", "evidence_node_ids": ["attempt-1"]},
+    ]
+    receipt = {
+        "id": "receipt-1",
+        "claim_revision_id": claim["id"],
+        "claim_semantic_hash": claim_semantic_hash(claim),
+        "profile_id": profile_id,
+        "profile_version": profile.version,
+        "policy_version": profile.policy_version,
+        "evaluation_id": "evaluation-1",
+        "verdict": "ADMITTED",
+        "criteria": criteria,
+    }
+    repository.get_research_claim.return_value = claim
+    repository.get_qualification_receipt.return_value = receipt
+    repository.list_invalidation_decisions.return_value = []
+    repository.list_qualification_evaluations.return_value = [
+        {
+            "id": "evaluation-1",
+            "profile_hash": profile.content_hash,
+            "evidence_closure": closure,
+        }
+    ]
+    repository.upsert_current_use_binding.side_effect = lambda _workspace, value: value
+    context = RequestContext("historical-proof", "workspace-a", "admin")
+
+    assert selected_kernel_attempt_ids_v1(criteria, closure, profile_id) == frozenset()
+    reasons = service._receipt_stale_reasons(context, receipt)
+    assert ("proof_selection_unresolved" in reasons) is expected_stale
+    binding = {
+        "claim_revision_id": claim["id"],
+        "profile_id": profile_id,
+        "qualification_receipt_id": receipt["id"],
+        "state": "current",
+    }
+    refreshed = service._refresh_binding(context, binding)
+    assert (refreshed["state"] == "stale") is expected_stale
 
 
 @pytest.mark.parametrize("invalidated_attempt_id", ["attempt-r1", "attempt-r2"])

@@ -57,15 +57,29 @@ jobs:
       - run: python -m venv /tmp/aigc-lite-wheel
       - run: /tmp/aigc-lite-wheel/bin/pip install wheelhouse/*.whl
       - run: cd /tmp && /tmp/aigc-lite-wheel/bin/python "$GITHUB_WORKSPACE/scripts/smoke_installed_wheel.py"
-      - run: python -m pip wheel ./casepacks/mde-v0 --no-deps --wheel-dir mde-wheelhouse
-      - run: python casepacks/mde-v0/check_wheels.py wheelhouse/*.whl mde-wheelhouse/*.whl
-      - run: python -m venv /tmp/aigc-lite-mde-wheel
-      - run: /tmp/aigc-lite-mde-wheel/bin/pip install wheelhouse/*.whl mde-wheelhouse/*.whl
-      - run: cd /tmp && /tmp/aigc-lite-mde-wheel/bin/python "$GITHUB_WORKSPACE/casepacks/mde-v0/smoke_installed_wheel.py"
       - run: python -m pip wheel ./extensions/ros2-bridge --no-deps --wheel-dir ros2-wheelhouse
       - run: python -m venv /tmp/aigc-lite-ros2-wheel
       - run: /tmp/aigc-lite-ros2-wheel/bin/pip install ros2-wheelhouse/*.whl
       - run: cd /tmp && /tmp/aigc-lite-ros2-wheel/bin/python "$GITHUB_WORKSPACE/scripts/smoke_ros2_wheel.py"
+      - name: Accept installed ROS2 nine-trial evaluation and replay
+        run: |
+          report_dir=$(mktemp -d)
+          trap 'rm -rf "$report_dir"' EXIT
+          /tmp/aigc-lite-ros2-wheel/bin/aigc-lite-ros2-eval run --output "$report_dir/report.json"
+          /tmp/aigc-lite-ros2-wheel/bin/aigc-lite-ros2-eval replay --report "$report_dir/report.json" --output "$report_dir/replay.json"
+          /tmp/aigc-lite-ros2-wheel/bin/python - "$report_dir/report.json" "$report_dir/replay.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          replay = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          assert report["metrics"]["trial_count"] == 9
+          assert report["metrics"]["task_success_count"] == 2
+          assert report["metrics"]["contract_pass_rate"] == 1
+          assert report["runtime"]["bridge_version"] == "0.8.0"
+          assert replay["outcomes_match"] is True
+          PY
 
   postgres:
     runs-on: ubuntu-latest
@@ -93,7 +107,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev,postgres]"
-      - run: pytest tests/test_postgres_contract.py tests/test_shared_attempt_postgres.py tests/test_release_v0_7_upgrade.py tests/test_ledger_projection.py tests/test_native_goal_repository.py -q
+      - run: pytest tests/test_postgres_contract.py tests/test_shared_attempt_postgres.py tests/test_release_v0_7_upgrade.py tests/test_release_v0_8_upgrade.py tests/test_ledger_projection.py tests/test_native_goal_repository.py -q
 
   docker-smoke:
     runs-on: ubuntu-latest
@@ -128,4 +142,4 @@ jobs:
             curl --fail --silent http://127.0.0.1:8013/ready && break
             sleep 1
           done
-          curl --fail --silent http://127.0.0.1:8013/ui/ | grep 'react-v0.7'
+          curl --fail --silent http://127.0.0.1:8013/ui/ | grep 'react-v0.8'

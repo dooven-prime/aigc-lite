@@ -18,6 +18,7 @@ from typing import Any
 from ..core.contracts import RequestContext
 from ..core.errors import LedgerProjectionTooLargeError, ResourceNotFoundError
 from ..core.goal_binding import assess_native_goal_binding
+from ..core.invalidation import selected_kernel_attempt_ids_v1
 from ..core.qualification import (
     EVIDENCE_CLOSURE_VERSION,
     KNOWLEDGE_ADMISSION_CONTRACT_VERSION,
@@ -37,11 +38,14 @@ from .qualification import (
 
 RepositoryProvider = Callable[[], Repository]
 
-CONTRACT_VERSION = "GoalProgressEvidenceBridge.v0"
+# The frozen Goal criterion keeps its v0 rule ID. This explicit v0.1 evaluator
+# is a fail-closed safety revision, not a reinterpretation of historical v0
+# output; earlier responses retain their original contract/hash identities.
+CONTRACT_VERSION = "GoalProgressEvidenceBridge.v0.1"
 RULE_ID = "goal.current_knowledge_qualification.v0"
 _RULE = {
     "rule_id": RULE_ID,
-    "version": 0,
+    "version": "0.1",
     "criterion_fields": [
         "rule_id", "claim_revision_id", "claim_semantic_hash", "profile_id",
     ],
@@ -52,6 +56,7 @@ _RULE = {
         "admitted_qualification_receipt_and_frozen_closure",
         "matching_knowledge_admission_receipt",
         "same_snapshot_current_use_and_recursive_dependency_currentness",
+        "nonempty_reconstructible_math_proof_attempt_selection",
         "no_applicable_invalidation_decision",
     ],
 }
@@ -195,6 +200,7 @@ def _implementation_source_sha256() -> dict[str, str]:
     app_root = Path(__file__).resolve().parents[1]
     paths = {
         "app/services/goal_progress_evidence.py": Path(__file__).resolve(),
+        "app/core/invalidation.py": app_root / "core" / "invalidation.py",
         "app/repositories/goal_progress_snapshot.py": (
             app_root / "repositories" / "goal_progress_snapshot.py"
         ),
@@ -284,6 +290,7 @@ class GoalProgressEvidenceBridgeService:
         return {
             "contract": CONTRACT_VERSION,
             "rule_id": RULE_ID,
+            "rule_version": _RULE["version"],
             "rule_sha256": RULE_SHA256,
             "implementation_source_sha256": implementation_source_sha256,
             "qualification_profile_identity": qualification_profile_identity,
@@ -451,15 +458,14 @@ class GoalProgressEvidenceBridgeService:
             elif kind == "claim_revision" and node_id == claim_id:
                 if node.get("content_hash") != semantic_hash:
                     _blocked("closure_claim_semantic_hash_mismatch")
+        selected_attempt_ids = self._selected_math_attempt_ids(receipt, closure)
         proof_decisions = [
             decision for decision in invalidations
             if decision["target_scope"] == "proof_attempt"
         ]
-        if proof_decisions:
-            selected_attempt_id = self._selected_kernel_attempt_id(receipt, nodes)
-            for decision in proof_decisions:
-                if decision.get("target_attempt_id") == selected_attempt_id:
-                    _blocked(f"invalidation_decision:{decision['id']}")
+        for decision in proof_decisions:
+            if decision.get("target_attempt_id") in selected_attempt_ids:
+                _blocked(f"invalidation_decision:{decision['id']}")
         declared = claim.get("dependency_claim_ids") or []
         if not isinstance(declared, list) or set(declared) != set(dependencies):
             _blocked("dependency_closure_mismatch")
@@ -481,44 +487,19 @@ class GoalProgressEvidenceBridgeService:
         checked.add(claim_id)
 
     @staticmethod
-    def _selected_kernel_attempt_id(
-        receipt: dict[str, Any], nodes: list[dict[str, Any]],
-    ) -> str:
-        """Resolve the kernel attempt selected by statement identity evidence."""
-        criteria = receipt.get("criteria")
-        if not isinstance(criteria, list):
-            _unresolved("selected_proof_attempt_ambiguous")
-        selected_artifact_ids: set[str] = set()
-        for criterion in criteria:
-            if not isinstance(criterion, dict):
-                _unresolved("selected_proof_attempt_ambiguous")
-            if criterion.get("code") != "statement_identity":
-                continue
-            evidence_ids = criterion.get("evidence_node_ids")
-            if not isinstance(evidence_ids, list) or any(
-                not isinstance(item, str) or not item for item in evidence_ids
-            ):
-                _unresolved("selected_proof_attempt_ambiguous")
-            selected_artifact_ids.update(evidence_ids)
-        if not selected_artifact_ids:
-            _unresolved("selected_proof_attempt_ambiguous")
-        selected_attempt_ids: set[str] = set()
-        for node in nodes:
-            if node["node_type"] != "verification_attempt":
-                continue
-            payload = node["payload"]
-            if payload.get("validation_modality") != "kernel_check":
-                continue
-            artifact_ids = payload.get("artifact_ids")
-            if not isinstance(artifact_ids, list) or any(
-                not isinstance(item, str) for item in artifact_ids
-            ):
-                _unresolved("selected_proof_attempt_ambiguous")
-            if selected_artifact_ids.intersection(artifact_ids):
-                selected_attempt_ids.add(node["node_id"])
-        if len(selected_attempt_ids) != 1:
-            _unresolved("selected_proof_attempt_ambiguous")
-        return next(iter(selected_attempt_ids))
+    def _selected_math_attempt_ids(
+        receipt: dict[str, Any], closure: dict[str, Any],
+    ) -> frozenset[str]:
+        """Use the authority chain's versioned exact/possible proof selection."""
+        profile_id = receipt["profile_id"]
+        if profile_id not in {"math.formal.v1", "math.formal.project.v2"}:
+            return frozenset()
+        selected = selected_kernel_attempt_ids_v1(
+            receipt["criteria"], closure, profile_id,
+        )
+        if not selected:
+            _unresolved("selected_proof_attempt_unreconstructable")
+        return selected
 
     @staticmethod
     def _check_invalidation_identity(

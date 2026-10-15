@@ -107,7 +107,10 @@ def test_postgres_scheduled_firing_is_unique_across_repository_instances() -> No
     assert firing_id
     assert second_service.claim(task, owner="pg-worker-2", now=now) is None
     assert second_service.due(now=now) == []
-    assert second_service.reconcile_expired(now=now + timedelta(seconds=4)) == 1
+    # Reconciliation scans the whole database. Earlier test workspaces may
+    # also have expired firings; assert this firing's state below rather than
+    # treating a global row count as task-scoped evidence.
+    assert second_service.reconcile_expired(now=now + timedelta(seconds=4)) >= 1
     assert first.get_scheduled_firing(firing_id)["state"] == "indeterminate"
     assert first_service.claim(task, owner="pg-worker-2", now=now + timedelta(minutes=1)) is None
     interval = first_service.schedule(context, ScheduleTaskCommand(
