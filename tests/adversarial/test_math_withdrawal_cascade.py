@@ -422,6 +422,7 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
     )
     service, admin, verified = _verified_notice(repository, artifacts, context, authority)
     old_binding = repository.get_current_use_binding(context.workspace_id, old["id"], PROFILE_ID)
+    child_binding = repository.get_current_use_binding(context.workspace_id, child["id"], PROFILE_ID)
     assert old_binding["state"] == CurrentUseState.CURRENT
     draft = InvalidationDecisionDraft(
         notice_verification_id=verified["id"],
@@ -461,7 +462,7 @@ def test_verified_withdrawal_decision_is_exact_and_does_not_erase_history(tmp_pa
             authority=authority,
         )
     decision = service.decide(admin, draft, authority=authority)
-    assert decision["affected_binding_ids"] == [old_binding["id"]]
+    assert decision["affected_binding_ids"] == [old_binding["id"], child_binding["id"]]
     assert decision["evidence_artifact_ids"] == [verified["source_artifact_id"]]
     assert (
         service.list_decisions(context, old["id"])[0]["decision_hash"] == decision["decision_hash"]
@@ -619,6 +620,18 @@ def test_shared_attempt_invalidation_reaches_current_receipt_and_authority(tmp_p
     dependent_receipt, _ = _qualify(
         artifacts, research, qualification, context, authority, dependent
     )
+    dependent_binding = repository.get_current_use_binding(
+        context.workspace_id, dependent["id"], PROFILE_ID
+    )
+    dependent_grant = qualification.create_authorization(
+        context,
+        context.principal_id,
+        AuthorizationGrantDraft(
+            qualification_receipt_id=dependent_receipt["id"],
+            action="publish", target="knowledge/dependent", scope={},
+        ),
+        authority=authority,
+    )
     grant = qualification.create_authorization(
         context,
         context.principal_id,
@@ -651,7 +664,9 @@ def test_shared_attempt_invalidation_reaches_current_receipt_and_authority(tmp_p
         ),
         authority=authority,
     )
-    assert decision["affected_binding_ids"] == [binding_b["id"]]
+    assert set(decision["affected_binding_ids"]) == {
+        binding_b["id"], dependent_binding["id"]
+    }
     assert qualification.refresh_receipt_binding(context, receipt_b["id"])["state"] == (
         CurrentUseState.STALE
     )
@@ -674,6 +689,11 @@ def test_shared_attempt_invalidation_reaches_current_receipt_and_authority(tmp_p
     assert repository.consume_authorization_grant(
         context.workspace_id, context.principal_id, "robot_navigate_to",
         "provider:robot", datetime.now(UTC).isoformat(), grant_id=grant["id"],
+    ) is None
+    assert repository.consume_authorization_grant(
+        context.workspace_id, context.principal_id, "publish",
+        "knowledge/dependent", datetime.now(UTC).isoformat(),
+        grant_id=dependent_grant["id"],
     ) is None
     spec = ToolSpec(
         name="robot__robot_navigate_to", native_name="robot_navigate_to",
@@ -806,6 +826,14 @@ def test_proof_selection_upgrade_backfills_historical_receipts(tmp_path):
         ),
         authority=authority,
     )["current_use_binding"]
+    dependent = _register(
+        qualification, context, "BACKFILL-DEPENDENT", "Depends on the frozen proof.",
+        dependencies=(claim["id"],),
+    )
+    _qualify(artifacts, research, qualification, context, authority, dependent)
+    dependent_binding = repository.get_current_use_binding(
+        context.workspace_id, dependent["id"], PROFILE_ID
+    )
     app_root = Path(__file__).resolve().parents[2] / "app"
     config = Config(str(app_root / "alembic.ini"))
     config.set_main_option("script_location", str(app_root / "alembic"))
@@ -848,6 +876,11 @@ def test_proof_selection_upgrade_backfills_historical_receipts(tmp_path):
     assert reconciled["id"] == binding_b["id"]
     assert reconciled["state"] == CurrentUseState.STALE
     assert reconciled["stale_reason"] == f"invalidation_decision:{decision_id}"
+    migrated_dependent = repository.get_current_use_binding(
+        context.workspace_id, dependent["id"], PROFILE_ID
+    )
+    assert migrated_dependent["id"] == dependent_binding["id"]
+    assert migrated_dependent["state"] == CurrentUseState.STALE
     assert {
         receipt_id: repository.get_qualification_receipt(context.workspace_id, receipt_id)[
             "receipt_hash"
@@ -910,7 +943,10 @@ def test_grant_creation_rechecks_after_interleaved_attempt_invalidation(
     assert repository.list_authorization_grants(context.workspace_id) == []
 
 
-def test_sqlite_invalidation_commit_blocks_concurrent_grant_consume(tmp_path):
+@pytest.mark.parametrize("grant_kind", ["source", "dependent"])
+def test_sqlite_invalidation_commit_blocks_concurrent_grant_consume(
+    tmp_path, grant_kind
+):
     repository, artifacts, research, qualification, context, authority = _services(tmp_path)
     claim = _register(qualification, context, "SQLITE-RACE", "Shared attempt race.")
     receipt_a, attempt = _qualify(
@@ -937,13 +973,34 @@ def test_sqlite_invalidation_commit_blocks_concurrent_grant_consume(tmp_path):
         ),
         authority=authority,
     )
+    dependent = _register(
+        qualification, context, "SQLITE-RACE-DEPENDENT", "Depends on the proof.",
+        dependencies=(claim["id"],),
+    )
+    dependent_receipt, _ = _qualify(
+        artifacts, research, qualification, context, authority, dependent
+    )
+    dependent_grant = qualification.create_authorization(
+        context,
+        context.principal_id,
+        AuthorizationGrantDraft(
+            qualification_receipt_id=dependent_receipt["id"],
+            action="publish", target="knowledge/dependent", scope={},
+        ),
+        authority=authority,
+    )
     started = threading.Event()
 
     def consume():
         started.set()
+        selected_grant = grant if grant_kind == "source" else dependent_grant
+        action, target = (
+            ("robot_navigate_to", "provider:robot")
+            if grant_kind == "source" else ("publish", "knowledge/dependent")
+        )
         return repository.consume_authorization_grant(
-            context.workspace_id, context.principal_id, "robot_navigate_to",
-            "provider:robot", datetime.now(UTC).isoformat(), grant_id=grant["id"],
+            context.workspace_id, context.principal_id, action,
+            target, datetime.now(UTC).isoformat(), grant_id=selected_grant["id"],
         )
 
     decision_id = str(uuid4())
@@ -977,9 +1034,10 @@ def test_sqlite_invalidation_commit_blocks_concurrent_grant_consume(tmp_path):
             assert not pending.done(), "SQLite writer escaped the pending invalidation"
             db.commit()
             assert pending.result(timeout=10) is None
+    selected_grant = grant if grant_kind == "source" else dependent_grant
     assert next(
         item for item in repository.list_authorization_grants(context.workspace_id)
-        if item["id"] == grant["id"]
+        if item["id"] == selected_grant["id"]
     )["calls_used"] == 0
 
 

@@ -11,6 +11,17 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def lock_qualification_authority_workspace(connection: Any, tenant_id: str) -> None:
+    """Serialize PostgreSQL qualification-use writes and grant consumption."""
+
+    from sqlalchemy import text
+
+    connection.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+        {"lock_key": f"qualification-authority:{tenant_id}"},
+    )
+
+
 def authorization_not_expired(expires_at: str | None, used_at: str) -> bool:
     if not expires_at:
         return True

@@ -302,9 +302,29 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
 
     engine = create_engine(POSTGRES_URL)
     receipt_id = str(uuid4())
+    evaluation_id = str(uuid4())
     claim_id = str(uuid4())
     now = "2026-09-29T00:00:00+00:00"
     with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO qualification_evaluations(id, tenant_id, claim_revision_id, "
+                "claim_semantic_hash, profile_id, profile_version, profile_hash, "
+                "profile_snapshot, evidence_closure_hash, evidence_closure, policy_version, "
+                "policy_hash, verdict, criteria, blockers, evidence_vector, "
+                "independence_summary, evaluated_by, created_at) "
+                "VALUES (:id, :tenant_id, :claim_id, :semantic_hash, :profile_id, 1, "
+                ":profile_hash, '{}', :closure_hash, '{\"nodes\":[]}', :policy_version, "
+                ":policy_hash, 'ADMITTED', '[]', '[]', '{}', '{}', NULL, :created_at)"
+            ),
+            {
+                "id": evaluation_id, "tenant_id": workspace_id,
+                "claim_id": claim_id, "semantic_hash": "a" * 64,
+                "profile_id": "contract.profile.v1", "profile_hash": "9" * 64,
+                "closure_hash": "b" * 64, "policy_version": "contract-policy-v1",
+                "policy_hash": "c" * 64, "created_at": now,
+            },
+        )
         connection.execute(
             text(
                 "INSERT INTO qualification_receipts(id, tenant_id, evaluation_id, "
@@ -318,7 +338,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
             {
                 "id": receipt_id,
                 "tenant_id": workspace_id,
-                "evaluation_id": str(uuid4()),
+                "evaluation_id": evaluation_id,
                 "claim_id": claim_id,
                 "semantic_hash": "a" * 64,
                 "profile_id": "contract.profile.v1",

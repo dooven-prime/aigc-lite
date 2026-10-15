@@ -37,6 +37,11 @@ def _selected_kernel_attempt_ids_v1(
         "math.formal.v1", "math.formal.project.v2"
     }:
         return frozenset()
+    principal_prefix = (
+        "system:verifier:math-project:"
+        if profile_id == "math.formal.project.v2"
+        else "system:verifier:"
+    )
     matches = [
         node["node_id"]
         for node in evidence_closure.get("nodes", [])
@@ -44,7 +49,16 @@ def _selected_kernel_attempt_ids_v1(
         and node.get("node_type") == "verification_attempt"
         and isinstance(node.get("node_id"), str)
         and isinstance(node.get("payload"), dict)
+        and not node["payload"].get("invalidated_by")
         and node["payload"].get("validation_modality") == "kernel_check"
+        and node["payload"].get("outcome") == "passed"
+        and isinstance(node["payload"].get("verifier_lineage"), dict)
+        and node["payload"]["verifier_lineage"].get("runtime_derived") is True
+        and str(
+            node["payload"]["verifier_lineage"].get("principal_id") or ""
+        ).startswith(principal_prefix)
+        and not node["payload"]["verifier_lineage"].get("model_route")
+        and (profile_id != "math.formal.project.v2" or node["payload"].get("run_id"))
         and selected_artifacts.intersection(node["payload"].get("artifact_ids") or [])
     ]
     if not matches:
@@ -60,6 +74,44 @@ def _selected_kernel_attempt_ids_v1(
         return frozenset(frozen_kernel_ids)
     selected = matches[-1] if profile_id == "math.formal.v1" else matches[0]
     return frozenset({selected})
+
+
+def _dependent_binding_ids(binding_rows: list[dict], direct_ids: set[str]) -> set[str]:
+    affected = set(direct_ids)
+    affected_keys = {
+        (
+            row["tenant_id"], row["claim_revision_id"], row["profile_id"],
+            row["use_scope"], row["qualification_receipt_id"],
+        )
+        for row in binding_rows if row["id"] in affected
+    }
+    while True:
+        added = False
+        for row in binding_rows:
+            if row["id"] in affected:
+                continue
+            closure = json.loads(row["evidence_closure"])
+            for node in closure.get("nodes", []):
+                if node.get("node_type") != "dependency_binding":
+                    continue
+                frozen = node.get("payload") or {}
+                if (
+                    row["tenant_id"], node.get("node_id"), frozen.get("profile_id"),
+                    frozen.get("use_scope"), frozen.get("qualification_receipt_id"),
+                ) in affected_keys:
+                    affected.add(row["id"])
+                    affected_keys.add(
+                        (
+                            row["tenant_id"], row["claim_revision_id"],
+                            row["profile_id"], row["use_scope"],
+                            row["qualification_receipt_id"],
+                        )
+                    )
+                    added = True
+                    break
+        if not added:
+            break
+    return affected - direct_ids
 
 
 def _sqlite_binding_trigger(action: str, *, shared_attempts: bool) -> str:
@@ -187,25 +239,44 @@ def upgrade() -> None:
             "WHERE b.state = 'current' ORDER BY b.tenant_id, b.id, d.decided_at, d.id"
         )
     ).mappings().all()
+    current_rows = [
+        dict(item) for item in connection.execute(
+            text(
+                "SELECT b.tenant_id, b.id, b.claim_revision_id, b.profile_id, b.use_scope, "
+                "b.qualification_receipt_id, "
+                "e.evidence_closure FROM current_use_bindings b "
+                "JOIN qualification_receipts r ON r.tenant_id = b.tenant_id "
+                "AND r.id = b.qualification_receipt_id "
+                "JOIN qualification_evaluations e ON e.tenant_id = r.tenant_id "
+                "AND e.id = r.evaluation_id WHERE b.state = 'current'"
+            )
+        ).mappings().all()
+    ]
+    direct_ids = {item["binding_id"] for item in affected}
     reconciled = set()
     for item in affected:
         if item["binding_id"] in reconciled:
             continue
-        connection.execute(
-            text(
-                "UPDATE current_use_bindings SET state = :state, stale_reason = :reason, "
-                "bound_by = 'system:migration-0029-shared-attempt', updated_at = :updated_at "
-                "WHERE tenant_id = :tenant_id AND id = :binding_id AND state = 'current'"
-            ),
-            {
-                "state": item["effect_state"],
-                "reason": f"invalidation_decision:{item['decision_id']}",
-                "updated_at": datetime.now(UTC).isoformat(),
-                "tenant_id": item["tenant_id"],
-                "binding_id": item["binding_id"],
-            },
-        )
-        reconciled.add(item["binding_id"])
+        downstream = _dependent_binding_ids(current_rows, {item["binding_id"]})
+        for binding_id in (item["binding_id"], *sorted(downstream - direct_ids)):
+            if binding_id in reconciled:
+                continue
+            connection.execute(
+                text(
+                    "UPDATE current_use_bindings SET state = :state, stale_reason = :reason, "
+                    "bound_by = 'system:migration-0029-shared-attempt', "
+                    "updated_at = :updated_at WHERE tenant_id = :tenant_id "
+                    "AND id = :binding_id AND state = 'current'"
+                ),
+                {
+                    "state": item["effect_state"] if binding_id == item["binding_id"] else "stale",
+                    "reason": f"invalidation_decision:{item['decision_id']}",
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    "tenant_id": item["tenant_id"],
+                    "binding_id": binding_id,
+                },
+            )
+            reconciled.add(binding_id)
     if connection.dialect.name == "sqlite":
         for action in ("INSERT", "UPDATE"):
             connection.exec_driver_sql(

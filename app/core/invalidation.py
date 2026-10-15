@@ -32,6 +32,11 @@ def selected_kernel_attempt_ids_v1(
         "math.formal.v1", "math.formal.project.v2"
     }:
         return frozenset()
+    principal_prefix = (
+        "system:verifier:math-project:"
+        if profile_id == "math.formal.project.v2"
+        else "system:verifier:"
+    )
     matches = [
         node["node_id"]
         for node in evidence_closure.get("nodes", [])
@@ -39,7 +44,16 @@ def selected_kernel_attempt_ids_v1(
         and node.get("node_type") == "verification_attempt"
         and isinstance(node.get("node_id"), str)
         and isinstance(node.get("payload"), dict)
+        and not node["payload"].get("invalidated_by")
         and node["payload"].get("validation_modality") == "kernel_check"
+        and node["payload"].get("outcome") == "passed"
+        and isinstance(node["payload"].get("verifier_lineage"), dict)
+        and node["payload"]["verifier_lineage"].get("runtime_derived") is True
+        and str(
+            node["payload"]["verifier_lineage"].get("principal_id") or ""
+        ).startswith(principal_prefix)
+        and not node["payload"]["verifier_lineage"].get("model_route")
+        and (profile_id != "math.formal.project.v2" or node["payload"].get("run_id"))
         and selected_artifacts.intersection(node["payload"].get("artifact_ids") or [])
     ]
     if not matches:
@@ -53,8 +67,9 @@ def selected_kernel_attempt_ids_v1(
     }
     if len(frozen_kernel_ids) == 1 and next(iter(frozen_kernel_ids)) in matches:
         return frozenset(frozen_kernel_ids)
-    # Historical math.formal.v1 chose the newest valid certificate, whereas
-    # math.formal.project.v2 chose the first passing Comparator receipt.
+    # Pre-selection receipts used the frozen closure's identity order:
+    # math.formal.v1 took the last eligible certificate, while the project
+    # profile took the first eligible Comparator receipt.
     selected = matches[-1] if profile_id == "math.formal.v1" else matches[0]
     return frozenset({selected})
 

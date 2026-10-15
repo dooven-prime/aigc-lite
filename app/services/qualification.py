@@ -316,7 +316,14 @@ class MathTheoremVerifier:
         claim_semantic_hash: str,
     ) -> tuple[dict[str, Any] | None, str | None, str | None]:
         fallback: tuple[dict[str, Any], str, str] | None = None
-        for attempt in reversed(attempts):
+        # EvidenceClosure orders nodes by identity for a stable DAG. That is not
+        # execution order: select the newest certificate by its recorded time,
+        # not by a random UUID's lexical position.
+        for attempt in sorted(
+            attempts,
+            key=lambda item: (item["payload"].get("created_at") or "", item["node_id"]),
+            reverse=True,
+        ):
             for artifact_id in reversed(attempt["payload"].get("artifact_ids", [])):
                 artifact = artifacts.get(artifact_id)
                 if not artifact or artifact.get("metadata", {}).get("role") != "kernel_certificate":
@@ -1309,6 +1316,7 @@ class QualificationService:
                     "validation_modality",
                     "verifier_lineage",
                     "artifact_ids",
+                    "created_at",
                 )
             }
             if attempt["id"] in invalidated_attempts:
