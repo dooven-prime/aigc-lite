@@ -61,3 +61,8 @@ epistemic or execution authority.
 The caller-supplied `target` and `policy` are historical intent, never the
 effective Tool policy: they cannot relax current scopes, Grant conditions,
 budgets, stop rules, or external-dispatch checks.
+
+The separate [Goal Progress Evidence Bridge v0](GOAL_PROGRESS_EVIDENCE_BRIDGE_V0.md)
+can read one exact current-knowledge qualification criterion against a fresh
+database snapshot. Its result is an as-of diagnosis, not a change to this
+creation-time Goal contract or permission to execute recovery.
