@@ -160,7 +160,7 @@ class SQLiteInvalidationRepositoryMixin:
                     "AND s.attempt_id = ?)"
                 )
                 parameters.append(values["target_attempt_id"])
-            direct_ids = [row["id"] for row in db.execute(query, parameters).fetchall()]
+            direct_ids = sorted(row["id"] for row in db.execute(query, parameters).fetchall())
             binding_rows = [
                 dict(item) for item in db.execute(
                     "SELECT b.id, b.claim_revision_id, b.profile_id, b.use_scope, "
@@ -282,9 +282,10 @@ class PostgresInvalidationRepositoryMixin:
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"{tenant_id}:{values['target_claim_revision_id']}"},
             )
-            direct_ids = [
-                item["id"] for item in connection.execute(text(query), parameters).mappings().all()
-            ]
+            direct_ids = sorted(
+                item["id"]
+                for item in connection.execute(text(query), parameters).mappings().all()
+            )
             binding_rows = [
                 dict(item) for item in connection.execute(
                     text(
