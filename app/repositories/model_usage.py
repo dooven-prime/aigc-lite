@@ -8,6 +8,7 @@ instead of a fabricated zero-cost result.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from ..redaction import redact, redact_record_text
@@ -44,6 +45,10 @@ def _begin_values(values: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _stream_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="microseconds")
+
+
 def _validate_existing(existing: dict[str, Any], proposed: dict[str, Any]) -> None:
     if any(existing[key] != proposed[key] for key in ("attempt_id", *_IDENTITY_FIELDS)):
         raise ValueError("Model usage attempt identity conflicts with an existing receipt")
@@ -61,8 +66,13 @@ class SQLiteModelUsageRepositoryMixin:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             owned = db.execute(
-                "SELECT 1 FROM agent_runs WHERE tenant_id = ? AND id = ? AND request_id = ?",
-                (values["tenant_id"], values["run_id"], values["request_id"]),
+                "SELECT 1 FROM agent_runs WHERE tenant_id = ? AND id = ? "
+                "AND request_id = ? AND (stream_state IS NULL OR "
+                "(stream_state = 'claimed' AND status = 'running' "
+                "AND stream_lease_until > ? "
+                "AND stream_cancel_requested_at IS NULL))",
+                (values["tenant_id"], values["run_id"], values["request_id"],
+                 _stream_now()),
             ).fetchone()
             if owned is None:
                 raise KeyError(values["run_id"])
@@ -161,8 +171,11 @@ class PostgresModelUsageRepositoryMixin:
         with self.engine.begin() as connection:
             owned = connection.execute(
                 text("SELECT 1 FROM agent_runs WHERE tenant_id = :tenant_id AND id = :run_id "
-                     "AND request_id = :request_id"),
-                values,
+                     "AND request_id = :request_id AND (stream_state IS NULL OR "
+                     "(stream_state = 'claimed' AND status = 'running' "
+                     "AND stream_lease_until > :now "
+                     "AND stream_cancel_requested_at IS NULL)) FOR UPDATE"),
+                {**values, "now": _stream_now()},
             ).first()
             if owned is None:
                 raise KeyError(values["run_id"])

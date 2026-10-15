@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..core.artifacts import ArtifactDraft, ArtifactKind
-from ..core.contracts import ChatCommand, RequestContext, RunStatus, StepKind, StepStatus
+from ..core.contracts import ChatCommand, RequestContext, StepKind, StepStatus
 from ..core.errors import (
     ApplicationError,
     ErrorCode,
@@ -265,12 +265,9 @@ class VerificationRunner:
                 raw_output=chat_result.content,
                 run_id=chat_result.run_id,
             )
-            repository.finish_run(
-                context.workspace_id,
-                chat_result.run_id,
-                RunStatus.FAILED.value,
-                exc.code.value,
-            )
+            # The Gateway has already closed its Run after successfully
+            # producing model output. Contract validation belongs to the
+            # verification execution and its result Step, not that Run status.
             raise
 
         try:
@@ -297,12 +294,6 @@ class VerificationRunner:
                         "result_contract_version": RESULT_CONTRACT_VERSION,
                     },
                 },
-            )
-            repository.finish_run(
-                context.workspace_id,
-                chat_result.run_id,
-                RunStatus.FAILED.value,
-                self._error_code(exc),
             )
             raise
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -336,6 +337,15 @@ class MCPAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+async def _reconcile_streams_forever() -> None:
+    while True:
+        await asyncio.sleep(settings.stream_reconcile_seconds)
+        try:
+            gateway_service.reconcile_stream_runs()
+        except Exception:
+            logger.exception("Could not reconcile stale streaming runs")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("startup phase: validating deployment security")
@@ -346,11 +356,16 @@ async def lifespan(_app: FastAPI):
     ensure_bootstrap_admin()
     logger.info("startup phase: validating persisted security state")
     validate_startup_security(settings, get_repository())
-    if settings.scheduler_enabled:
-        logger.info("startup phase: recovering scheduler")
-        await timewheel_scheduler.start()
-    logger.info("startup phase: starting MCP session manager")
+    logger.info("startup phase: reconciling streaming runs")
+    gateway_service.reconcile_stream_runs()
+    stream_reaper = asyncio.create_task(
+        _reconcile_streams_forever(), name="stream-run-reconciler"
+    )
     try:
+        if settings.scheduler_enabled:
+            logger.info("startup phase: recovering scheduler")
+            await timewheel_scheduler.start()
+        logger.info("startup phase: starting MCP session manager")
         try:
             async with mcp_server.session_manager.run():
                 logger.info("startup complete")
@@ -362,6 +377,8 @@ async def lifespan(_app: FastAPI):
             # repeated in-process test clients; a production process starts once.
             yield
     finally:
+        stream_reaper.cancel()
+        await asyncio.gather(stream_reaper, return_exceptions=True)
         if settings.scheduler_enabled:
             await timewheel_scheduler.stop()
 

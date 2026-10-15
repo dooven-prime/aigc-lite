@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -66,6 +68,40 @@ from .repositories.review import (
 
 if TYPE_CHECKING:
     from .ports.search import SearchBackend
+
+
+def _stream_time(value: str) -> str:
+    """Normalize text timestamps so database ordering matches UTC ordering."""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Stream lifecycle timestamps must include a timezone")
+    return parsed.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def _stream_step(
+    run: dict[str, Any], sequence: int, status: str, error_code: str,
+    input_content: str, metadata: dict[str, Any] | None, created_at: str,
+) -> dict[str, Any]:
+    from .redaction import redact, redact_record_text
+
+    safe_metadata = redact({
+        "model": run["selected_model"], "stream": True,
+        **(metadata or {}), "error_code": error_code,
+    })
+    return {
+        "id": str(uuid.uuid4()), "run_id": run["id"],
+        "tenant_id": run["tenant_id"], "sequence": sequence,
+        "kind": "agent", "name": "chat_agent",
+        "status": "cancelled" if status == "cancelled" else "failed",
+        "input_content": redact_record_text(input_content),
+        "output_content": "",
+        "metadata": json.dumps(safe_metadata, ensure_ascii=False),
+        "created_at": created_at,
+    }
+
+
+def _stream_recovery_hash(attempt_id: str) -> str:
+    return sha256(f"stream-reconcile-v1:{attempt_id}".encode()).hexdigest()
 
 
 def _usage_summary_rows(legacy_rows: Any, receipt_rows: Any) -> dict:
@@ -277,7 +313,32 @@ class Repository(
         *,
         capability_set_id: str = "runtime.none.v1",
         capability_policy_hash: str | None = None,
+        stream_start_deadline_at: str | None = None,
     ) -> dict: ...
+
+    def claim_stream_run(
+        self, tenant_id: str, run_id: str, *, claimed_at: str, lease_until: str,
+    ) -> bool: ...
+
+    def close_stream_run(
+        self, tenant_id: str, run_id: str, *, expected_state: str,
+        status: str, error_code: str | None = None, step_input: str = "",
+        step_metadata: dict[str, Any] | None = None,
+        assistant_message: tuple[str, str] | None = None,
+        closed_at: str | None = None,
+    ) -> bool: ...
+
+    def request_stream_cancel(
+        self, tenant_id: str, run_id: str, *, requested_at: str,
+    ) -> str | None: ...
+
+    def get_stream_run_state(self, tenant_id: str, run_id: str) -> dict | None: ...
+
+    def reconcile_expired_stream_run(
+        self, tenant_id: str, run_id: str, *, now: str,
+    ) -> bool: ...
+
+    def reconcile_stale_stream_runs(self, now: str) -> dict[str, int]: ...
 
     def append_run_step(
         self,
@@ -1188,7 +1249,12 @@ class SQLiteRepository(
         *,
         capability_set_id: str = "runtime.none.v1",
         capability_policy_hash: str | None = None,
+        stream_start_deadline_at: str | None = None,
     ) -> dict:
+        stream_deadline = (
+            _stream_time(stream_start_deadline_at)
+            if stream_start_deadline_at is not None else None
+        )
         value = {
             "id": str(uuid.uuid4()),
             "tenant_id": tenant_id,
@@ -1202,16 +1268,265 @@ class SQLiteRepository(
             "error_code": None,
             "created_at": utc_now(),
             "completed_at": None,
+            "stream_state": "pending" if stream_deadline is not None else None,
+            "stream_start_deadline_at": stream_deadline,
+            "stream_claimed_at": None,
+            "stream_lease_until": None,
+            "stream_cancel_requested_at": None,
         }
         with self._connect() as db:
             db.execute(
                 "INSERT INTO agent_runs(id, tenant_id, session_id, request_id, status, "
                 "requested_model, selected_model, capability_set_id, "
-                "capability_policy_hash, error_code, created_at, completed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "capability_policy_hash, error_code, created_at, completed_at, "
+                "stream_state, stream_start_deadline_at, stream_claimed_at, "
+                "stream_lease_until, stream_cancel_requested_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(value.values()),
             )
         return value
+
+    def claim_stream_run(
+        self, tenant_id: str, run_id: str, *, claimed_at: str, lease_until: str,
+    ) -> bool:
+        claimed = _stream_time(claimed_at)
+        lease = _stream_time(lease_until)
+        if lease <= claimed:
+            raise ValueError("Stream claim lease must extend beyond claim time")
+        with self._connect() as db:
+            result = db.execute(
+                "UPDATE agent_runs SET stream_state = 'claimed', stream_claimed_at = ?, "
+                "stream_lease_until = ? WHERE tenant_id = ? AND id = ? "
+                "AND status = 'running' AND stream_state = 'pending' "
+                "AND stream_start_deadline_at > ? AND stream_cancel_requested_at IS NULL",
+                (claimed, lease, tenant_id, run_id, claimed),
+            )
+        return result.rowcount == 1
+
+    @staticmethod
+    def _close_stream_run_locked(
+        db: sqlite3.Connection, tenant_id: str, run_id: str, *,
+        expected_state: str, status: str, error_code: str | None,
+        step_input: str, step_metadata: dict[str, Any] | None,
+        closed_at: str, stale_at: str | None = None,
+        assistant_message: tuple[str, str] | None = None,
+    ) -> bool:
+        if expected_state not in {"pending", "claimed"}:
+            raise ValueError("Expected stream state must be pending or claimed")
+        if status not in {"succeeded", "failed", "cancelled", "limit_reached"}:
+            raise ValueError("Invalid terminal Run status")
+        if status == "succeeded" and error_code is not None:
+            raise ValueError("Succeeded stream cannot have an error code")
+        if status != "succeeded" and not error_code:
+            raise ValueError("Non-success stream requires an error code")
+        if expected_state == "pending" and (
+            status != "failed" or error_code != "stream_not_started"
+        ):
+            raise ValueError("Pending stream can only close as stream_not_started")
+        if assistant_message is not None and status != "succeeded":
+            raise ValueError("Only a succeeded stream may persist an assistant message")
+        fence = ""
+        params: list[Any] = [status, error_code, closed_at, tenant_id, run_id, expected_state]
+        if expected_state == "claimed":
+            if stale_at is None:
+                fence = " AND stream_lease_until > ?"
+                params.append(closed_at)
+            else:
+                fence = " AND stream_lease_until <= ?"
+                params.append(stale_at)
+            if stale_at is None and status != "cancelled":
+                fence += " AND stream_cancel_requested_at IS NULL"
+        elif stale_at is not None:
+            fence = " AND stream_start_deadline_at <= ?"
+            params.append(stale_at)
+        result = db.execute(
+            "UPDATE agent_runs SET status = ?, error_code = ?, completed_at = ?, "
+            "stream_state = 'closed' WHERE tenant_id = ? AND id = ? "
+            "AND status = 'running' AND stream_state = ?" + fence,
+            params,
+        )
+        if result.rowcount != 1:
+            return False
+        run = dict(db.execute(
+            "SELECT id, tenant_id, session_id, selected_model FROM agent_runs "
+            "WHERE tenant_id = ? AND id = ?", (tenant_id, run_id),
+        ).fetchone())
+        if expected_state == "claimed" and status == "succeeded":
+            in_flight = db.execute(
+                "SELECT 1 FROM model_usage_receipts WHERE tenant_id = ? "
+                "AND run_id = ? AND usage_status = 'IN_FLIGHT' LIMIT 1",
+                (tenant_id, run_id),
+            ).fetchone()
+            if in_flight is not None:
+                raise RuntimeError("Succeeded stream has an IN_FLIGHT Model receipt")
+        if assistant_message is not None:
+            session_id, content = assistant_message
+            if session_id != run["session_id"]:
+                raise ValueError("Assistant message session does not match the Run")
+            db.execute(
+                "INSERT INTO messages(session_id, tenant_id, role, content, created_at) "
+                "VALUES (?, ?, 'assistant', ?, ?)",
+                (session_id, tenant_id, content, closed_at),
+            )
+            session_updated = db.execute(
+                "UPDATE sessions SET updated_at = ? WHERE tenant_id = ? AND id = ?",
+                (closed_at, tenant_id, session_id),
+            ).rowcount
+            if session_updated != 1:
+                raise KeyError(session_id)
+        if expected_state == "claimed" and status != "succeeded":
+            termination = (
+                "CANCELLED_OR_TIMEOUT" if status == "cancelled"
+                else "FAILED_OR_INDETERMINATE"
+            )
+            model_step_status = "cancelled" if status == "cancelled" else "failed"
+            rows = db.execute(
+                "SELECT attempt_id, step_id FROM model_usage_receipts "
+                "WHERE tenant_id = ? AND run_id = ? AND usage_status = 'IN_FLIGHT'",
+                (tenant_id, run_id),
+            ).fetchall()
+            for receipt in rows:
+                step = db.execute(
+                    "SELECT metadata FROM run_steps WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, receipt["step_id"]),
+                ).fetchone()
+                if step is None:
+                    raise RuntimeError("IN_FLIGHT Model receipt has no Step")
+                metadata = _decode_metadata(step["metadata"])
+                metadata.update({
+                    "usage_status": "UNKNOWN",
+                    "termination": termination,
+                    "error_code": error_code,
+                    "reconciled": stale_at is not None,
+                })
+                updated = db.execute(
+                    "UPDATE run_steps SET status = ?, metadata = ? "
+                    "WHERE tenant_id = ? AND id = ? AND run_id = ? AND status = 'running'",
+                    (model_step_status, json.dumps(metadata, ensure_ascii=False), tenant_id,
+                     receipt["step_id"], run_id),
+                ).rowcount
+                if updated != 1:
+                    raise RuntimeError("IN_FLIGHT Model Step was not running")
+                db.execute(
+                    "UPDATE model_usage_receipts SET usage_status = 'UNKNOWN', "
+                    "prompt_tokens = NULL, completion_tokens = NULL, estimated_cost = NULL, "
+                    "termination = ?, "
+                    "finalization_hash = ?, finalized_at = ? "
+                    "WHERE tenant_id = ? AND attempt_id = ? AND usage_status = 'IN_FLIGHT'",
+                    (termination, _stream_recovery_hash(receipt["attempt_id"]), closed_at,
+                     tenant_id, receipt["attempt_id"]),
+                )
+        if status != "succeeded":
+            sequence = db.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_steps "
+                "WHERE tenant_id = ? AND run_id = ?", (tenant_id, run_id),
+            ).fetchone()[0]
+            step = _stream_step(
+                run, sequence, status, error_code or "", step_input,
+                step_metadata, closed_at,
+            )
+            db.execute(
+                "INSERT INTO run_steps(id, run_id, tenant_id, sequence, kind, name, "
+                "status, input_content, output_content, metadata, created_at) "
+                "VALUES (:id, :run_id, :tenant_id, :sequence, :kind, :name, "
+                ":status, :input_content, :output_content, :metadata, :created_at)",
+                step,
+            )
+        return True
+
+    def close_stream_run(
+        self, tenant_id: str, run_id: str, *, expected_state: str,
+        status: str, error_code: str | None = None, step_input: str = "",
+        step_metadata: dict[str, Any] | None = None,
+        assistant_message: tuple[str, str] | None = None,
+        closed_at: str | None = None,
+    ) -> bool:
+        at = _stream_time(closed_at or utc_now())
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return self._close_stream_run_locked(
+                db, tenant_id, run_id, expected_state=expected_state,
+                status=status, error_code=error_code, step_input=step_input,
+                step_metadata=step_metadata, closed_at=at,
+                assistant_message=assistant_message,
+            )
+
+    def request_stream_cancel(
+        self, tenant_id: str, run_id: str, *, requested_at: str,
+    ) -> str | None:
+        at = _stream_time(requested_at)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if self._close_stream_run_locked(
+                db, tenant_id, run_id, expected_state="pending",
+                status="failed", error_code="stream_not_started",
+                step_input="", step_metadata={"cancel_requested": True},
+                closed_at=at,
+            ):
+                return "closed_pending"
+            updated = db.execute(
+                "UPDATE agent_runs SET stream_cancel_requested_at = "
+                "COALESCE(stream_cancel_requested_at, ?) "
+                "WHERE tenant_id = ? AND id = ? AND status = 'running' "
+                "AND stream_state = 'claimed'",
+                (at, tenant_id, run_id),
+            )
+            return "requested_claimed" if updated.rowcount == 1 else None
+
+    def get_stream_run_state(self, tenant_id: str, run_id: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id, status, error_code, stream_state, "
+                "stream_start_deadline_at, stream_claimed_at, stream_lease_until, "
+                "stream_cancel_requested_at, completed_at FROM agent_runs "
+                "WHERE tenant_id = ? AND id = ? AND stream_state IS NOT NULL",
+                (tenant_id, run_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def reconcile_expired_stream_run(
+        self, tenant_id: str, run_id: str, *, now: str,
+    ) -> bool:
+        at = _stream_time(now)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return self._close_stream_run_locked(
+                db, tenant_id, run_id, expected_state="claimed",
+                status="failed", error_code="stream_execution_indeterminate",
+                step_input="", step_metadata={"reconciled": True},
+                closed_at=at, stale_at=at,
+            )
+
+    def reconcile_stale_stream_runs(self, now: str) -> dict[str, int]:
+        at = _stream_time(now)
+        counts = {"pending": 0, "claimed": 0}
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            pending = db.execute(
+                "SELECT tenant_id, id FROM agent_runs WHERE status = 'running' "
+                "AND stream_state = 'pending' AND stream_start_deadline_at <= ? "
+                "ORDER BY stream_start_deadline_at, id LIMIT 500", (at,),
+            ).fetchall()
+            claimed = db.execute(
+                "SELECT tenant_id, id FROM agent_runs WHERE status = 'running' "
+                "AND stream_state = 'claimed' AND stream_lease_until <= ? "
+                "ORDER BY stream_lease_until, id LIMIT 500", (at,),
+            ).fetchall()
+            for row in pending:
+                counts["pending"] += self._close_stream_run_locked(
+                    db, row["tenant_id"], row["id"], expected_state="pending",
+                    status="failed", error_code="stream_not_started",
+                    step_input="", step_metadata={"reconciled": True},
+                    closed_at=at, stale_at=at,
+                )
+            for row in claimed:
+                counts["claimed"] += self._close_stream_run_locked(
+                    db, row["tenant_id"], row["id"], expected_state="claimed",
+                    status="failed", error_code="stream_execution_indeterminate",
+                    step_input="", step_metadata={"reconciled": True},
+                    closed_at=at, stale_at=at,
+                )
+        return counts
 
     def append_run_step(
         self,
@@ -1242,12 +1557,23 @@ class SQLiteRepository(
             "created_at": utc_now(),
         }
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             owned = db.execute(
-                "SELECT 1 FROM agent_runs WHERE tenant_id = ? AND id = ?",
+                "SELECT stream_state, status, stream_lease_until, "
+                "stream_cancel_requested_at FROM agent_runs "
+                "WHERE tenant_id = ? AND id = ?",
                 (tenant_id, run_id),
             ).fetchone()
             if owned is None:
                 raise KeyError(run_id)
+            if owned["stream_state"] is not None and not (
+                owned["status"] == "running"
+                and owned["stream_state"] == "claimed"
+                and owned["stream_lease_until"] is not None
+                and owned["stream_lease_until"] > _stream_time(utc_now())
+                and owned["stream_cancel_requested_at"] is None
+            ):
+                raise ValueError("Stream Run is not active for Step append")
             db.execute(
                 "INSERT INTO run_steps(id, run_id, tenant_id, sequence, kind, name, status, "
                 "input_content, output_content, metadata, created_at) "
@@ -1262,11 +1588,17 @@ class SQLiteRepository(
         with self._connect() as db:
             cursor = db.execute(
                 "UPDATE agent_runs SET status = ?, error_code = ?, completed_at = ? "
-                "WHERE tenant_id = ? AND id = ?",
+                "WHERE tenant_id = ? AND id = ? AND status = 'running' "
+                "AND stream_state IS NULL",
                 (status, error_code, utc_now(), tenant_id, run_id),
             )
             if cursor.rowcount == 0:
-                raise KeyError(run_id)
+                if db.execute(
+                    "SELECT 1 FROM agent_runs WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, run_id),
+                ).fetchone() is None:
+                    raise KeyError(run_id)
+                raise ValueError("Run is not an active non-stream Run")
 
     def get_run(self, tenant_id: str, run_id: str) -> dict | None:
         with self._connect() as db:
@@ -2515,7 +2847,12 @@ class PostgresRepository(
         *,
         capability_set_id: str = "runtime.none.v1",
         capability_policy_hash: str | None = None,
+        stream_start_deadline_at: str | None = None,
     ) -> dict:
+        stream_deadline = (
+            _stream_time(stream_start_deadline_at)
+            if stream_start_deadline_at is not None else None
+        )
         value = {
             "id": str(uuid.uuid4()),
             "tenant_id": tenant_id,
@@ -2529,17 +2866,307 @@ class PostgresRepository(
             "error_code": None,
             "created_at": utc_now(),
             "completed_at": None,
+            "stream_state": "pending" if stream_deadline is not None else None,
+            "stream_start_deadline_at": stream_deadline,
+            "stream_claimed_at": None,
+            "stream_lease_until": None,
+            "stream_cancel_requested_at": None,
         }
         self._execute(
             "INSERT INTO agent_runs(id, tenant_id, session_id, request_id, status, "
             "requested_model, selected_model, capability_set_id, capability_policy_hash, "
-            "error_code, created_at, completed_at) "
+            "error_code, created_at, completed_at, stream_state, stream_start_deadline_at, "
+            "stream_claimed_at, stream_lease_until, stream_cancel_requested_at) "
             "VALUES (:id, :tenant_id, :session_id, :request_id, :status, :requested_model, "
             ":selected_model, :capability_set_id, :capability_policy_hash, :error_code, "
-            ":created_at, :completed_at)",
+            ":created_at, :completed_at, :stream_state, :stream_start_deadline_at, "
+            ":stream_claimed_at, :stream_lease_until, :stream_cancel_requested_at)",
             value,
         )
         return value
+
+    def claim_stream_run(
+        self, tenant_id: str, run_id: str, *, claimed_at: str, lease_until: str,
+    ) -> bool:
+        claimed = _stream_time(claimed_at)
+        lease = _stream_time(lease_until)
+        if lease <= claimed:
+            raise ValueError("Stream claim lease must extend beyond claim time")
+        return self._execute(
+            "UPDATE agent_runs SET stream_state = 'claimed', "
+            "stream_claimed_at = :claimed_at, stream_lease_until = :lease_until "
+            "WHERE tenant_id = :tenant_id AND id = :run_id "
+            "AND status = 'running' AND stream_state = 'pending' "
+            "AND stream_start_deadline_at > :claimed_at "
+            "AND stream_cancel_requested_at IS NULL",
+            {
+                "tenant_id": tenant_id, "run_id": run_id,
+                "claimed_at": claimed, "lease_until": lease,
+            },
+        ).rowcount == 1
+
+    @staticmethod
+    def _close_stream_run_connection(
+        connection: Any, tenant_id: str, run_id: str, *,
+        expected_state: str, status: str, error_code: str | None,
+        step_input: str, step_metadata: dict[str, Any] | None,
+        closed_at: str, stale_at: str | None = None,
+        assistant_message: tuple[str, str] | None = None,
+    ) -> bool:
+        from sqlalchemy import text
+
+        if expected_state not in {"pending", "claimed"}:
+            raise ValueError("Expected stream state must be pending or claimed")
+        if status not in {"succeeded", "failed", "cancelled", "limit_reached"}:
+            raise ValueError("Invalid terminal Run status")
+        if status == "succeeded" and error_code is not None:
+            raise ValueError("Succeeded stream cannot have an error code")
+        if status != "succeeded" and not error_code:
+            raise ValueError("Non-success stream requires an error code")
+        if expected_state == "pending" and (
+            status != "failed" or error_code != "stream_not_started"
+        ):
+            raise ValueError("Pending stream can only close as stream_not_started")
+        if assistant_message is not None and status != "succeeded":
+            raise ValueError("Only a succeeded stream may persist an assistant message")
+        fence = ""
+        params = {
+            "tenant_id": tenant_id, "run_id": run_id, "status": status,
+            "error_code": error_code, "closed_at": closed_at,
+            "expected_state": expected_state,
+        }
+        if expected_state == "claimed":
+            if stale_at is None:
+                fence = " AND stream_lease_until > :closed_at"
+            else:
+                fence = " AND stream_lease_until <= :stale_at"
+                params["stale_at"] = stale_at
+            if stale_at is None and status != "cancelled":
+                fence += " AND stream_cancel_requested_at IS NULL"
+        elif stale_at is not None:
+            fence = " AND stream_start_deadline_at <= :stale_at"
+            params["stale_at"] = stale_at
+        updated = connection.execute(
+            text(
+                "UPDATE agent_runs SET status = :status, error_code = :error_code, "
+                "completed_at = :closed_at, stream_state = 'closed' "
+                "WHERE tenant_id = :tenant_id AND id = :run_id "
+                "AND status = 'running' AND stream_state = :expected_state" + fence
+            ),
+            params,
+        )
+        if updated.rowcount != 1:
+            return False
+        run = dict(connection.execute(
+            text("SELECT id, tenant_id, session_id, selected_model FROM agent_runs "
+                 "WHERE tenant_id = :tenant_id AND id = :run_id"),
+            {"tenant_id": tenant_id, "run_id": run_id},
+        ).mappings().one())
+        if expected_state == "claimed" and status == "succeeded":
+            in_flight = connection.execute(
+                text("SELECT 1 FROM model_usage_receipts WHERE tenant_id = :tenant_id "
+                     "AND run_id = :run_id AND usage_status = 'IN_FLIGHT' "
+                     "LIMIT 1 FOR UPDATE"),
+                {"tenant_id": tenant_id, "run_id": run_id},
+            ).first()
+            if in_flight is not None:
+                raise RuntimeError("Succeeded stream has an IN_FLIGHT Model receipt")
+        if assistant_message is not None:
+            session_id, content = assistant_message
+            if session_id != run["session_id"]:
+                raise ValueError("Assistant message session does not match the Run")
+            connection.execute(
+                text("INSERT INTO messages(session_id, tenant_id, role, content, "
+                     "created_at) VALUES (:session_id, :tenant_id, 'assistant', "
+                     ":content, :created_at)"),
+                {
+                    "session_id": session_id, "tenant_id": tenant_id,
+                    "content": content, "created_at": closed_at,
+                },
+            )
+            session_updated = connection.execute(
+                text("UPDATE sessions SET updated_at = :updated_at "
+                     "WHERE tenant_id = :tenant_id AND id = :session_id"),
+                {
+                    "updated_at": closed_at, "tenant_id": tenant_id,
+                    "session_id": session_id,
+                },
+            ).rowcount
+            if session_updated != 1:
+                raise KeyError(session_id)
+        if expected_state == "claimed" and status != "succeeded":
+            termination = (
+                "CANCELLED_OR_TIMEOUT" if status == "cancelled"
+                else "FAILED_OR_INDETERMINATE"
+            )
+            model_step_status = "cancelled" if status == "cancelled" else "failed"
+            receipts = connection.execute(
+                text("SELECT attempt_id, step_id FROM model_usage_receipts "
+                     "WHERE tenant_id = :tenant_id AND run_id = :run_id "
+                     "AND usage_status = 'IN_FLIGHT' FOR UPDATE"),
+                {"tenant_id": tenant_id, "run_id": run_id},
+            ).mappings().all()
+            for receipt in receipts:
+                step = connection.execute(
+                    text("SELECT metadata FROM run_steps WHERE tenant_id = :tenant_id "
+                         "AND id = :step_id FOR UPDATE"),
+                    {"tenant_id": tenant_id, "step_id": receipt["step_id"]},
+                ).mappings().first()
+                if step is None:
+                    raise RuntimeError("IN_FLIGHT Model receipt has no Step")
+                metadata = _decode_metadata(step["metadata"])
+                metadata.update({
+                    "usage_status": "UNKNOWN",
+                    "termination": termination,
+                    "error_code": error_code,
+                    "reconciled": stale_at is not None,
+                })
+                step_updated = connection.execute(
+                    text("UPDATE run_steps SET status = :step_status, metadata = :metadata "
+                         "WHERE tenant_id = :tenant_id AND id = :step_id "
+                         "AND run_id = :run_id AND status = 'running'"),
+                    {
+                        "step_status": model_step_status,
+                        "metadata": json.dumps(metadata, ensure_ascii=False),
+                        "tenant_id": tenant_id, "step_id": receipt["step_id"],
+                        "run_id": run_id,
+                    },
+                ).rowcount
+                if step_updated != 1:
+                    raise RuntimeError("IN_FLIGHT Model Step was not running")
+                connection.execute(
+                    text("UPDATE model_usage_receipts SET usage_status = 'UNKNOWN', "
+                         "prompt_tokens = NULL, completion_tokens = NULL, "
+                         "estimated_cost = NULL, "
+                         "termination = :termination, "
+                         "finalization_hash = :finalization_hash, finalized_at = :closed_at "
+                         "WHERE tenant_id = :tenant_id AND attempt_id = :attempt_id "
+                         "AND usage_status = 'IN_FLIGHT'"),
+                    {
+                        "termination": termination,
+                        "finalization_hash": _stream_recovery_hash(receipt["attempt_id"]),
+                        "closed_at": closed_at, "tenant_id": tenant_id,
+                        "attempt_id": receipt["attempt_id"],
+                    },
+                )
+        if status != "succeeded":
+            sequence = connection.execute(
+                text("SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_steps "
+                     "WHERE tenant_id = :tenant_id AND run_id = :run_id"),
+                {"tenant_id": tenant_id, "run_id": run_id},
+            ).scalar_one()
+            step = _stream_step(
+                run, sequence, status, error_code or "", step_input,
+                step_metadata, closed_at,
+            )
+            connection.execute(
+                text("INSERT INTO run_steps(id, run_id, tenant_id, sequence, kind, "
+                     "name, status, input_content, output_content, metadata, "
+                     "created_at) VALUES (:id, :run_id, :tenant_id, :sequence, "
+                     ":kind, :name, :status, :input_content, :output_content, "
+                     ":metadata, :created_at)"),
+                step,
+            )
+        return True
+
+    def close_stream_run(
+        self, tenant_id: str, run_id: str, *, expected_state: str,
+        status: str, error_code: str | None = None, step_input: str = "",
+        step_metadata: dict[str, Any] | None = None,
+        assistant_message: tuple[str, str] | None = None,
+        closed_at: str | None = None,
+    ) -> bool:
+        at = _stream_time(closed_at or utc_now())
+        with self.engine.begin() as connection:
+            return self._close_stream_run_connection(
+                connection, tenant_id, run_id, expected_state=expected_state,
+                status=status, error_code=error_code, step_input=step_input,
+                step_metadata=step_metadata, closed_at=at,
+                assistant_message=assistant_message,
+            )
+
+    def request_stream_cancel(
+        self, tenant_id: str, run_id: str, *, requested_at: str,
+    ) -> str | None:
+        from sqlalchemy import text
+
+        at = _stream_time(requested_at)
+        with self.engine.begin() as connection:
+            if self._close_stream_run_connection(
+                connection, tenant_id, run_id, expected_state="pending",
+                status="failed", error_code="stream_not_started",
+                step_input="", step_metadata={"cancel_requested": True},
+                closed_at=at,
+            ):
+                return "closed_pending"
+            updated = connection.execute(
+                text("UPDATE agent_runs SET stream_cancel_requested_at = "
+                     "COALESCE(stream_cancel_requested_at, :requested_at) "
+                     "WHERE tenant_id = :tenant_id AND id = :run_id "
+                     "AND status = 'running' AND stream_state = 'claimed'"),
+                {"requested_at": at, "tenant_id": tenant_id, "run_id": run_id},
+            )
+            return "requested_claimed" if updated.rowcount == 1 else None
+
+    def get_stream_run_state(self, tenant_id: str, run_id: str) -> dict | None:
+        return self._one(
+            "SELECT id, status, error_code, stream_state, "
+            "stream_start_deadline_at, stream_claimed_at, stream_lease_until, "
+            "stream_cancel_requested_at, completed_at FROM agent_runs "
+            "WHERE tenant_id = :tenant_id AND id = :run_id "
+            "AND stream_state IS NOT NULL",
+            {"tenant_id": tenant_id, "run_id": run_id},
+        )
+
+    def reconcile_expired_stream_run(
+        self, tenant_id: str, run_id: str, *, now: str,
+    ) -> bool:
+        at = _stream_time(now)
+        with self.engine.begin() as connection:
+            return self._close_stream_run_connection(
+                connection, tenant_id, run_id, expected_state="claimed",
+                status="failed", error_code="stream_execution_indeterminate",
+                step_input="", step_metadata={"reconciled": True},
+                closed_at=at, stale_at=at,
+            )
+
+    def reconcile_stale_stream_runs(self, now: str) -> dict[str, int]:
+        from sqlalchemy import text
+
+        at = _stream_time(now)
+        counts = {"pending": 0, "claimed": 0}
+        with self.engine.begin() as connection:
+            pending = connection.execute(
+                text("SELECT tenant_id, id FROM agent_runs WHERE status = 'running' "
+                     "AND stream_state = 'pending' AND stream_start_deadline_at <= :now "
+                     "ORDER BY stream_start_deadline_at, id LIMIT 500 "
+                     "FOR UPDATE SKIP LOCKED"),
+                {"now": at},
+            ).mappings().all()
+            claimed = connection.execute(
+                text("SELECT tenant_id, id FROM agent_runs WHERE status = 'running' "
+                     "AND stream_state = 'claimed' AND stream_lease_until <= :now "
+                     "ORDER BY stream_lease_until, id LIMIT 500 "
+                     "FOR UPDATE SKIP LOCKED"),
+                {"now": at},
+            ).mappings().all()
+            for row in pending:
+                counts["pending"] += self._close_stream_run_connection(
+                    connection, row["tenant_id"], row["id"],
+                    expected_state="pending", status="failed",
+                    error_code="stream_not_started", step_input="",
+                    step_metadata={"reconciled": True}, closed_at=at,
+                    stale_at=at,
+                )
+            for row in claimed:
+                counts["claimed"] += self._close_stream_run_connection(
+                    connection, row["tenant_id"], row["id"],
+                    expected_state="claimed", status="failed",
+                    error_code="stream_execution_indeterminate", step_input="",
+                    step_metadata={"reconciled": True}, closed_at=at,
+                    stale_at=at,
+                )
+        return counts
 
     def append_run_step(
         self,
@@ -2553,11 +3180,8 @@ class PostgresRepository(
         output_content: str,
         metadata: dict[str, Any] | None = None,
     ) -> dict:
-        if not self._one(
-            "SELECT 1 FROM agent_runs WHERE tenant_id = :tenant_id AND id = :run_id",
-            {"tenant_id": tenant_id, "run_id": run_id},
-        ):
-            raise KeyError(run_id)
+        from sqlalchemy import text
+
         from .redaction import redact, redact_record_text
 
         safe_metadata = redact(metadata or {})
@@ -2574,13 +3198,31 @@ class PostgresRepository(
             "metadata": json.dumps(safe_metadata, ensure_ascii=False),
             "created_at": utc_now(),
         }
-        self._execute(
-            "INSERT INTO run_steps(id, run_id, tenant_id, sequence, kind, name, status, "
-            "input_content, output_content, metadata, created_at) "
-            "VALUES (:id, :run_id, :tenant_id, :sequence, :kind, :name, :status, "
-            ":input_content, :output_content, :metadata, :created_at)",
-            value,
-        )
+        with self.engine.begin() as connection:
+            owned = connection.execute(
+                text("SELECT stream_state, status, stream_lease_until, "
+                     "stream_cancel_requested_at FROM agent_runs "
+                     "WHERE tenant_id = :tenant_id AND id = :run_id FOR UPDATE"),
+                {"tenant_id": tenant_id, "run_id": run_id},
+            ).mappings().first()
+            if owned is None:
+                raise KeyError(run_id)
+            if owned["stream_state"] is not None and not (
+                owned["status"] == "running"
+                and owned["stream_state"] == "claimed"
+                and owned["stream_lease_until"] is not None
+                and owned["stream_lease_until"] > _stream_time(utc_now())
+                and owned["stream_cancel_requested_at"] is None
+            ):
+                raise ValueError("Stream Run is not active for Step append")
+            connection.execute(
+                text("INSERT INTO run_steps(id, run_id, tenant_id, sequence, kind, "
+                     "name, status, input_content, output_content, metadata, "
+                     "created_at) VALUES (:id, :run_id, :tenant_id, :sequence, "
+                     ":kind, :name, :status, :input_content, :output_content, "
+                     ":metadata, :created_at)"),
+                value,
+            )
         return {**value, "metadata": safe_metadata}
 
     def finish_run(
@@ -2588,7 +3230,8 @@ class PostgresRepository(
     ) -> None:
         result = self._execute(
             "UPDATE agent_runs SET status = :status, error_code = :error_code, "
-            "completed_at = :completed_at WHERE tenant_id = :tenant_id AND id = :run_id",
+            "completed_at = :completed_at WHERE tenant_id = :tenant_id "
+            "AND id = :run_id AND status = 'running' AND stream_state IS NULL",
             {
                 "status": status,
                 "error_code": error_code,
@@ -2598,7 +3241,12 @@ class PostgresRepository(
             },
         )
         if result.rowcount == 0:
-            raise KeyError(run_id)
+            if self._one(
+                "SELECT 1 FROM agent_runs WHERE tenant_id = :tenant_id AND id = :run_id",
+                {"tenant_id": tenant_id, "run_id": run_id},
+            ) is None:
+                raise KeyError(run_id)
+            raise ValueError("Run is not an active non-stream Run")
 
     def get_run(self, tenant_id: str, run_id: str) -> dict | None:
         value = self._one(

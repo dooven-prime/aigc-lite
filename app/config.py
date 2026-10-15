@@ -35,6 +35,18 @@ class Settings:
     max_agent_run_seconds: float = float(
         os.getenv("AIGC_LITE_MAX_AGENT_RUN_SECONDS", "300")
     )
+    stream_start_ttl_seconds: float = float(
+        os.getenv("AIGC_LITE_STREAM_START_TTL_SECONDS", "60")
+    )
+    stream_claim_grace_seconds: float = float(
+        os.getenv("AIGC_LITE_STREAM_CLAIM_GRACE_SECONDS", "30")
+    )
+    stream_reconcile_seconds: float = float(
+        os.getenv("AIGC_LITE_STREAM_RECONCILE_SECONDS", "5")
+    )
+    stream_cancel_poll_seconds: float = float(
+        os.getenv("AIGC_LITE_STREAM_CANCEL_POLL_SECONDS", "0.5")
+    )
     scheduler_enabled: bool = _bool("AIGC_LITE_SCHEDULER_ENABLED", True)
     scheduler_tick_seconds: float = float(
         os.getenv("AIGC_LITE_SCHEDULER_TICK_SECONDS", "1")
@@ -103,6 +115,14 @@ class Settings:
             )
         if not isfinite(self.max_agent_run_seconds) or self.max_agent_run_seconds <= 0:
             raise ValueError("AIGC_LITE_MAX_AGENT_RUN_SECONDS must be positive")
+        for name, value in (
+            ("AIGC_LITE_STREAM_START_TTL_SECONDS", self.stream_start_ttl_seconds),
+            ("AIGC_LITE_STREAM_CLAIM_GRACE_SECONDS", self.stream_claim_grace_seconds),
+            ("AIGC_LITE_STREAM_RECONCILE_SECONDS", self.stream_reconcile_seconds),
+            ("AIGC_LITE_STREAM_CANCEL_POLL_SECONDS", self.stream_cancel_poll_seconds),
+        ):
+            if not isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive")
         if (
             not isfinite(self.scheduler_tick_seconds)
             or self.scheduler_tick_seconds <= 0

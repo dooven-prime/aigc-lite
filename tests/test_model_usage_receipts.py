@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app import main, providers
 from app.core.contracts import ChatCommand, RequestContext
-from app.core.errors import UpstreamResponseError
+from app.core.errors import AgentCancelledError, UpstreamResponseError
 from app.core.model_usage import estimated_cost, normalize_usage, pricing_snapshot
 from app.repository import SQLiteRepository
 from app.services.gateway import GatewayService
@@ -253,7 +253,7 @@ def test_cancelled_stream_with_partial_output_keeps_unknown_usage(tmp_path) -> N
         result = await service.stream_chat(ChatCommand(prompt="hello"), context)
         assert (await anext(result.chunks))["content"] == "partial"
         service.cancel_run(context, result.run_id)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(AgentCancelledError):
             await anext(result.chunks)
         return result
 

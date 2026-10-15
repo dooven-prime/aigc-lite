@@ -305,8 +305,11 @@ def test_invalid_json_closes_execution_without_echoing_unsafe_output(
     assert execution["error_code"] == "invalid_verification_result"
     assert attempt["outcome"] == "error"
     assert gate["decision"] == "blocked"
-    assert run["status"] == "failed"
-    assert run["error_code"] == "invalid_verification_result"
+    assert run["status"] == "succeeded"
+    assert run["error_code"] is None
+    assert run["steps"][-1]["name"] == "verification_result_contract"
+    assert run["steps"][-1]["status"] == "failed"
+    assert run["steps"][-1]["metadata"]["error_code"] == "invalid_verification_result"
     assert artifact is not None
     assert json.loads(artifact["content_text"])["raw_output_excerpt"] == (
         "[invalid or unsafe verification JSON omitted]"
@@ -454,8 +457,10 @@ def test_invalid_agent_result_is_retained_as_error_receipt_and_blocked_gate(
     assert attempt["receipt_id"]
     assert gate["decision"] == "blocked"
     assert gate["blockers"] == ["triggering_attempt_passed"]
-    assert run["status"] == "failed"
-    assert run["error_code"] == "invalid_verification_result"
+    assert run["status"] == "succeeded"
+    assert run["error_code"] is None
+    assert run["steps"][-1]["status"] == "failed"
+    assert run["steps"][-1]["metadata"]["error_code"] == "invalid_verification_result"
     assert run["artifacts"][0]["id"] == execution["artifact_id"]
 
 

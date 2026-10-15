@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .. import providers as model_providers
@@ -26,6 +28,7 @@ from ..core.contracts import (
     StepStatus,
 )
 from ..core.errors import (
+    AgentCancelledError,
     AgentLimitError,
     AgentWallTimeLimitError,
     ApplicationError,
@@ -34,6 +37,8 @@ from ..core.errors import (
     ProviderNotConfiguredError,
     ResourceNotFoundError,
     RunNotActiveError,
+    StreamExecutionIndeterminateError,
+    StreamNotStartedError,
     UpstreamResponseError,
 )
 from ..database import get_repository
@@ -49,6 +54,163 @@ RepositoryProvider = Callable[[], Repository]
 UsageRecorder = Callable[[dict, str, str, dict | None], None]
 StreamRunner = Callable[..., AsyncIterator[str]]
 _MAX_STREAM_BYTES = 2 * 1024 * 1024
+_LOG = logging.getLogger(__name__)
+
+
+class _ClaimedStream(AsyncIterator[dict[str, Any]]):
+    """Claim on first pull; explicit pre-pull close never starts the model.
+
+    A database lease, not this in-process object, is the recovery source of
+    truth. In particular an HTTP response whose body is never iterated may
+    never call ``aclose`` at all.
+    """
+
+    def __init__(
+        self,
+        repository: Repository,
+        workspace_id: str,
+        run_id: str,
+        prompt: str,
+        events: asyncio.Queue[dict[str, Any] | BaseException | None],
+        execute: Callable[[], Awaitable[None]],
+        active_runs: _ActiveRunRegistry,
+    ) -> None:
+        self._repository = repository
+        self._workspace_id = workspace_id
+        self._run_id = run_id
+        self._prompt = prompt
+        self._events = events
+        self._execute = execute
+        self._active_runs = active_runs
+        self._worker: asyncio.Task[None] | None = None
+        self._closed = False
+        self._reading = False
+
+    def __aiter__(self) -> _ClaimedStream:
+        return self
+
+    def _finish_unstarted(self) -> None:
+        self._repository.close_stream_run(
+            self._workspace_id,
+            self._run_id,
+            expected_state="pending",
+            status=RunStatus.FAILED.value,
+            error_code=ErrorCode.STREAM_NOT_STARTED.value,
+            step_input=self._prompt,
+            step_metadata={"stream": True},
+        )
+
+    def _worker_done(self, _worker: asyncio.Task[None]) -> None:
+        # A task cancelled before its first scheduled instruction never enters
+        # execute()'s finally block. CAS makes this harmless after a normal
+        # terminal write and prevents a permanently claimed Run otherwise.
+        was_cancelled = _worker.cancelled()
+        self._active_runs.unregister(self._workspace_id, self._run_id, _worker)
+        try:
+            self._repository.close_stream_run(
+                self._workspace_id,
+                self._run_id,
+                expected_state="claimed",
+                status=(
+                    RunStatus.CANCELLED.value if was_cancelled else RunStatus.FAILED.value
+                ),
+                error_code=(
+                    ErrorCode.AGENT_CANCELLED.value if was_cancelled
+                    else ErrorCode.INTERNAL_ERROR.value
+                ),
+                step_input=self._prompt,
+                step_metadata={"stream": True, "worker_never_settled": True},
+            )
+        except Exception:
+            _LOG.exception("Could not settle completed stream worker %s", self._run_id)
+        # execute() emits its own terminal marker once it starts. A task
+        # cancelled before its first instruction cannot do that, so publish a
+        # fallback marker; duplicate trailing markers are never consumed.
+        if was_cancelled:
+            self._events.put_nowait(asyncio.CancelledError())
+        elif error := _worker.exception():
+            self._events.put_nowait(error)
+        self._events.put_nowait(None)
+
+    async def __anext__(self) -> dict[str, Any]:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._reading:
+            raise RuntimeError("A stream may have only one active consumer")
+        if self._worker is None:
+            now = datetime.now(UTC)
+            claimed = self._repository.claim_stream_run(
+                self._workspace_id,
+                self._run_id,
+                claimed_at=now.isoformat(),
+                lease_until=(
+                    now + timedelta(
+                        seconds=settings.max_agent_run_seconds
+                        + settings.stream_claim_grace_seconds
+                    )
+                ).isoformat(),
+            )
+            if not claimed:
+                # If the deadline elapsed between response creation and first
+                # pull, do not wait for the periodic reaper to close the Run.
+                # The CAS is a no-op when a different reader already claimed
+                # it or a cancellation/reaper already closed it.
+                self._finish_unstarted()
+                self._closed = True
+                state = self._repository.get_stream_run_state(
+                    self._workspace_id, self._run_id
+                )
+                if state and state.get("error_code") == ErrorCode.STREAM_NOT_STARTED.value:
+                    raise StreamNotStartedError()
+                raise RunNotActiveError(self._run_id)
+            worker = asyncio.create_task(
+                self._execute(), name=f"stream-chat:{self._run_id}"
+            )
+            self._worker = worker
+            self._active_runs.register(self._workspace_id, self._run_id, worker)
+            worker.add_done_callback(self._worker_done)
+        self._reading = True
+        try:
+            item = await self._events.get()
+        except asyncio.CancelledError:
+            await self.aclose()
+            raise
+        finally:
+            self._reading = False
+        if item is None:
+            self._closed = True
+            raise StopAsyncIteration
+        if isinstance(item, BaseException):
+            self._closed = True
+            self._repository.reconcile_expired_stream_run(
+                self._workspace_id, self._run_id,
+                now=datetime.now(UTC).isoformat(),
+            )
+            # A different process may have closed the lease while this worker
+            # was still awaiting the provider. The durable terminal decision
+            # wins over a later upstream exception from that losing worker.
+            state = self._repository.get_stream_run_state(
+                self._workspace_id, self._run_id
+            )
+            if state and state.get("error_code") == ErrorCode.AGENT_CANCELLED.value:
+                raise AgentCancelledError() from item
+            if state and state.get("error_code") == ErrorCode.STREAM_EXECUTION_INDETERMINATE.value:
+                raise StreamExecutionIndeterminateError() from item
+            raise item
+        return item
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        worker = self._worker
+        if worker is None:
+            self._finish_unstarted()
+            return
+        if not worker.done():
+            worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        self._worker_done(worker)
 
 
 class _ActiveRunRegistry:
@@ -358,6 +520,9 @@ class GatewayService:
             selected_model,
             capability_set_id=capability.policy_id,
             capability_policy_hash=capability.policy_hash,
+            stream_start_deadline_at=(
+                datetime.now(UTC) + timedelta(seconds=settings.stream_start_ttl_seconds)
+            ).isoformat(),
         )
         model_prompt = self._attachment_prompt(
             command, context, run["id"], session["id"]
@@ -371,6 +536,8 @@ class GatewayService:
             return sequence
 
         def record_step(step: AgentStepRecord) -> None:
+            if not claim_is_current():
+                raise asyncio.CancelledError
             current_sequence = reserve_sequence()
             stored_step = repository.append_run_step(
                 context.workspace_id, run["id"], current_sequence, step.kind.value,
@@ -407,9 +574,86 @@ class GatewayService:
         def record_usage(usage: dict) -> None:
             observer.observe_usage(usage)
 
+        def finish_stream(
+            status: RunStatus,
+            error_code: str | None = None,
+            metadata: dict[str, Any] | None = None,
+            assistant_content: str | None = None,
+        ) -> bool:
+            return repository.close_stream_run(
+                context.workspace_id,
+                run["id"],
+                expected_state="claimed",
+                status=status.value,
+                error_code=error_code,
+                step_input=command.prompt,
+                step_metadata={
+                    "model": selected_model,
+                    "chat_capability": capability_metadata,
+                    "stream": True,
+                    **(metadata or {}),
+                },
+                assistant_message=(
+                    (session["id"], assistant_content)
+                    if assistant_content is not None else None
+                ),
+            )
+
+        def claim_is_current() -> bool:
+            state = repository.get_stream_run_state(context.workspace_id, run["id"])
+            if not state or state.get("status") != RunStatus.RUNNING.value:
+                return False
+            if state.get("stream_state") != "claimed" or state.get("stream_cancel_requested_at"):
+                return False
+            lease = state.get("stream_lease_until")
+            try:
+                return bool(lease and datetime.fromisoformat(lease) > datetime.now(UTC))
+            except (TypeError, ValueError):
+                return False
+
+        def cancellation_requested() -> bool:
+            state = repository.get_stream_run_state(context.workspace_id, run["id"])
+            return bool(state and state.get("stream_cancel_requested_at"))
+
+        def finish_failure(
+            status: RunStatus,
+            error_code: str,
+            metadata: dict[str, Any] | None = None,
+        ) -> bool:
+            """Return whether a durable cancellation superseded this failure."""
+            if cancellation_requested():
+                finish_stream(RunStatus.CANCELLED, ErrorCode.AGENT_CANCELLED.value)
+                return True
+            if finish_stream(status, error_code, metadata):
+                return False
+            if cancellation_requested():
+                finish_stream(RunStatus.CANCELLED, ErrorCode.AGENT_CANCELLED.value)
+                return True
+            return False
+
+        async def watch_cancellation(owner: asyncio.Task[Any]) -> None:
+            # The HTTP cancel request may land on a different worker. This
+            # monitor reads the durable intent; the local registry is only a
+            # fast path. It also fences a worker after lease reconciliation.
+            while True:
+                await asyncio.sleep(settings.stream_cancel_poll_seconds)
+                try:
+                    current = claim_is_current()
+                except Exception:
+                    _LOG.exception("Could not check streaming run lease %s", run["id"])
+                    current = False
+                if not current:
+                    owner.cancel()
+                    return
+
         async def execute() -> None:
             turn = 0
             stream_bytes = 0
+            owner = asyncio.current_task()
+            cancel_watch = (
+                asyncio.create_task(watch_cancellation(owner))
+                if owner is not None else None
+            )
 
             async def model_completion(messages, model, tools, selected_provider):
                 nonlocal turn
@@ -417,6 +661,8 @@ class GatewayService:
 
                 async def on_delta(content: str) -> None:
                     nonlocal stream_bytes
+                    if not claim_is_current():
+                        raise asyncio.CancelledError
                     observer.observe_output(content)
                     stream_bytes += len(content.encode())
                     if stream_bytes > _MAX_STREAM_BYTES:
@@ -447,36 +693,36 @@ class GatewayService:
 
             try:
                 try:
+                    if not claim_is_current():
+                        raise asyncio.CancelledError
                     async with asyncio.timeout(settings.max_agent_run_seconds):
                         tool_session = await self._tool_catalog.open(
                             capability.context, access_policy=capability,
                             run_id=run["id"],
                         )
+
+                        async def invoke_tool(name: str, arguments: str):
+                            if not claim_is_current():
+                                raise asyncio.CancelledError
+                            return await tool_session.invoke(name, arguments)
+
                         content = await run_agent(
                             model_prompt, command.system, model_name,
                             settings.max_agent_steps, history, context.workspace_id,
                             provider=provider, usage_callback=record_usage,
                             step_callback=record_step,
                             available_tools=tool_session.model_schemas(),
-                            tool_invoker=tool_session.invoke,
+                            tool_invoker=invoke_tool,
                             max_tool_calls=settings.max_agent_tool_calls,
                             model_completion=model_completion,
                             model_call_observer=observer,
                         )
                 except TimeoutError as exc:
                     error = AgentWallTimeLimitError(settings.max_agent_run_seconds)
-                    self._record_terminal_run(
-                        repository,
-                        context,
-                        run["id"],
-                        command,
-                        selected_model,
-                        error.code.value,
-                        sequence + 1,
-                        RunStatus.LIMIT_REACHED,
-                        StepStatus.FAILED,
-                        {**error.metadata, "chat_capability": capability_metadata},
-                    )
+                    if finish_failure(
+                        RunStatus.LIMIT_REACHED, error.code.value, error.metadata
+                    ):
+                        raise asyncio.CancelledError from exc
                     raise error from exc
                 except ApplicationError as exc:
                     run_status = (
@@ -484,74 +730,46 @@ class GatewayService:
                         if isinstance(exc, AgentLimitError)
                         else RunStatus.FAILED
                     )
-                    self._record_terminal_run(
-                        repository,
-                        context,
-                        run["id"],
-                        command,
-                        selected_model,
-                        exc.code.value,
-                        sequence + 1,
-                        run_status,
-                        StepStatus.FAILED,
-                        {**exc.metadata, "chat_capability": capability_metadata},
-                    )
+                    if finish_failure(run_status, exc.code.value, exc.metadata):
+                        raise asyncio.CancelledError from exc
                     raise
                 except asyncio.CancelledError:
-                    self._record_terminal_run(
-                        repository, context, run["id"], command, selected_model,
-                        ErrorCode.AGENT_CANCELLED.value, sequence + 1,
-                        RunStatus.CANCELLED, StepStatus.CANCELLED,
-                        {"chat_capability": capability_metadata, "stream": True},
-                    )
+                    finish_stream(RunStatus.CANCELLED, ErrorCode.AGENT_CANCELLED.value)
                     raise
-                except Exception:
-                    self._record_terminal_run(
-                        repository,
-                        context,
-                        run["id"],
-                        command,
-                        selected_model,
-                        ErrorCode.INTERNAL_ERROR.value,
-                        sequence + 1,
-                        RunStatus.FAILED,
-                        StepStatus.FAILED,
-                        {"chat_capability": capability_metadata},
-                    )
+                except Exception as exc:
+                    if finish_failure(
+                        RunStatus.FAILED, ErrorCode.INTERNAL_ERROR.value
+                    ):
+                        raise asyncio.CancelledError from exc
                     raise
 
-                repository.add_message(
-                    context.workspace_id, session["id"], "assistant", content
-                )
-                repository.finish_run(
-                    context.workspace_id, run["id"], RunStatus.SUCCEEDED.value
-                )
+                if not finish_stream(RunStatus.SUCCEEDED, assistant_content=content):
+                    state = repository.get_stream_run_state(
+                        context.workspace_id, run["id"]
+                    )
+                    if state and state.get("stream_cancel_requested_at"):
+                        finish_stream(
+                            RunStatus.CANCELLED, ErrorCode.AGENT_CANCELLED.value
+                        )
+                        raise AgentCancelledError()
+                    raise RunNotActiveError(run["id"])
             except BaseException as exc:
                 events.put_nowait(exc)
             finally:
+                if cancel_watch is not None:
+                    cancel_watch.cancel()
+                    await asyncio.gather(cancel_watch, return_exceptions=True)
                 current = asyncio.current_task()
                 if current is not None:
                     self._active_runs.unregister(context.workspace_id, run["id"], current)
                 events.put_nowait(None)
 
-        async def chunks() -> AsyncIterator[dict[str, Any]]:
-            worker = asyncio.create_task(execute(), name=f"stream-chat:{run['id']}")
-            self._active_runs.register(context.workspace_id, run["id"], worker)
-            try:
-                while True:
-                    item = await events.get()
-                    if item is None:
-                        break
-                    if isinstance(item, BaseException):
-                        raise item
-                    yield item
-            finally:
-                if not worker.done():
-                    worker.cancel()
-                await asyncio.gather(worker, return_exceptions=True)
-
         return ChatStreamResult(
-            session_id=session["id"], run_id=run["id"], chunks=chunks()
+            session_id=session["id"], run_id=run["id"],
+            chunks=_ClaimedStream(
+                repository, context.workspace_id, run["id"], command.prompt,
+                events, execute, self._active_runs,
+            ),
         )
 
     def _runtime_model_provider(
@@ -580,10 +798,28 @@ class GatewayService:
         run = repository.get_run(context.workspace_id, run_id)
         if run is None:
             raise ResourceNotFoundError("agent_run", run_id)
+        disposition = repository.request_stream_cancel(
+            context.workspace_id,
+            run_id,
+            requested_at=datetime.now(UTC).isoformat(),
+        )
+        if disposition == "closed_pending":
+            return
+        if disposition == "requested_claimed":
+            self._active_runs.cancel(context.workspace_id, run_id)
+            return
+        if run.get("stream_state") is not None:
+            raise RunNotActiveError(run_id)
         if run["status"] != RunStatus.RUNNING.value or not self._active_runs.cancel(
             context.workspace_id, run_id
         ):
             raise RunNotActiveError(run_id)
+
+    def reconcile_stream_runs(self, now: str | None = None) -> dict[str, int]:
+        """Settle expired stream leases without inferring that a claimed call was unsent."""
+        return self._repository_provider().reconcile_stale_stream_runs(
+            now or datetime.now(UTC).isoformat()
+        )
 
     @staticmethod
     def _record_terminal_run(
