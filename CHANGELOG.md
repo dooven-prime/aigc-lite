@@ -5,6 +5,17 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
+No release-level changes recorded yet.
+
+## 0.8.0 - 2026-10-15
+
+Core and ROS 2 bridge are version `0.8.0`. This is an engineering release of
+execution provenance, goal/progress diagnosis, and proof-invalidation authority
+consistency, not a certification of research conclusions or autonomous
+recovery. See `docs/releases/v0.8.0.md` for exact source, artifact hashes,
+upgrade acceptance, checks, and limitations. The experimental MDE casepack
+`0.1.0` remains pinned to core `0.7.0` and is **not** part of this release.
+
 - Added per-attempt Model Usage Receipts, bounded VerificationRunner JSON
   parsing, and an explicit SSE Chat start/terminal lifecycle.
 - Added a read-only Host Ledger Projection and candidate-only Long-Horizon
