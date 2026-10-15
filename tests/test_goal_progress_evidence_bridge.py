@@ -464,7 +464,7 @@ def test_cycle_guard_precedes_success_memo() -> None:
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-def test_claim_invalidation_blocks_root_while_root_binding_is_still_current(
+def test_claim_invalidation_blocks_root_after_eager_stale_transition(
     backend, tmp_path,
 ) -> None:
     repository, context, authority, artifacts, qualification, research, bridge = _setup(
@@ -484,13 +484,15 @@ def test_claim_invalidation_blocks_root_while_root_binding_is_still_current(
     assert repository.get_current_use_binding(
         context.workspace_id, dependency["id"], PROFILE_ID,
     )["state"] == "revoked"
-    assert repository.get_current_use_binding(
+    root_binding = repository.get_current_use_binding(
         context.workspace_id, root["id"], PROFILE_ID,
-    )["state"] == "current"
+    )
+    assert root_binding["state"] == "stale"
+    assert root_binding["stale_reason"] == f"invalidation_decision:{decision['id']}"
     before = _authority_rows(repository, context.workspace_id)
     result = bridge.evaluate(context, run["id"])
     assert result["status"] == "BLOCKED"
-    assert "dependency_binding_changed" in result["reasons"]
+    assert result["reasons"] == ["current_use_binding_not_current"]
     assert decision["target_claim_revision_id"] == dependency["id"]
     assert _authority_rows(repository, context.workspace_id) == before
 
@@ -580,19 +582,23 @@ def test_proof_attempt_invalidation_follows_selected_attempt_across_receipts(
         scope=InvalidationScope.PROOF_ATTEMPT,
         receipt_id=r1["id"], attempt_id=selected_a["id"],
     )
-    assert repository.get_current_use_binding(
+    claim_binding = repository.get_current_use_binding(
         context.workspace_id, claim["id"], PROFILE_ID,
-    )["state"] == "current"
+    )
+    assert claim_binding["state"] == "stale"
+    assert claim_binding["stale_reason"] == f"invalidation_decision:{decision['id']}"
     before = _authority_rows(repository, context.workspace_id)
     invalidated_r2 = bridge.evaluate(context, run["id"])
     assert invalidated_r2["status"] == "BLOCKED"
-    assert invalidated_r2["reasons"] == [f"invalidation_decision:{decision['id']}"]
-    assert repository.get_current_use_binding(
+    assert invalidated_r2["reasons"] == ["current_use_binding_not_current"]
+    root_binding = repository.get_current_use_binding(
         context.workspace_id, root["id"], PROFILE_ID,
-    )["state"] == "current"
+    )
+    assert root_binding["state"] == "stale"
+    assert root_binding["stale_reason"] == f"invalidation_decision:{decision['id']}"
     invalidated_root = bridge.evaluate(context, root_run["id"])
     assert invalidated_root["status"] == "BLOCKED"
-    assert invalidated_root["reasons"] == [f"invalidation_decision:{decision['id']}"]
+    assert invalidated_root["reasons"] == ["current_use_binding_not_current"]
     assert _authority_rows(repository, context.workspace_id) == before
 
     r3, _ = _qualify_claim(
