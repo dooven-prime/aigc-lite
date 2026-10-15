@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -110,6 +110,7 @@ from .services.enforcer import (
 )
 from .services.evidence import EvidenceService
 from .services.gateway import GatewayService
+from .services.goal_progress_evidence import GoalProgressEvidenceBridgeService
 from .services.http_poll import HTTPPollService
 from .services.invalidation import InvalidationService
 from .services.kernel_verification import KernelVerificationService
@@ -171,6 +172,7 @@ gateway_service = GatewayService(
 )
 memory_service = MemoryService()
 ledger_projection_service = LedgerProjectionService()
+goal_progress_evidence_service = GoalProgressEvidenceBridgeService()
 mcp_probe_service = MCPProbeService()
 http_poll_service = HTTPPollService()
 credential_service = CredentialService()
@@ -790,6 +792,20 @@ async def run_ledger_projection(
 ) -> dict:
     """Return host-recorded execution facts without certifying goal evidence."""
     return ledger_projection_service.export_run(
+        request_context(http_request, tenant), run_id
+    )
+
+
+@app.get("/api/runs/{run_id}/goal-progress-evidence")
+def run_goal_progress_evidence(
+    run_id: str,
+    http_request: Request,
+    response: Response,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict[str, Any]:
+    """Diagnose one frozen Goal criterion as of a read-only workspace snapshot."""
+    response.headers["Cache-Control"] = "no-store"
+    return goal_progress_evidence_service.evaluate(
         request_context(http_request, tenant), run_id
     )
 

@@ -37,6 +37,20 @@ and the verdict is `UNRESOLVED`. These are identities of host-registered
 contracts, not authentication of the upstream sources, signer, or scientific
 observations represented by a receipt.
 
+## HTTP access
+
+`GET /api/runs/{run_id}/goal-progress-evidence` evaluates the single criterion
+already frozen in that Run's native Goal. It takes no request body or rule
+override. The existing `current_tenant` policy supplies the workspace-scoped
+`RequestContext` (including the configured local-loopback anonymous mode);
+a missing or other-workspace Run returns `404`. A reachable
+Run returns `200` with `SUPPORTED_AS_OF_SNAPSHOT`, `BLOCKED`, or `UNRESOLVED`
+and the exact identities and limitations described below. This endpoint is a
+read-only diagnostic surface, not a qualification, knowledge-admission, or
+execution-authority API. Responses carry `Cache-Control: no-store`: the result
+is valid only for its recorded snapshot, and the `200` response does not
+authorize a later action.
+
 ## Evaluation
 
 The service first uses a workspace-scoped, read-only Run hint to identify the

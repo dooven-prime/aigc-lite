@@ -13,10 +13,13 @@ from uuid import uuid4
 
 import pytest
 from authority_support import provision_admin
+from fastapi.testclient import TestClient
 
 import app.repositories.goal_progress_snapshot as snapshot_module
 import app.repository as repository_module
 import app.services.goal_progress_evidence as bridge_module
+from app import database, main
+from app.auth import hash_password
 from app.core.artifacts import ArtifactDraft, ArtifactKind
 from app.core.contracts import NativeGoalDraft, RequestContext
 from app.core.errors import ResourceNotFoundError
@@ -795,3 +798,96 @@ def test_result_is_bound_to_snapshot_when_source_changes_after_read(tmp_path) ->
     assert GoalProgressEvidenceBridgeService(
         repository_provider=lambda: repository,
     ).evaluate(context, run["id"])["status"] == "BLOCKED"
+
+
+def test_http_goal_progress_is_member_read_only_and_workspace_scoped(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(main.settings, "data_dir", str(tmp_path))
+    monkeypatch.setattr(main.settings, "database_url", "")
+    monkeypatch.setattr(main.settings, "host", "127.0.0.1")
+    monkeypatch.setattr(main.settings, "scheduler_enabled", False)
+    monkeypatch.setattr(main.settings, "tenants_json", "[]")
+    monkeypatch.setattr(main.settings, "api_key", "")
+    monkeypatch.setattr(main.settings, "auth_secret", "goal-progress-test-secret-longer-than-32-chars")
+    repository = database.get_repository()
+    context, authority = provision_admin(
+        repository, RequestContext(str(uuid4()), str(uuid4()), "test-administrator"),
+    )
+    provider = lambda: repository  # noqa: E731
+    artifacts = ArtifactService(repository_provider=provider)
+    evidence = EvidenceService(provider)
+    qualification = QualificationService(
+        provider, artifact_service=artifacts, evidence_service=evidence,
+    )
+    research = ResearchRegistryService(
+        provider, artifact_service=artifacts, evidence_service=evidence,
+    )
+    qualified = _register_claim(qualification, context)
+    _qualify_claim(artifacts, qualification, research, context, authority, qualified)
+    supported_run = _goal_run(repository, context, qualified)
+    unresolved = _register_claim(qualification, context)
+    unresolved_run = _goal_run(repository, context, unresolved)
+    blocked_run = _goal_run(
+        repository, context, qualified,
+        criterion_overrides={"claim_semantic_hash": "f" * 64},
+    )
+
+    repository.create_user(
+        context.workspace_id, "reader@example.test", "Reader",
+        hash_password("reader-password"), role="member",
+    )
+    other_workspace = str(uuid4())
+    repository.create_tenant("Other workspace", other_workspace)
+    repository.create_user(
+        other_workspace, "other-reader@example.test", "Other reader",
+        hash_password("other-password"), role="member",
+    )
+    before = _authority_rows(repository, context.workspace_id)
+
+    with TestClient(main.app) as client:
+        url = f"/api/runs/{supported_run['id']}/goal-progress-evidence"
+        assert client.get(url).status_code == 401
+        reader_login = client.post(
+            "/api/auth/login",
+            json={"email": "reader@example.test", "password": "reader-password"},
+        )
+        assert reader_login.status_code == 200
+        reader_headers = {"Authorization": f"Bearer {reader_login.json()['access_token']}"}
+        assert client.get("/api/auth/me", headers=reader_headers).json()["role"] == "member"
+
+        supported = client.get(url, headers=reader_headers)
+        assert supported.status_code == 200
+        assert supported.headers["cache-control"] == "no-store"
+        value = supported.json()
+        assert value["status"] == "SUPPORTED_AS_OF_SNAPSHOT"
+        assert value["run_id"] == supported_run["id"]
+        assert value["criterion"]["claim_revision_id"] == qualified["id"]
+        assert value["source"]["snapshot_sha256"]
+        assert value["authority_effects"] and not any(value["authority_effects"].values())
+
+        unresolved_response = client.get(
+            f"/api/runs/{unresolved_run['id']}/goal-progress-evidence",
+            headers=reader_headers,
+        )
+        assert unresolved_response.status_code == 200
+        assert unresolved_response.json()["status"] == "UNRESOLVED"
+        blocked_response = client.get(
+            f"/api/runs/{blocked_run['id']}/goal-progress-evidence",
+            headers=reader_headers,
+        )
+        assert blocked_response.status_code == 200
+        assert blocked_response.json()["status"] == "BLOCKED"
+
+        other_login = client.post(
+            "/api/auth/login",
+            json={"email": "other-reader@example.test", "password": "other-password"},
+        )
+        assert other_login.status_code == 200
+        other_headers = {"Authorization": f"Bearer {other_login.json()['access_token']}"}
+        assert client.get(url, headers=other_headers).status_code == 404
+        assert client.get(
+            f"/api/runs/{uuid4()}/goal-progress-evidence", headers=reader_headers,
+        ).status_code == 404
+
+    assert _authority_rows(repository, context.workspace_id) == before
