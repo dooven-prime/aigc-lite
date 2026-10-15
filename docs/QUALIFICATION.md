@@ -201,14 +201,18 @@ Git tree 签名，也不自动判定公告中的数学结论与本地 ClaimRevis
 
 管理员也可将 `RECEIPT_DEFECT` 限定到一个 `receipt`，或将 `PROOF_INVALIDATED` 限定到
 `proof_attempt`，后者必须同时指定它实际被选用的 receipt 与 attempt。服务校验同一 workspace、
-revision semantic hash、receipt 归属、attempt 在冻结 closure 中且确为该 receipt 选中的证明。
+revision semantic hash、receipt 归属、attempt 在冻结 closure 中且为该 receipt 精确选中或历史上可能选中的证明。
 决定和当前 binding 的 `STALE`/`REVOKED` 变更在同一事务中提交；已存在的 current 硬依赖
 binding 在该事务中递归标为 `STALE`，资格读取仍会重算依赖状态；仅更换引文不构成硬依赖。
 同一 ClaimRevision 的两个 Receipt 若选中了同一个 kernel Attempt，
 针对该 Attempt 的决定会使两者的当前使用资格一并失效；选用另一个 Attempt 的新 Receipt 不受牵连。
-Receipt 发行时冻结被选中的 Attempt ID；迁移对历史 Receipt 从原有 criteria 与 evaluation closure
-重建一个版本化的选择索引，并修正旧版本遗漏的 current binding，而不改写历史 Receipt/Decision。
-数据库阻止已失效的 Receipt/revision/所选 Attempt 重新绑定为 `CURRENT`。Grant 签发与消费在写事务内
+新 Receipt 发行时冻结被选中的 Attempt ID；迁移对历史 Receipt 从原有 criteria 与 evaluation closure
+重建版本化索引，并修正旧版本遗漏的 current binding，而不改写历史 Receipt/Decision。早期
+`math.formal.v1` verifier 曾在未改 Profile 版本的情况下改变证书选择顺序；若两个合格 Attempt
+复用同一份被选证书，历史冻结数据无法辨明当时实际选了哪一个。该索引会明确标记为
+`historical-possible-kernel-attempts.v1` 并保守记录全部可能的 Attempt；任一被正式失效时，
+当前使用资格会失效。这可能使歧义历史 Receipt 被保守阻断，但不会把猜测的选择冒充精确来源。
+数据库阻止已失效的 Receipt/revision/所选或可能所选 Attempt 重新绑定为 `CURRENT`。Grant 签发与消费在写事务内
 再次核对精确 Receipt 的当前绑定；PostgreSQL 将该 Claim 上的失效与消费串行化，已合法消费的历史不
 会被后来失效追溯抹去。
 

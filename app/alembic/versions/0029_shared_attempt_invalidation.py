@@ -21,9 +21,12 @@ depends_on = None
 def _selected_kernel_attempt_ids_v1(
     criteria: list[dict], evidence_closure: dict, profile_id: str
 ) -> frozenset[str]:
-    """Frozen migration copy of the v1 proof-selection projection.
+    """Frozen migration copy of the conservative v1 proof projection.
 
     Alembic backfills must not change when application selection code evolves.
+    Historical theorem verifier versions selected opposite closure ends
+    without a profile-version change, so ambiguous certificate reusers are
+    all indexed as possible selected Attempts.
     """
 
     selected_artifacts = {
@@ -72,8 +75,7 @@ def _selected_kernel_attempt_ids_v1(
     }
     if len(frozen_kernel_ids) == 1 and next(iter(frozen_kernel_ids)) in matches:
         return frozenset(frozen_kernel_ids)
-    selected = matches[-1] if profile_id == "math.formal.v1" else matches[0]
-    return frozenset({selected})
+    return frozenset(matches)
 
 
 def _dependent_binding_ids(binding_rows: list[dict], direct_ids: set[str]) -> set[str]:
@@ -182,7 +184,10 @@ def upgrade() -> None:
             attempt_id TEXT NOT NULL,
             selection_version TEXT NOT NULL,
             PRIMARY KEY (tenant_id, qualification_receipt_id, attempt_id),
-            CHECK(selection_version = 'statement-identity-kernel-attempt.v1')
+            CHECK(selection_version IN (
+                'statement-identity-kernel-attempt.v1',
+                'historical-possible-kernel-attempts.v1'
+            ))
         )
         """
     )
@@ -219,7 +224,11 @@ def upgrade() -> None:
                     "tenant_id": tenant_id,
                     "receipt_id": receipt_id,
                     "attempt_id": attempt_id,
-                    "selection_version": "statement-identity-kernel-attempt.v1",
+                    "selection_version": (
+                        "historical-possible-kernel-attempts.v1"
+                        if len(attempts) > 1
+                        else "statement-identity-kernel-attempt.v1"
+                    ),
                 },
             )
     # Earlier releases only transitioned the receipt explicitly named by a

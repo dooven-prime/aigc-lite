@@ -9,16 +9,20 @@ from typing import Any
 NOTICE_VERIFICATION_METHOD = "https_pinned_commit_sha256"
 INVALIDATION_POLICY_ID = "invalidation.pinned-source-admin.v1"
 PROOF_SELECTION_VERSION = "statement-identity-kernel-attempt.v1"
+AMBIGUOUS_PROOF_SELECTION_VERSION = "historical-possible-kernel-attempts.v1"
 
 
 def selected_kernel_attempt_ids_v1(
     criteria: list[dict[str, Any]], evidence_closure: dict[str, Any], profile_id: str
 ) -> frozenset[str]:
-    """Find the exact kernel attempt selected by frozen qualification criteria.
+    """Find kernel Attempts that may have supplied a frozen qualification.
 
     Current math profiles freeze the chosen attempt in the ``kernel_check``
-    criterion. Older receipts listed all passing attempts (or the certificate
-    Artifact); replay the frozen profile's selection order for those receipts.
+    criterion. Older theorem receipts listed all passing attempts, but their
+    verifier changed from first to last certificate selection without a
+    profile-version change. When several eligible Attempts reuse the selected
+    certificate, the original choice is not recoverable from frozen evidence;
+    return every possible choice so invalidation fails closed.
     """
 
     selected_artifacts = {
@@ -67,11 +71,10 @@ def selected_kernel_attempt_ids_v1(
     }
     if len(frozen_kernel_ids) == 1 and next(iter(frozen_kernel_ids)) in matches:
         return frozenset(frozen_kernel_ids)
-    # Pre-selection receipts used the frozen closure's identity order:
-    # math.formal.v1 took the last eligible certificate, while the project
-    # profile took the first eligible Comparator receipt.
-    selected = matches[-1] if profile_id == "math.formal.v1" else matches[0]
-    return frozenset({selected})
+    # A pre-selection receipt cannot prove which verifier vintage ran. Even
+    # though a single old implementation chose one of these by closure order,
+    # using that order here can under-invalidate a receipt from another vintage.
+    return frozenset(matches)
 
 
 class InvalidationScope(StrEnum):

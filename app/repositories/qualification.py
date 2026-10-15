@@ -13,7 +13,11 @@ from ..core.authorization import grant_allows, invocation_view
 from ..core.contracts import RequestContext
 from ..core.enforcement import authorization_invocation_digest, enforcement_payload_hash
 from ..core.errors import AuthorityDeniedError, InvalidEvidenceError
-from ..core.invalidation import PROOF_SELECTION_VERSION, selected_kernel_attempt_ids_v1
+from ..core.invalidation import (
+    AMBIGUOUS_PROOF_SELECTION_VERSION,
+    PROOF_SELECTION_VERSION,
+    selected_kernel_attempt_ids_v1,
+)
 from .common import authorization_not_expired as _authorization_not_expired
 from .common import decode_list as _decode_list
 from .common import decode_metadata as _decode_metadata
@@ -403,6 +407,10 @@ class SQLiteQualificationRepositoryMixin:
             selected_attempts = _selected_attempts(
                 value["criteria"], evaluation["evidence_closure"], value["profile_id"]
             )
+            selection_version = (
+                AMBIGUOUS_PROOF_SELECTION_VERSION
+                if len(selected_attempts) > 1 else PROOF_SELECTION_VERSION
+            )
             db.execute(
                 "INSERT INTO qualification_receipts(id, tenant_id, evaluation_id, "
                 "claim_revision_id, claim_semantic_hash, profile_id, profile_version, "
@@ -416,7 +424,7 @@ class SQLiteQualificationRepositoryMixin:
                     "INSERT INTO qualification_receipt_attempt_selections "
                     "(tenant_id, qualification_receipt_id, attempt_id, selection_version) "
                     "VALUES (?, ?, ?, ?)",
-                    (tenant_id, value["id"], attempt_id, PROOF_SELECTION_VERSION),
+                    (tenant_id, value["id"], attempt_id, selection_version),
                 )
         return _decode_qualification_receipt(value)
 
@@ -902,6 +910,10 @@ class PostgresQualificationRepositoryMixin:
             selected_attempts = _selected_attempts(
                 value["criteria"], evaluation["evidence_closure"], value["profile_id"]
             )
+            selection_version = (
+                AMBIGUOUS_PROOF_SELECTION_VERSION
+                if len(selected_attempts) > 1 else PROOF_SELECTION_VERSION
+            )
             connection.execute(
                 text(
                     "INSERT INTO qualification_receipts(id, tenant_id, evaluation_id, "
@@ -927,7 +939,7 @@ class PostgresQualificationRepositoryMixin:
                         "tenant_id": tenant_id,
                         "receipt_id": value["id"],
                         "attempt_id": attempt_id,
-                        "selection_version": PROOF_SELECTION_VERSION,
+                        "selection_version": selection_version,
                     },
                 )
         return _decode_qualification_receipt(value)
