@@ -98,12 +98,12 @@ def test_historical_selection_ignores_ineligible_certificate_reusers(
 def test_legacy_theorem_receipt_retains_both_eligible_certificate_attempts(
     closure_order: tuple[str, str],
 ) -> None:
-    # The historical criterion names only the shared certificate. Earlier
-    # verifier versions selected opposite ends of this closure order, so
-    # neither eligible Attempt can safely be ruled out during backfill.
+    # Statement identity names the shared certificate, while the old kernel
+    # criterion lists both eligible Attempts. Verifier vintages selected
+    # opposite ends, so neither can safely be ruled out during backfill.
     criteria = [
         {"code": "statement_identity", "evidence_node_ids": ["cert-1"]},
-        {"code": "kernel_check", "evidence_node_ids": ["cert-1"]},
+        {"code": "kernel_check", "evidence_node_ids": list(closure_order)},
     ]
     closure = {
         "nodes": [
@@ -160,7 +160,7 @@ def test_legacy_receipt_is_invalidated_by_either_eligible_attempt(
     now = datetime.now(UTC).isoformat()
     criteria = [
         {"code": "statement_identity", "evidence_node_ids": ["cert-1"]},
-        {"code": "kernel_check", "evidence_node_ids": ["cert-1"]},
+        {"code": "kernel_check", "evidence_node_ids": ["attempt-r1", "attempt-r2"]},
     ]
     closure = {
         "nodes": [

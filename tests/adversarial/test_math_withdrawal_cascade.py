@@ -24,6 +24,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from app import auth, tenancy
@@ -1138,3 +1139,191 @@ def test_http_invalidation_requires_admin_route_and_exposes_decision(tmp_path, m
         audit_rows = connection.execute("SELECT metadata FROM audit_logs").fetchall()
     assert audit_rows
     assert all(token_hash(token) not in row["metadata"] for row in audit_rows)
+
+
+@pytest.mark.parametrize("target_index", [0, 1])
+def test_http_historical_possible_attempt_can_invalidate_binding(
+    tmp_path, monkeypatch, target_index
+):
+    repository, artifacts, research, qualification, context, authority = _services(tmp_path)
+    claim = _register(
+        qualification, context, f"HTTP-HISTORICAL-{target_index}",
+        "A historical shared-certificate theorem.",
+    )
+    modern_receipt, first = _qualify(
+        artifacts, research, qualification, context, authority, claim, admit=False
+    )
+    kernel_context = RequestContext(
+        f"historical-kernel-{claim['id']}", context.workspace_id,
+        "system:verifier:lean-kernel",
+    )
+
+    def add_attempt(outcome):
+        return research.record_verification_attempt(
+            kernel_context,
+            claim["id"],
+            VerificationAttemptDraft(
+                kind=VerificationKind.CALCULATION,
+                outcome=outcome,
+                validation_modality=ValidationModality.KERNEL_CHECK,
+                method="Synthetic historical verifier replay.",
+                scope="Exact frozen fixture revision.",
+                input_digest=claim["semantic_hash"],
+                output_digest=first["output_digest"],
+                artifact_ids=tuple(first["artifact_ids"]),
+            ),
+        )
+
+    second = add_attempt(VerificationOutcome.PASSED)
+    outside = add_attempt(VerificationOutcome.FAILED)
+    original = next(
+        item for item in repository.list_qualification_evaluations(
+            context.workspace_id, claim["id"], PROFILE_ID
+        ) if item["id"] == modern_receipt["evaluation_id"]
+    )
+    closure = {
+        **original["evidence_closure"],
+        "nodes": [
+            *original["evidence_closure"]["nodes"],
+            *(
+                {
+                    "node_type": "verification_attempt",
+                    "node_id": attempt["id"],
+                    "payload": {
+                        "validation_modality": attempt["validation_modality"],
+                        "artifact_ids": attempt["artifact_ids"],
+                        "outcome": attempt["outcome"],
+                        "run_id": attempt["run_id"],
+                        "invalidated_by": [],
+                        "verifier_lineage": attempt["verifier_lineage"],
+                    },
+                }
+                for attempt in (second, outside)
+            ),
+        ],
+    }
+    historical_criteria = [
+        {
+            **criterion,
+            "evidence_node_ids": [first["id"], second["id"]],
+        } if criterion["code"] == "kernel_check" else criterion
+        for criterion in modern_receipt["criteria"]
+    ]
+    historical_evaluation = repository.create_qualification_evaluation(
+        context.workspace_id,
+        {
+            **original,
+            "id": str(uuid4()),
+            "evidence_closure": closure,
+            "evidence_closure_hash": "9" * 64,
+            "criteria": historical_criteria,
+        },
+    )
+    historical_receipt = repository.create_qualification_receipt(
+        context.workspace_id,
+        {
+            **modern_receipt,
+            "id": str(uuid4()),
+            "evaluation_id": historical_evaluation["id"],
+            "evidence_closure_hash": historical_evaluation["evidence_closure_hash"],
+            "criteria": historical_criteria,
+            "receipt_hash": uuid4().hex * 2,
+        },
+    )
+    binding = repository.admit_knowledge(
+        context.workspace_id,
+        {
+            "id": str(uuid4()),
+            "contract_version": "knowledge.admission.v1",
+            "qualification_receipt_id": historical_receipt["id"],
+            "qualification_receipt_hash": historical_receipt["receipt_hash"],
+            "claim_revision_id": claim["id"],
+            "claim_semantic_hash": claim["semantic_hash"],
+            "profile_id": PROFILE_ID,
+            "profile_version": historical_receipt["profile_version"],
+            "use_scope": "knowledge",
+            "admission_policy_id": "knowledge.default.v1",
+            "admission_policy_version": 1,
+            "admission_policy_hash": "f" * 64,
+            "approved_by": context.principal_id,
+            "rationale": "Select the historical ambiguous receipt.",
+            "receipt_hash": uuid4().hex * 2,
+            "issued_at": datetime.now(UTC).isoformat(),
+        },
+        context=context,
+        authority=authority,
+    )["current_use_binding"]
+    selected = {first["id"], second["id"]}
+    with repository._connect() as db:
+        assert {
+            row["attempt_id"]
+            for row in db.execute(
+                "SELECT attempt_id FROM qualification_receipt_attempt_selections "
+                "WHERE tenant_id = ? AND qualification_receipt_id = ?",
+                (context.workspace_id, historical_receipt["id"]),
+            )
+        } == selected
+
+    service, _admin, verified = _verified_notice(
+        repository, artifacts, context, authority
+    )
+    token = secrets.token_urlsafe(32)
+    repository.save_auth_session(
+        token_hash(token), context.principal_id, context.workspace_id,
+        (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+    app = FastAPI()
+    app.include_router(
+        research_api.create_research_router(
+            assurance_bundle_service=None,
+            decision_lab_service=None,
+            evidence_service=None,
+            kernel_verification_service=None,
+            invalidation_service=service,
+            qualification_service=qualification,
+            research_registry_service=None,
+            verification_runner=None,
+            request_context_factory=lambda request, tenant: RequestContext(
+                "http-historical-invalidation", tenant.id,
+                getattr(request.state, "user_id", None),
+            ),
+        )
+    )
+
+    @app.exception_handler(InvalidEvidenceError)
+    async def invalid_evidence_response(_request, exc):
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    monkeypatch.setattr(auth, "get_repository", lambda: repository)
+    monkeypatch.setattr(tenancy, "get_repository", lambda: repository)
+    monkeypatch.setattr(research_api, "get_repository", lambda: repository)
+    request = {
+        "notice_verification_id": verified["id"],
+        "target_claim_revision_id": claim["id"],
+        "target_claim_semantic_hash": claim["semantic_hash"],
+        "target_scope": "proof_attempt",
+        "reason_code": "PROOF_INVALIDATED",
+        "target_receipt_id": historical_receipt["id"],
+        "rationale": "The pinned notice invalidates this possible proof attempt.",
+    }
+    with TestClient(app) as client:
+        denied = client.post(
+            "/api/qualification/invalidation-decisions",
+            json={**request, "target_attempt_id": outside["id"]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert denied.status_code == 422
+        assert "not selected" in denied.json()["detail"]
+        assert repository.get_current_use_binding(
+            context.workspace_id, claim["id"], PROFILE_ID
+        )["state"] == CurrentUseState.CURRENT
+        accepted = client.post(
+            "/api/qualification/invalidation-decisions",
+            json={**request, "target_attempt_id": (first, second)[target_index]["id"]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert accepted.status_code == 201, accepted.text
+        assert accepted.json()["affected_binding_ids"] == [binding["id"]]
+    assert repository.get_current_use_binding(
+        context.workspace_id, claim["id"], PROFILE_ID
+    )["state"] == CurrentUseState.STALE

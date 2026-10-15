@@ -260,11 +260,8 @@ class InvalidationService:
             )
             if attempt["id"] not in matching_attempts:
                 raise InvalidEvidenceError(
-                    "target_attempt_id", "Attempt was not selected by the target receipt"
-                )
-            if matching_attempts != {attempt["id"]}:
-                raise InvalidEvidenceError(
-                    "target_attempt_id", "Selected proof attempt is ambiguous"
+                    "target_attempt_id",
+                    "Attempt was not selected by the target receipt, including possible historical selections",
                 )
         if not draft.rationale.strip() or len(draft.rationale) > 4_000:
             raise InvalidEvidenceError("rationale", "A bounded decision rationale is required")
