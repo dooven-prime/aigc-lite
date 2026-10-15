@@ -118,6 +118,11 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 `POST /api/chat` 与 `/api/chat/stream` 可传 `capability_set_id`。省略时固定选择
 `chat.read-only.v1`：调用方即使是 workspace admin，传给模型 Tool Catalog 的 scope 也会被清空，
 且只保留 low-risk、read-only、non-destructive、closed-world 的 local/workspace tool。
+两者也可选传 `goal_binding: {protocol_id, protocol_version, goal}`；服务端在 Run 创建事务中
+核对本 workspace 的 frozen Protocol，并计算完整 Goal 摘要。旧 Run 不回填目标；绑定只证明
+创建时身份，不证明进展、证据资格或恢复执行权。字段合同及边界见
+[Native Goal Binding v0](NATIVE_GOAL_BINDING_V0.md)。Run 列表不返回完整 `goal_json`，
+详情接口可在同一 workspace 下读取。
 
 两种 Chat 请求均可附带至多 4 个 `.txt`/`.md` UTF-8 文本附件：
 `attachments: [{"name":"notes.md","content":"..."}]`。单文件上限 16 KiB，总计

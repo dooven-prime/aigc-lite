@@ -29,7 +29,12 @@ class MemoryService:
         )
 
     def list_runs(self, context: RequestContext, limit: int = 50) -> list[dict]:
-        return self._repository_provider().list_runs(context.workspace_id, limit)
+        # The list is an index, not a bulk export of up to 32 KiB per Goal.
+        # The exact frozen envelope remains available from scoped Run detail.
+        return [
+            {key: value for key, value in run.items() if key != "goal_json"}
+            for run in self._repository_provider().list_runs(context.workspace_id, limit)
+        ]
 
     def get_run(self, context: RequestContext, run_id: str) -> dict:
         value = self._repository_provider().get_run(context.workspace_id, run_id)

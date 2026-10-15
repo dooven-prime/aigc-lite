@@ -67,11 +67,30 @@ def read_run_ledger_rows(
             "research_verification_attempts", "created_at, id"
         ),
     }
+    goal_fields = (
+        "goal_contract", "goal_protocol_id", "goal_protocol_version",
+        "goal_protocol_sha256", "goal_sha256", "goal_json",
+    )
+    goal_requested = any(runs[0].get(field) is not None for field in goal_fields)
+    goal_protocol_id = runs[0].get("goal_protocol_id")
+    # A migration adds nullable Goal columns to historical Run rows.  Do not
+    # let those NULLs silently change the byte identity of a v0 projection.
+    legacy_run = (
+        runs[0] if goal_requested
+        else {key: value for key, value in runs[0].items() if key not in goal_fields}
+    )
     snapshot: dict[str, Any] = {
         "tenant_id": tenant_id,
         "run_id": run_id,
-        "run": runs[0],
+        "run": legacy_run,
     }
+    snapshot["goal_protocols"] = (
+        rows(
+            "SELECT * FROM evidence_protocols WHERE tenant_id = :tenant_id "
+            "AND id = :goal_protocol_id",
+            {"tenant_id": tenant_id, "goal_protocol_id": goal_protocol_id},
+        ) if goal_protocol_id is not None else []
+    )
     for key, (table, ordering) in direct.items():
         snapshot[key] = rows(
             f"SELECT * FROM {table} WHERE tenant_id = :tenant_id "
@@ -137,16 +156,22 @@ def read_run_ledger_rows(
             if item.get("knowledge_admission_receipt_id") is not None
         }),
     }
-    snapshot["omissions"] = [
-        {
-            "source": "scheduled_task_firings",
-            "reason": "no_durable_run_id_association",
-        },
-        {
+    if goal_requested:
+        snapshot["association_basis"]["goal_protocol_id"] = goal_protocol_id
+    snapshot["omissions"] = [{
+        "source": "scheduled_task_firings",
+        "reason": "no_durable_run_id_association",
+    }]
+    if not goal_requested:
+        snapshot["omissions"].append({
             "source": "run_goal_binding",
             "reason": "agent_runs_do_not_store_protocol_or_goal_identity",
-        },
-    ]
+        })
+    elif len(snapshot["goal_protocols"]) != 1:
+        snapshot["omissions"].append({
+            "source": "run_goal_binding",
+            "reason": "referenced_goal_protocol_missing",
+        })
     if not claim_ids:
         snapshot["omissions"].append({
             "source": "claim_related_authority",

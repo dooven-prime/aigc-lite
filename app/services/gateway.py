@@ -22,6 +22,7 @@ from ..core.contracts import (
     ChatCommand,
     ChatResult,
     ChatStreamResult,
+    NativeGoalDraft,
     RequestContext,
     RunStatus,
     StepKind,
@@ -34,6 +35,7 @@ from ..core.errors import (
     ApplicationError,
     ErrorCode,
     InvalidArtifactError,
+    InvalidEvidenceError,
     ProviderNotConfiguredError,
     ResourceNotFoundError,
     RunNotActiveError,
@@ -41,6 +43,7 @@ from ..core.errors import (
     StreamNotStartedError,
     UpstreamResponseError,
 )
+from ..core.goal_binding import prepare_native_goal_binding
 from ..database import get_repository
 from ..providers import stream_completion
 from ..repository import Repository
@@ -287,29 +290,44 @@ class GatewayService:
         provider = self._runtime_model_provider(
             repository, context.workspace_id, model_config
         )
+        self._validate_goal_binding(repository, context, command.goal_binding)
         session = self._owned_session(
             repository, context.workspace_id, command.session_id, command.prompt
         )
         history = session["messages"][-20:]
-        repository.add_message(
-            context.workspace_id, session["id"], "user",
-            self._display_prompt(command),
-        )
 
         model_name = command.requested_model or (model_config or {}).get("model")
         selected_model = model_name or settings.llm_model
-        run = repository.create_run(
-            context.workspace_id,
-            session["id"],
-            context.request_id,
-            command.requested_model,
-            selected_model,
-            capability_set_id=capability.policy_id,
-            capability_policy_hash=capability.policy_hash,
-        )
-        model_prompt = self._attachment_prompt(
-            command, context, run["id"], session["id"]
-        )
+        try:
+            run = repository.create_run(
+                context.workspace_id,
+                session["id"],
+                context.request_id,
+                command.requested_model,
+                selected_model,
+                capability_set_id=capability.policy_id,
+                capability_policy_hash=capability.policy_hash,
+                goal_binding=command.goal_binding,
+            )
+        except (KeyError, ValueError) as exc:
+            self._raise_goal_creation_error(command.goal_binding, exc)
+            raise
+        try:
+            repository.add_message(
+                context.workspace_id, session["id"], "user",
+                self._display_prompt(command),
+            )
+            model_prompt = self._attachment_prompt(
+                command, context, run["id"], session["id"]
+            )
+        except Exception:
+            # The Run already exists, but no model call has started.  Do not
+            # leave a Goal-bound Run permanently running on setup failure.
+            repository.finish_run(
+                context.workspace_id, run["id"], RunStatus.FAILED.value,
+                ErrorCode.INTERNAL_ERROR.value,
+            )
+            raise
         sequence = 0
 
         def reserve_sequence() -> int:
@@ -502,31 +520,47 @@ class GatewayService:
         provider = self._runtime_model_provider(
             repository, context.workspace_id, model_config
         )
+        self._validate_goal_binding(repository, context, command.goal_binding)
         session = self._owned_session(
             repository, context.workspace_id, command.session_id, command.prompt
         )
         history = session["messages"][-20:]
-        repository.add_message(
-            context.workspace_id, session["id"], "user",
-            self._display_prompt(command),
-        )
         model_name = command.requested_model or (model_config or {}).get("model")
         selected_model = model_name or settings.llm_model
-        run = repository.create_run(
-            context.workspace_id,
-            session["id"],
-            context.request_id,
-            command.requested_model,
-            selected_model,
-            capability_set_id=capability.policy_id,
-            capability_policy_hash=capability.policy_hash,
-            stream_start_deadline_at=(
-                datetime.now(UTC) + timedelta(seconds=settings.stream_start_ttl_seconds)
-            ).isoformat(),
-        )
-        model_prompt = self._attachment_prompt(
-            command, context, run["id"], session["id"]
-        )
+        try:
+            run = repository.create_run(
+                context.workspace_id,
+                session["id"],
+                context.request_id,
+                command.requested_model,
+                selected_model,
+                capability_set_id=capability.policy_id,
+                capability_policy_hash=capability.policy_hash,
+                goal_binding=command.goal_binding,
+                stream_start_deadline_at=(
+                    datetime.now(UTC) + timedelta(seconds=settings.stream_start_ttl_seconds)
+                ).isoformat(),
+            )
+        except (KeyError, ValueError) as exc:
+            self._raise_goal_creation_error(command.goal_binding, exc)
+            raise
+        try:
+            repository.add_message(
+                context.workspace_id, session["id"], "user",
+                self._display_prompt(command),
+            )
+            model_prompt = self._attachment_prompt(
+                command, context, run["id"], session["id"]
+            )
+        except Exception:
+            repository.close_stream_run(
+                context.workspace_id, run["id"],
+                expected_state="pending", status=RunStatus.FAILED.value,
+                error_code=ErrorCode.STREAM_NOT_STARTED.value,
+                step_input=command.prompt,
+                step_metadata={"stream": True, "setup_failed": True},
+            )
+            raise
         sequence = 0
         events: asyncio.Queue[dict[str, Any] | BaseException | None] = asyncio.Queue()
 
@@ -771,6 +805,43 @@ class GatewayService:
                 events, execute, self._active_runs,
             ),
         )
+
+    @staticmethod
+    def _validate_goal_binding(
+        repository: Repository, context: RequestContext,
+        binding: NativeGoalDraft | None,
+    ) -> None:
+        """Reject malformed references before creating a Session or message.
+
+        The repository repeats this check in the Run insertion transaction;
+        this read-only preflight is not the authoritative binding decision.
+        """
+        if binding is None:
+            return
+        protocol = repository.get_evidence_protocol_row(
+            context.workspace_id, binding.protocol_id
+        )
+        if protocol is None:
+            raise ResourceNotFoundError("evidence_protocol", binding.protocol_id)
+        try:
+            prepare_native_goal_binding(binding, protocol, context.workspace_id)
+        except (KeyError, ValueError) as exc:
+            raise InvalidEvidenceError("goal_binding", str(exc)) from exc
+
+    @staticmethod
+    def _raise_goal_creation_error(
+        binding: NativeGoalDraft | None, exc: KeyError | ValueError,
+    ) -> None:
+        """Report a stale preflight as a typed rejection rather than HTTP 500.
+
+        The repository repeats validation in the insert transaction and may
+        observe a Protocol update or deletion after Gateway's read.
+        """
+        if binding is None:
+            return
+        if isinstance(exc, KeyError):
+            raise ResourceNotFoundError("evidence_protocol", binding.protocol_id) from exc
+        raise InvalidEvidenceError("goal_binding", str(exc)) from exc
 
     def _runtime_model_provider(
         self,

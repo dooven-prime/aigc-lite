@@ -11,7 +11,7 @@ from uuid import uuid4
 import pytest
 
 from app.core.artifacts import ArtifactDraft, ArtifactKind
-from app.core.contracts import RequestContext
+from app.core.contracts import NativeGoalDraft, RequestContext
 from app.core.evidence import ExecutionReceiptDraft, ProtocolDraft, ProtocolStatus
 from app.repository import SQLiteRepository
 from app.services.artifacts import ArtifactService
@@ -163,6 +163,41 @@ def test_real_bio_like_ledger_activity_cannot_become_verified_evidence(tmp_path)
             expected_goal_sha256=digest(frozen_goal),
             expected_projection_sha256=projection["sha256"],
         )
+
+
+def test_real_native_goal_binding_replays_without_granting_goal_progress(tmp_path) -> None:
+    repository, context, protocol, _ = _setup(tmp_path)
+    goal = _goal(protocol, context.workspace_id)
+    session = repository.create_session(context.workspace_id, "Bound recovery")
+    run = repository.create_run(
+        context.workspace_id, session["id"], str(uuid4()), None, "research-route",
+        goal_binding=NativeGoalDraft(protocol["id"], protocol["version"], goal),
+    )
+    repository.append_run_step(
+        context.workspace_id, run["id"], 1, "retrieval", "paper-search",
+        "succeeded", "query", "candidate summary",
+        {"verified_evidence": True},
+    )
+    repository.finish_run(context.workspace_id, run["id"], "succeeded")
+    before = _authority_rows(repository, context.workspace_id)
+
+    projection = LedgerProjectionService(
+        repository_provider=lambda: repository,
+    ).export_run(context, run["id"])
+    assert projection["contract"] == "HostLedgerProjection.v1"
+    assert projection["signals"]["goal_binding"] == "NATIVE_BOUND"
+    replay = replay_host_projection(
+        goal, projection,
+        expected_goal_sha256=run["goal_sha256"],
+        expected_projection_sha256=projection["sha256"],
+    )
+    assert replay["kind"] == "HostProjectionReplay.v1"
+    assert replay["goal_binding"] == "NATIVE_BOUND"
+    assert replay["progress_assessment"]["completion_evaluated"] is False
+    assert replay["progress_assessment"]["E"]["projected_verified_count"] == 0
+    assert replay["recovery_decision"]["state"] == "PROPOSED"
+    assert replay["recovery_decision"]["execution_authorized"] is False
+    assert _authority_rows(repository, context.workspace_id) == before
 
 
 def test_real_claimed_stream_with_unknown_usage_pauses_recovery(tmp_path) -> None:

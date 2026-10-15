@@ -173,23 +173,32 @@ validation.
 ## Native Run projection diagnostic
 
 `host_projection_replay.py` accepts the app service's
-`HostLedgerProjection.v0` and a separately pinned `LongHorizonGoal.v0`. This
-is a second, candidate-only diagnostic path. It does not manufacture a
-`LongHorizonLedger.v0` or invoke the four-document `replay()` above: native
-`agent_runs` rows do not contain a Protocol/goal key, native `run_steps`
-have a creation timestamp but no general completion timestamp, and stored
-Execution Receipt metadata, research attempts, bindings, and admissions do
-not establish verified goal evidence or current use in this projection.
+`HostLedgerProjection.v0` or `HostLedgerProjection.v1` and a separately pinned
+`LongHorizonGoal.v0`. This is a second, candidate-only diagnostic path. It
+does not manufacture a `LongHorizonLedger.v0` or invoke the four-document
+`replay()` above. The v0 projection has no native Goal association; v1
+projects a creation-time Goal binding from `agent_runs` and its frozen
+Protocol source row. Native `run_steps` have a creation timestamp but no
+general completion timestamp. Stored Execution Receipt metadata, research
+attempts, bindings, and admissions do not establish verified goal evidence
+or current use in either version.
 
 The caller must supply `expected_goal_sha256` and
 `expected_projection_sha256` from a reviewed source outside the candidate
-input. The goal uses this casepack's domain-separated `digest()`; the host
-projection and its `source.sha256` use the app service's plain SHA-256 of
-canonical UTF-8 JSON. The diagnostic recomputes both hashes, validates
-projected row references and native safety signals, and returns a
-domain-separated `HostProjectionReplay.v0` hash. Row hashes bind the host's
-exported database snapshot; they do not authenticate the original database
-or prove the user supplied goal belongs to the Run.
+input. For v0, the Goal pin is this casepack's domain-separated `digest()`.
+For v1, it is SHA-256 of `aigc-lite.native-goal.v0\n` followed by canonical
+UTF-8 JSON of the complete Goal. The v1 Protocol hash is SHA-256 of
+`aigc-lite.native-goal-protocol.v0\n` followed by canonical UTF-8 JSON of
+`goal.protocol`. Canonical JSON sorts keys, uses compact separators and
+unescaped Unicode, and disallows non-finite numbers. The diagnostic checks
+these values, Goal contract, Protocol ID and version, the single Protocol
+source-row reference, association basis, and projected safety signals.
+The host projection and its `source.sha256` use plain SHA-256 of canonical
+UTF-8 JSON. Results are sealed as `HostProjectionReplay.v0` or
+`HostProjectionReplay.v1` with their corresponding domain prefix. Row hashes
+bind the host's exported database snapshot; they do not authenticate the
+original database. The v1 binding establishes identity of creation-time
+bytes, not Goal fulfillment or current authority.
 
 ```python
 from aigc_lite_casepacks.long_horizon_recovery_v0.host_projection_replay import (
@@ -216,8 +225,9 @@ or a consumed goal budget.
 `M`, `R`, `E`, and budget evaluation remain `NOT_EVALUATED`; `E` reports zero
 **projected verified** items, which is not a claim that no real evidence
 exists. Candidate summaries and stored authority rows never increase `E`.
-The output labels the goal association `HOST_ASSERTED_NOT_NATIVE` and never
-evaluates goal completion. Recorded activity leads to a proposed `REASSESS`;
+The v0 output labels the Goal association `HOST_ASSERTED_NOT_NATIVE`; v1
+reports `NATIVE_BOUND` and echoes the validated native binding. Neither
+version evaluates Goal completion. Recorded activity leads to a proposed `REASSESS`;
 no-start, missing referenced authority rows, historical windows, an
 `IN_FLIGHT` model call, contradictory usage lifecycle, conflicting stream
 facts, or pending/indeterminate external effects lead to `PAUSE`. Terminal
@@ -232,10 +242,15 @@ Bio-like search activity with candidate summaries, an SSE request that never
 started, unknown model usage, an indeterminate dispatch, and forged
 projection signals. They use synthetic native-shaped facts and do not claim
 independent acceptance of a live host export.
+`tests/test_native_goal_replay.py` exercises the v1 binding and rejects
+re-sealed Goal, Protocol, source-row, and signal mismatches while preserving
+the v0 pinning path.
 The app-side `tests/test_trusted_ledger_recovery_integration.py` also exports
 actual SQLite Run, Step, Artifact, and Receipt rows, including terminal
 `UNKNOWN` usage and a claimed SSE Run with indeterminate execution, through
-the host service into this diagnostic.
+the host service into this diagnostic. It additionally tests a real bound Run
+through `HostLedgerProjection.v1` and this replay path; the result remains a
+proposed diagnosis with no verified-evidence or authority effect.
 
 ## Deterministic fault-injection checks
 

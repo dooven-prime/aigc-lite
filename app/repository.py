@@ -16,12 +16,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .core.authority import ADMIN_AUTHORITY_SCOPES, AuthorityContext
-from .core.contracts import RequestContext
+from .core.contracts import NativeGoalDraft, RequestContext
 from .core.credentials import (
     encrypted_credential_id,
     validate_workspace_credential_map,
 )
 from .core.errors import AuthorityDeniedError
+from .core.goal_binding import prepare_native_goal_binding
 from .ports.enforcement_repository import EnforcementRepository
 from .ports.import_repository import ImportRepository
 from .ports.invalidation_repository import InvalidationRepository
@@ -315,6 +316,7 @@ class Repository(
         capability_set_id: str = "runtime.none.v1",
         capability_policy_hash: str | None = None,
         stream_start_deadline_at: str | None = None,
+        goal_binding: NativeGoalDraft | None = None,
     ) -> dict: ...
 
     def claim_stream_run(
@@ -391,6 +393,10 @@ class Repository(
     def create_evidence_protocol(self, tenant_id: str, values: dict[str, Any]) -> dict: ...
 
     def get_evidence_protocol(self, tenant_id: str, protocol_id: str) -> dict | None: ...
+
+    def get_evidence_protocol_row(
+        self, tenant_id: str, protocol_id: str
+    ) -> dict | None: ...
 
     def get_evidence_protocol_by_hash(
         self, tenant_id: str, profile: str, content_hash: str
@@ -1255,7 +1261,10 @@ class SQLiteRepository(
         capability_set_id: str = "runtime.none.v1",
         capability_policy_hash: str | None = None,
         stream_start_deadline_at: str | None = None,
+        goal_binding: NativeGoalDraft | None = None,
     ) -> dict:
+        if goal_binding is not None and not isinstance(goal_binding, NativeGoalDraft):
+            raise ValueError("Invalid Goal binding draft")
         stream_deadline = (
             _stream_time(stream_start_deadline_at)
             if stream_start_deadline_at is not None else None
@@ -1278,15 +1287,34 @@ class SQLiteRepository(
             "stream_claimed_at": None,
             "stream_lease_until": None,
             "stream_cancel_requested_at": None,
+            "goal_contract": None,
+            "goal_protocol_id": None,
+            "goal_protocol_version": None,
+            "goal_protocol_sha256": None,
+            "goal_sha256": None,
+            "goal_json": None,
         }
         with self._connect() as db:
+            if goal_binding is not None:
+                db.execute("BEGIN IMMEDIATE")
+                protocol_row = db.execute(
+                    "SELECT * FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, goal_binding.protocol_id),
+                ).fetchone()
+                if protocol_row is None:
+                    raise KeyError(goal_binding.protocol_id)
+                value.update(prepare_native_goal_binding(
+                    goal_binding, dict(protocol_row), tenant_id,
+                ))
             db.execute(
                 "INSERT INTO agent_runs(id, tenant_id, session_id, request_id, status, "
                 "requested_model, selected_model, capability_set_id, "
                 "capability_policy_hash, error_code, created_at, completed_at, "
                 "stream_state, stream_start_deadline_at, stream_claimed_at, "
-                "stream_lease_until, stream_cancel_requested_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "stream_lease_until, stream_cancel_requested_at, goal_contract, "
+                "goal_protocol_id, goal_protocol_version, goal_protocol_sha256, "
+                "goal_sha256, goal_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(value.values()),
             )
         return value
@@ -1826,6 +1854,16 @@ class SQLiteRepository(
                 tuple(value.values()),
             )
         return _decode_protocol(value)
+
+    def get_evidence_protocol_row(
+        self, tenant_id: str, protocol_id: str
+    ) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM evidence_protocols WHERE tenant_id = ? AND id = ?",
+                (tenant_id, protocol_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def get_evidence_protocol(self, tenant_id: str, protocol_id: str) -> dict | None:
         with self._connect() as db:
@@ -2869,7 +2907,10 @@ class PostgresRepository(
         capability_set_id: str = "runtime.none.v1",
         capability_policy_hash: str | None = None,
         stream_start_deadline_at: str | None = None,
+        goal_binding: NativeGoalDraft | None = None,
     ) -> dict:
+        if goal_binding is not None and not isinstance(goal_binding, NativeGoalDraft):
+            raise ValueError("Invalid Goal binding draft")
         stream_deadline = (
             _stream_time(stream_start_deadline_at)
             if stream_start_deadline_at is not None else None
@@ -2892,18 +2933,44 @@ class PostgresRepository(
             "stream_claimed_at": None,
             "stream_lease_until": None,
             "stream_cancel_requested_at": None,
+            "goal_contract": None,
+            "goal_protocol_id": None,
+            "goal_protocol_version": None,
+            "goal_protocol_sha256": None,
+            "goal_sha256": None,
+            "goal_json": None,
         }
-        self._execute(
-            "INSERT INTO agent_runs(id, tenant_id, session_id, request_id, status, "
-            "requested_model, selected_model, capability_set_id, capability_policy_hash, "
-            "error_code, created_at, completed_at, stream_state, stream_start_deadline_at, "
-            "stream_claimed_at, stream_lease_until, stream_cancel_requested_at) "
-            "VALUES (:id, :tenant_id, :session_id, :request_id, :status, :requested_model, "
-            ":selected_model, :capability_set_id, :capability_policy_hash, :error_code, "
-            ":created_at, :completed_at, :stream_state, :stream_start_deadline_at, "
-            ":stream_claimed_at, :stream_lease_until, :stream_cancel_requested_at)",
-            value,
-        )
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            if goal_binding is not None:
+                protocol_row = connection.execute(
+                    text("SELECT * FROM evidence_protocols "
+                         "WHERE tenant_id = :tenant_id AND id = :id FOR SHARE"),
+                    {"tenant_id": tenant_id, "id": goal_binding.protocol_id},
+                ).mappings().first()
+                if protocol_row is None:
+                    raise KeyError(goal_binding.protocol_id)
+                value.update(prepare_native_goal_binding(
+                    goal_binding, dict(protocol_row), tenant_id,
+                ))
+            connection.execute(
+                text(
+                    "INSERT INTO agent_runs(id, tenant_id, session_id, request_id, status, "
+                    "requested_model, selected_model, capability_set_id, capability_policy_hash, "
+                    "error_code, created_at, completed_at, stream_state, stream_start_deadline_at, "
+                    "stream_claimed_at, stream_lease_until, stream_cancel_requested_at, "
+                    "goal_contract, goal_protocol_id, goal_protocol_version, "
+                    "goal_protocol_sha256, goal_sha256, goal_json) "
+                    "VALUES (:id, :tenant_id, :session_id, :request_id, :status, :requested_model, "
+                    ":selected_model, :capability_set_id, :capability_policy_hash, :error_code, "
+                    ":created_at, :completed_at, :stream_state, :stream_start_deadline_at, "
+                    ":stream_claimed_at, :stream_lease_until, :stream_cancel_requested_at, "
+                    ":goal_contract, :goal_protocol_id, :goal_protocol_version, "
+                    ":goal_protocol_sha256, :goal_sha256, :goal_json)"
+                ),
+                value,
+            )
         return value
 
     def claim_stream_run(
@@ -3491,6 +3558,14 @@ class PostgresRepository(
             value,
         )
         return _decode_protocol(value)
+
+    def get_evidence_protocol_row(
+        self, tenant_id: str, protocol_id: str
+    ) -> dict | None:
+        return self._one(
+            "SELECT * FROM evidence_protocols WHERE tenant_id = :tenant_id AND id = :id",
+            {"tenant_id": tenant_id, "id": protocol_id},
+        )
 
     def get_evidence_protocol(self, tenant_id: str, protocol_id: str) -> dict | None:
         row = self._one(

@@ -16,6 +16,7 @@ from typing import Any
 
 from ..core.contracts import RequestContext
 from ..core.errors import ResourceNotFoundError
+from ..core.goal_binding import assess_native_goal_binding
 from ..database import get_repository
 from ..repository import Repository
 
@@ -165,6 +166,17 @@ def project_run_snapshot(
         for row in snapshot[group]:
             if row["tenant_id"] != workspace_id:
                 raise ValueError(f"Cross-workspace {group} row")
+    for row in snapshot.get("goal_protocols", []):
+        if row["tenant_id"] != workspace_id:
+            raise ValueError("Cross-workspace goal Protocol row")
+
+    goal_status, native_goal = assess_native_goal_binding(
+        run,
+        snapshot.get("goal_protocols", [None])[0]
+        if snapshot.get("goal_protocols") else None,
+        workspace_id,
+    )
+    goal_requested = goal_status != "NATIVE_UNBOUND"
 
     source_rows = {
         "agent_runs": _row_refs([run]),
@@ -173,6 +185,8 @@ def project_run_snapshot(
             for group in (*_DIRECT_RUN_ROWS, *_RELATED_ROWS)
         },
     }
+    if goal_requested:
+        source_rows["goal_protocols"] = _row_refs(snapshot["goal_protocols"])
     source = {
         "kind": "repository_snapshot",
         "rows": source_rows,
@@ -272,6 +286,9 @@ def project_run_snapshot(
         + [f"usage_conflict:{value}" for value in usage_conflicts]
         + [f"usage_lifecycle_conflict:{value}" for value in usage_lifecycle_conflicts]
     )
+    if goal_status == "INCONSISTENT":
+        pending_operations.append(f"goal_binding:{run_id}")
+        pending_operations.sort()
     if (run.get("stream_state") == "claimed"
             or run.get("error_code") == "stream_execution_indeterminate"
             or stream_conflicts):
@@ -280,13 +297,13 @@ def project_run_snapshot(
     if (run.get("error_code") == "stream_execution_indeterminate"
             or stream_conflicts or orphan_usage or usage_conflicts
             or usage_lifecycle_conflicts
-            or orphan_claimed_invocations):
+            or orphan_claimed_invocations or goal_status == "INCONSISTENT"):
         effective_status = "indeterminate"
     else:
         effective_status = run["status"]
 
     body: dict[str, Any] = {
-        "contract": "HostLedgerProjection.v0",
+        "contract": "HostLedgerProjection.v1" if goal_requested else "HostLedgerProjection.v0",
         "candidate_only": True,
         "workspace_id": workspace_id,
         "run_id": run_id,
@@ -398,7 +415,7 @@ def project_run_snapshot(
             "usage_lifecycle_conflict_attempt_ids": usage_lifecycle_conflicts,
             "orphan_claimed_invocation_ids": orphan_claimed_invocations,
             "verified_evidence": [],
-            "goal_binding": "NATIVE_UNBOUND",
+            "goal_binding": goal_status,
         },
         "omissions": [*snapshot["omissions"], {
             "source": "verified_evidence",
@@ -417,4 +434,18 @@ def project_run_snapshot(
             "dispatch_performed": False,
         },
     }
+    if goal_requested:
+        body["native_goal"] = {
+            "status": goal_status,
+            "binding": native_goal,
+            "source_protocol_row_sha256": (
+                _hash(snapshot["goal_protocols"][0])
+                if len(snapshot["goal_protocols"]) == 1 else None
+            ),
+        }
+        if goal_status == "INCONSISTENT":
+            body["omissions"].append({
+                "source": "run_goal_binding",
+                "reason": "native_binding_inconsistent",
+            })
     return {**body, "sha256": _hash(body)}

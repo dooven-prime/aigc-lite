@@ -5,7 +5,13 @@ roadmap items remain in `docs/DESIGN.md`.
 
 ## Unreleased
 
-No changes recorded after `v0.7.0`.
+- Added per-attempt Model Usage Receipts, bounded VerificationRunner JSON
+  parsing, and an explicit SSE Chat start/terminal lifecycle.
+- Added a read-only Host Ledger Projection and candidate-only Long-Horizon
+  Recovery replay. Native Goal Binding v0 now freezes a complete Goal envelope
+  against a workspace frozen Protocol when a Run is created; historical Runs
+  remain unbound and retain their v0 projection identity. This does not
+  verify domain evidence, admit knowledge, or authorize recovery actions.
 
 ## 0.7.0 - 2026-10-14
 
