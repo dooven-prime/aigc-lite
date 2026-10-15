@@ -42,6 +42,11 @@ from .repositories.enforcement import (
     PostgresEnforcementRepositoryMixin,
     SQLiteEnforcementRepositoryMixin,
 )
+from .repositories.goal_progress_snapshot import (
+    GoalProgressSnapshotError,
+    collect_goal_progress_rows,
+    read_goal_progress_rows,
+)
 from .repositories.invalidation import (
     PostgresInvalidationRepositoryMixin,
     SQLiteInvalidationRepositoryMixin,
@@ -362,8 +367,16 @@ class Repository(
 
     def get_run(self, tenant_id: str, run_id: str) -> dict | None: ...
 
+    def read_goal_progress_run_hint(
+        self, tenant_id: str, run_id: str
+    ) -> dict[str, Any] | None: ...
+
     def read_run_ledger_snapshot(
         self, tenant_id: str, run_id: str
+    ) -> dict[str, Any] | None: ...
+
+    def read_goal_progress_snapshot(
+        self, tenant_id: str, run_id: str, claim_revision_id: str, profile_id: str
     ) -> dict[str, Any] | None: ...
 
     def get_run_by_request_id(
@@ -1653,6 +1666,44 @@ class SQLiteRepository(
         value["citations"] = self.list_citations(tenant_id, 500, run_id=run_id)
         return value
 
+    def _goal_progress_read_connection(self) -> sqlite3.Connection:
+        """Open the Goal reader without materializing a missing SQLite database.
+
+        An injected connection factory is a host-owned test/adapter boundary;
+        both readers still set ``PRAGMA query_only`` on that connection.
+        """
+
+        if self._connect_factory is not None:
+            return self._connect_factory()
+        try:
+            connection = sqlite3.connect(
+                self.database_path.resolve().as_uri() + "?mode=ro",
+                uri=True,
+                timeout=10,
+            )
+        except sqlite3.OperationalError as exc:
+            raise GoalProgressSnapshotError("database_unavailable") from exc
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def read_goal_progress_run_hint(
+        self, tenant_id: str, run_id: str
+    ) -> dict[str, Any] | None:
+        """Read the Goal JSON routing hint without writing or creating a database."""
+
+        connection = self._goal_progress_read_connection()
+        try:
+            with connection as db:
+                db.execute("PRAGMA query_only = ON")
+                db.execute("BEGIN")
+                row = db.execute(
+                    "SELECT * FROM agent_runs WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, run_id),
+                ).fetchone()
+                return dict(row) if row is not None else None
+        finally:
+            connection.close()
+
     def read_run_ledger_snapshot(
         self, tenant_id: str, run_id: str
     ) -> dict[str, Any] | None:
@@ -1668,6 +1719,27 @@ class SQLiteRepository(
                 )
 
             return read_run_ledger_rows(rows, tenant_id, run_id)
+
+    def read_goal_progress_snapshot(
+        self, tenant_id: str, run_id: str, claim_revision_id: str, profile_id: str
+    ) -> dict[str, Any] | None:
+        """Read one Goal criterion's qualification chain from a SQLite snapshot."""
+
+        connection = self._goal_progress_read_connection()
+        try:
+            with connection as db:
+                db.execute("PRAGMA query_only = ON")
+                db.execute("BEGIN")
+                budget = {"rows": 0, "bytes": 0}
+
+                def rows(statement: str, values: dict[str, Any]) -> list[dict[str, Any]]:
+                    return collect_goal_progress_rows(db.execute(statement, values), budget)
+
+                return read_goal_progress_rows(
+                    rows, tenant_id, run_id, claim_revision_id, profile_id
+                )
+        finally:
+            connection.close()
 
     def get_run_by_request_id(
         self, tenant_id: str, request_id: str
@@ -3355,6 +3427,27 @@ class PostgresRepository(
         value["citations"] = self.list_citations(tenant_id, 500, run_id=run_id)
         return value
 
+    def read_goal_progress_run_hint(
+        self, tenant_id: str, run_id: str
+    ) -> dict[str, Any] | None:
+        """Read a routing hint in a PostgreSQL read-only transaction."""
+
+        from sqlalchemy import text
+
+        with self.engine.connect().execution_options(
+            isolation_level="REPEATABLE READ"
+        ) as connection:
+            with connection.begin():
+                connection.execute(text("SET TRANSACTION READ ONLY"))
+                row = connection.execute(
+                    text(
+                        "SELECT * FROM agent_runs WHERE tenant_id = :tenant_id "
+                        "AND id = :run_id"
+                    ),
+                    {"tenant_id": tenant_id, "run_id": run_id},
+                ).mappings().first()
+                return dict(row) if row is not None else None
+
     def read_run_ledger_snapshot(
         self, tenant_id: str, run_id: str
     ) -> dict[str, Any] | None:
@@ -3379,6 +3472,33 @@ class PostgresRepository(
                         result.close()
 
                 return read_run_ledger_rows(rows, tenant_id, run_id)
+
+    def read_goal_progress_snapshot(
+        self, tenant_id: str, run_id: str, claim_revision_id: str, profile_id: str
+    ) -> dict[str, Any] | None:
+        """Read one Goal criterion under a read-only PostgreSQL MVCC snapshot."""
+
+        from sqlalchemy import text
+
+        with self.engine.connect().execution_options(
+            isolation_level="REPEATABLE READ"
+        ) as connection:
+            with connection.begin():
+                connection.execute(text("SET TRANSACTION READ ONLY"))
+                budget = {"rows": 0, "bytes": 0}
+
+                def rows(statement: str, values: dict[str, Any]) -> list[dict[str, Any]]:
+                    result = connection.execution_options(
+                        stream_results=True, max_row_buffer=128,
+                    ).execute(text(statement), values)
+                    try:
+                        return collect_goal_progress_rows(result.mappings(), budget)
+                    finally:
+                        result.close()
+
+                return read_goal_progress_rows(
+                    rows, tenant_id, run_id, claim_revision_id, profile_id
+                )
 
     def get_run_by_request_id(
         self, tenant_id: str, request_id: str
