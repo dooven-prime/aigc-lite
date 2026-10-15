@@ -203,7 +203,13 @@ Git tree 签名，也不自动判定公告中的数学结论与本地 ClaimRevis
 `proof_attempt`，后者必须同时指定它实际被选用的 receipt 与 attempt。服务校验同一 workspace、
 revision semantic hash、receipt 归属、attempt 在冻结 closure 中且确为该 receipt 选中的证明。
 决定和当前 binding 的 `STALE`/`REVOKED` 变更在同一事务中提交；硬依赖通过资格读取递归变 stale，
-但仅更换引文不构成硬依赖。数据库还阻止已失效的 receipt/revision 重新绑定为 `CURRENT`。
+但仅更换引文不构成硬依赖。同一 ClaimRevision 的两个 Receipt 若选中了同一个 kernel Attempt，
+针对该 Attempt 的决定会使两者的当前使用资格一并失效；选用另一个 Attempt 的新 Receipt 不受牵连。
+Receipt 发行时冻结被选中的 Attempt ID；迁移对历史 Receipt 从原有 criteria 与 evaluation closure
+重建一个版本化的选择索引，并修正旧版本遗漏的 current binding，而不改写历史 Receipt/Decision。
+数据库阻止已失效的 Receipt/revision/所选 Attempt 重新绑定为 `CURRENT`。Grant 签发与消费在写事务内
+再次核对精确 Receipt 的当前绑定；PostgreSQL 将该 Claim 上的失效与消费串行化，已合法消费的历史不
+会被后来失效追溯抹去。
 
 历史 QualificationReceipt 保持原判决不变；其是否可用于**现在**的知识检索或授权，应看 binding
 与 `GET /api/qualification/claims/{claim_id}/invalidation-decisions`。修订命题是新 revision，

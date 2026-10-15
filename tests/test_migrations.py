@@ -63,7 +63,7 @@ def test_alembic_adopts_existing_database_and_preserves_records(tmp_path) -> Non
         "last_latency_ms",
         "last_tool_count",
     } <= columns
-    assert revision == "0028_native_goal_binding"
+    assert revision == "0029_shared_attempt_invalidation"
     assert {
         "artifacts",
         "citations",
@@ -197,7 +197,7 @@ def test_repository_repairs_unreleased_sqlite_revision_alias(tmp_path) -> None:
         revision = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
-    assert revision == "0028_native_goal_binding"
+    assert revision == "0029_shared_attempt_invalidation"
 
 
 def test_knowledge_admission_migration_does_not_silently_grandfather_bindings(

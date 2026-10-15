@@ -15,6 +15,7 @@ from ..core.authority import AuthorityContext
 from ..core.contracts import RequestContext
 from ..core.errors import InvalidEvidenceError, ResourceNotFoundError
 from ..core.evidence import ExecutionReceiptDraft, ProtocolDraft, ProtocolStatus
+from ..core.invalidation import selected_kernel_attempt_ids_v1
 from ..core.kernel_verification import KERNEL_EXECUTION_CONTRACT_VERSION
 from ..core.qualification import (
     AuthorizationGrantDraft,
@@ -168,7 +169,7 @@ class MathTheoremVerifier:
             and item["payload"].get("outcome") == "passed"
             and not item["payload"].get("verifier_lineage", {}).get("model_route")
         ]
-        certificate, certificate_artifact_id = self._kernel_certificate(
+        certificate, certificate_artifact_id, selected_kernel_attempt_id = self._kernel_certificate(
             kernel_attempts,
             artifacts,
             claim_revision_id=closure.claim_revision_id,
@@ -251,7 +252,7 @@ class MathTheoremVerifier:
                 kernel_ok,
                 "An orthogonal proof kernel accepted the bound proof artifact.",
                 "No valid passing kernel certificate was found.",
-                tuple(item["node_id"] for item in kernel_attempts),
+                (selected_kernel_attempt_id,) if selected_kernel_attempt_id else (),
             ),
             self._criterion(
                 "undeclared_axioms",
@@ -313,8 +314,8 @@ class MathTheoremVerifier:
         *,
         claim_revision_id: str,
         claim_semantic_hash: str,
-    ) -> tuple[dict[str, Any] | None, str | None]:
-        fallback: tuple[dict[str, Any], str] | None = None
+    ) -> tuple[dict[str, Any] | None, str | None, str | None]:
+        fallback: tuple[dict[str, Any], str, str] | None = None
         for attempt in reversed(attempts):
             for artifact_id in reversed(attempt["payload"].get("artifact_ids", [])):
                 artifact = artifacts.get(artifact_id)
@@ -325,7 +326,7 @@ class MathTheoremVerifier:
                 except (TypeError, json.JSONDecodeError):
                     continue
                 if isinstance(value, dict):
-                    candidate = (value, artifact_id)
+                    candidate = (value, artifact_id, attempt["node_id"])
                     if fallback is None:
                         fallback = candidate
                     if MathTheoremVerifier._valid_kernel_certificate(
@@ -335,7 +336,7 @@ class MathTheoremVerifier:
                         claim_semantic_hash=claim_semantic_hash,
                     ):
                         return candidate
-        return fallback or (None, None)
+        return fallback or (None, None, None)
 
     @staticmethod
     def _valid_kernel_certificate(
@@ -639,7 +640,7 @@ class MathProjectVerifier(MathTheoremVerifier):
                 kernel_ok,
                 "Comparator observed kernel acceptance and allowed axioms.",
                 "No bound passing kernel check is present.",
-                (receipt_id,) if receipt_id else (),
+                (attempt["node_id"],) if attempt else (),
             ),
             self._criterion(
                 "dependency_closure",
@@ -1505,6 +1506,18 @@ class QualificationService:
         if evaluation is None:
             stale_reasons.append("qualification_evaluation_missing")
             return sorted(set(stale_reasons))
+        selected_attempts = selected_kernel_attempt_ids_v1(
+            receipt.get("criteria", []), evaluation.get("evidence_closure", {}),
+            receipt["profile_id"],
+        )
+        for invalidation in repository.list_invalidation_decisions(
+            context.workspace_id, receipt["claim_revision_id"]
+        ):
+            if (
+                invalidation["target_scope"] == "proof_attempt"
+                and invalidation["target_attempt_id"] in selected_attempts
+            ):
+                stale_reasons.append(f"invalidation_decision:{invalidation['id']}")
         try:
             current_profile = self._registry.get(receipt["profile_id"]).profile
         except ResourceNotFoundError:

@@ -105,9 +105,18 @@ class SQLiteInvalidationRepositoryMixin:
                 "SELECT id FROM current_use_bindings WHERE tenant_id = ? "
                 "AND claim_revision_id = ? AND state = 'current'"
             )
-            if values["target_scope"] != "claim_revision":
+            if values["target_scope"] == "receipt":
                 query += " AND qualification_receipt_id = ?"
                 parameters.append(values["target_receipt_id"])
+            elif values["target_scope"] == "proof_attempt":
+                query += (
+                    " AND EXISTS (SELECT 1 FROM qualification_receipt_attempt_selections s "
+                    "WHERE s.tenant_id = current_use_bindings.tenant_id "
+                    "AND s.qualification_receipt_id = "
+                    "current_use_bindings.qualification_receipt_id "
+                    "AND s.attempt_id = ?)"
+                )
+                parameters.append(values["target_attempt_id"])
             affected_ids = [row["id"] for row in db.execute(query, parameters).fetchall()]
             row = _decision_row({**values, "tenant_id": tenant_id}, affected_ids)
             db.execute(
@@ -188,13 +197,22 @@ class PostgresInvalidationRepositoryMixin:
             "tenant_id": tenant_id,
             "claim_id": values["target_claim_revision_id"],
             "receipt_id": values["target_receipt_id"],
+            "attempt_id": values["target_attempt_id"],
         }
         query = (
             "SELECT id FROM current_use_bindings WHERE tenant_id = :tenant_id "
             "AND claim_revision_id = :claim_id AND state = 'current'"
         )
-        if values["target_scope"] != "claim_revision":
+        if values["target_scope"] == "receipt":
             query += " AND qualification_receipt_id = :receipt_id"
+        elif values["target_scope"] == "proof_attempt":
+            query += (
+                " AND EXISTS (SELECT 1 FROM qualification_receipt_attempt_selections s "
+                "WHERE s.tenant_id = current_use_bindings.tenant_id "
+                "AND s.qualification_receipt_id = "
+                "current_use_bindings.qualification_receipt_id "
+                "AND s.attempt_id = :attempt_id)"
+            )
         query += " FOR UPDATE"
         with self.engine.begin() as connection:
             if tenant_id != context.workspace_id:
