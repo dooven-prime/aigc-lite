@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
 from .adapters.kernel_verification import KernelVerifierRegistry
@@ -45,7 +45,7 @@ from .auth import (
     verify_password,
 )
 from .config import settings
-from .core.contracts import ChatAttachment, ChatCommand, RequestContext
+from .core.contracts import ChatAttachment, ChatCommand, NativeGoalDraft, RequestContext
 from .core.errors import (
     AgentLimitError,
     AgentWallTimeLimitError,
@@ -485,6 +485,14 @@ class ChatAttachmentRequest(BaseModel):
     content: str = Field(min_length=1, max_length=65536)
 
 
+class NativeGoalBindingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    protocol_id: str = Field(min_length=1, max_length=100)
+    protocol_version: int = Field(ge=1, strict=True)
+    goal: dict[str, Any]
+
+
 class ChatRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=100_000)
     system: str = Field(default="You are a helpful assistant.", max_length=20_000)
@@ -497,6 +505,7 @@ class ChatRequest(BaseModel):
         pattern=r"^[a-z][a-z0-9_.-]*$",
     )
     attachments: list[ChatAttachmentRequest] = Field(default_factory=list, max_length=4)
+    goal_binding: NativeGoalBindingRequest | None = None
 
 
 class SessionRequest(BaseModel):
@@ -673,6 +682,13 @@ async def chat(
                 ChatAttachment(name=item.name, content=item.content)
                 for item in request.attachments
             ),
+            goal_binding=(
+                NativeGoalDraft(
+                    protocol_id=request.goal_binding.protocol_id,
+                    protocol_version=request.goal_binding.protocol_version,
+                    goal=request.goal_binding.goal,
+                ) if request.goal_binding is not None else None
+            ),
         ),
         request_context(http_request, tenant),
     )
@@ -699,6 +715,13 @@ async def chat_stream(
             attachments=tuple(
                 ChatAttachment(name=item.name, content=item.content)
                 for item in request.attachments
+            ),
+            goal_binding=(
+                NativeGoalDraft(
+                    protocol_id=request.goal_binding.protocol_id,
+                    protocol_version=request.goal_binding.protocol_version,
+                    goal=request.goal_binding.goal,
+                ) if request.goal_binding is not None else None
             ),
         ),
         request_context(http_request, tenant),

@@ -1,4 +1,4 @@
-# Host Ledger Projection v0
+# Host Ledger Projection v0 / v1
 
 `LedgerProjectionService.export_run(context, run_id)` reads one workspace Run and
 its directly linked rows in one database snapshot. SQLite uses an explicit read
@@ -6,7 +6,7 @@ transaction; PostgreSQL uses a read-only, repeatable-read transaction. The
 workspace-scoped HTTP read path is `GET /api/runs/{run_id}/ledger-projection`.
 It applies the same authenticated workspace boundary as Run detail and does
 not expose raw prompt, output, or metadata fields. The
-result is `HostLedgerProjection.v0`, a deterministic JSON object whose
+result is a deterministic JSON object whose
 `sha256` covers its canonical body. `source.rows` holds native row identities
 and full-row hashes; sensitive prompt/output and caller-writable metadata are
 not copied into the view. The source digest also binds association rules and
@@ -18,6 +18,19 @@ The exporter streams database cursor rows into a bounded snapshot (at most
 materializing an oversized Run. It does not silently truncate the source.
 An Artifact's `content_hash` here is the stored database field; this exporter
 does not reopen and rehash the underlying bytes.
+
+Historical and ordinary unbound Runs retain `HostLedgerProjection.v0` and
+`signals.goal_binding=NATIVE_UNBOUND`. A Run created with a complete native
+Goal uses `HostLedgerProjection.v1`; its source also includes the referenced
+frozen Protocol row, and `native_goal` reports the creation-time Goal and
+Protocol digests. The host recomputes both from the stored canonical Goal and
+the bound semantic fields of the current Protocol row. A missing Protocol,
+changed bound semantic field, or partial binding yields `INCONSISTENT` and an
+indeterminate effective status, not a silent fallback to unbound. Other
+Protocol row metadata is hashed at export time but is not part of the
+creation-time Goal identity. For unbound Runs the six new nullable columns
+are omitted from the v0 row digest, preserving pre-migration v0 projection
+identity. See [Native Goal Binding v0](NATIVE_GOAL_BINDING_V0.md).
 
 The projection covers Run, Step, Model Usage Receipt, Artifact, Execution
 Receipt, External Dispatch, and consumed authorization-invocation records.
@@ -31,8 +44,8 @@ current effect. All projected Artifacts are candidate-only for Recovery;
 the verified-evidence set is deliberately empty until a domain-specific,
 read-only verification and currentness contract exists.
 
-The native ledger does not yet bind a Run to a frozen Goal/Protocol, record a
-general Step completion time, or durably link scheduler firings to a Run.
+Unbound Runs have no native Goal identity. The ledger still does not record a
+general Step completion time or durably link scheduler firings to a Run.
 These omissions are emitted explicitly. `stream_not_started` means the stream
 request was not sent; a claimed stream means it **may** have been sent. A
 recovered `stream_execution_indeterminate` stays indeterminate even though the
@@ -52,14 +65,16 @@ the scientific facts described by the ledger.
 
 The separate Long-Horizon Recovery casepack may compare two checkpoints of a
 host projection to study activity versus evidence progress. That is a
-candidate-only diagnosis. Because the Run/Goal relationship is not native,
-any supplied Goal association remains an explicit conditional assumption.
+candidate-only diagnosis. For a v0 projection, any supplied Goal association
+remains an explicit conditional assumption. A v1 projection can establish
+creation-time Goal byte identity, but still cannot establish goal-relevant
+progress or independently validated scientific evidence.
 Neither this exporter nor its replay creates a QualificationReceipt,
 CurrentUseBinding, AuthorizationGrant, or dispatches an action. Before any
 real continuation, the application must re-read the current Run, evidence,
 invalidation, Grant, and policy state through the respective authority gates.
 
-This v0 is an application-process view, not an external attestation or an
+This view is an application-process export, not an external attestation or an
 independent trust domain. Cross-host replay of the same exported bytes checks
 determinism and integrity; it does not certify the original host or the
 scientific meaning of its records.

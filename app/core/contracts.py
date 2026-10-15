@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 from .artifacts import ArtifactDraft, CitationDraft
 
@@ -112,6 +113,20 @@ class ChatCommand:
     session_id: str | None = None
     capability_set_id: str | None = None
     attachments: tuple[ChatAttachment, ...] = ()
+    goal_binding: NativeGoalDraft | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NativeGoalDraft:
+    """A caller-proposed complete Goal frozen by the host at Run creation.
+
+    The caller cannot provide a digest or retroactively attach this to a Run.
+    Identity is not evidence validity, qualification, or execution authority.
+    """
+
+    protocol_id: str
+    protocol_version: int
+    goal: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)

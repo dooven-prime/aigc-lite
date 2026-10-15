@@ -129,7 +129,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
     repository = PostgresRepository(POSTGRES_URL)
     repository.init()
-    assert repository.schema_revision() == "0027_stream_lifecycle"
+    assert repository.schema_revision() == "0028_native_goal_binding"
     workspace_id = f"contract-{uuid4()}"
     repository.create_tenant("PostgreSQL contract", workspace_id)
     context = RequestContext(request_id="postgres-contract", workspace_id=workspace_id)
@@ -582,7 +582,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
                 )
             )
         }
-    assert revision == "0027_stream_lifecycle"
+    assert revision == "0028_native_goal_binding"
     assert {
         "signature_verified",
         "enforcement_request_id",

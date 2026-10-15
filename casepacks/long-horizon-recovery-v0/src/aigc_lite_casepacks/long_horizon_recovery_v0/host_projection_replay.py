@@ -1,8 +1,8 @@
-"""Candidate-only diagnostic replay over one native HostLedgerProjection.v0.
+"""Candidate-only diagnostic replay over one native HostLedgerProjection.
 
 This is deliberately separate from LongHorizonLedger.v0 replay. Native Run
-rows do not bind a frozen goal, Step rows have no completion timestamp, and
-the projection does not establish domain verification or current use.
+rows may bind creation-time Goal bytes, but Step rows have no completion
+timestamp and the projection does not establish verification or current use.
 """
 
 from __future__ import annotations
@@ -15,8 +15,12 @@ from typing import Any
 from .replay import ContractError, _validate_goal, digest
 
 _OUTPUT_DOMAIN = b"aigc-lite.host-projection-replay.v0\n"
+_OUTPUT_DOMAIN_V1 = b"aigc-lite.host-projection-replay.v1\n"
+_NATIVE_GOAL_DOMAIN = b"aigc-lite.native-goal.v0\n"
+_NATIVE_PROTOCOL_DOMAIN = b"aigc-lite.native-goal-protocol.v0\n"
 _HEX = set("0123456789abcdef")
 _MAX_BYTES = 8_000_000
+_MAX_NATIVE_GOAL_BYTES = 32_768
 _MAX_ROWS = 20_000
 _DIRECT_RUN_GROUPS = [
     "steps", "model_usage_receipts", "artifacts", "execution_receipts",
@@ -44,6 +48,10 @@ _PROJECTION_FIELDS = {
     "research_verification_attempts", "current_use_bindings",
     "knowledge_admission_receipts", "invalidation_decisions", "signals", "omissions",
     "authority_effects_of_projection", "sha256",
+}
+_NATIVE_GOAL_FIELDS = {
+    "contract", "goal_contract", "protocol_id", "protocol_version",
+    "protocol_sha256", "goal_sha256", "identity_scope",
 }
 _NO_AUTHORITY = {
     "qualification_receipt_created": False,
@@ -78,8 +86,16 @@ def _plain_hash(value: Any) -> str:
     return hashlib.sha256(_json_bytes(value)).hexdigest()
 
 
+def _native_hash(domain: bytes, value: Any) -> str:
+    raw = _json_bytes(value)
+    if len(raw) > _MAX_NATIVE_GOAL_BYTES:
+        raise ContractError("Native Goal exceeds byte limit")
+    return hashlib.sha256(domain + raw).hexdigest()
+
+
 def _output_hash(value: dict[str, Any]) -> str:
-    return hashlib.sha256(_OUTPUT_DOMAIN + _json_bytes(value)).hexdigest()
+    domain = _OUTPUT_DOMAIN_V1 if value["kind"] == "HostProjectionReplay.v1" else _OUTPUT_DOMAIN
+    return hashlib.sha256(domain + _json_bytes(value)).hexdigest()
 
 
 def _seal(value: dict[str, Any]) -> dict[str, Any]:
@@ -127,8 +143,9 @@ def _time(value: Any, where: str) -> None:
     _time_or_none(value, where)
 
 
-def _refs(projection: dict[str, Any], rows: dict[str, Any]) -> None:
-    if set(rows) != set(_GROUPS):
+def _refs(projection: dict[str, Any], rows: dict[str, Any], *, native_bound: bool) -> None:
+    expected_groups = set(_GROUPS) | ({"goal_protocols"} if native_bound else set())
+    if set(rows) != expected_groups:
         raise ContractError("Source row groups differ from native projection")
     for group, (field, id_field) in _GROUPS.items():
         projected = [projection[field]] if field == "run" else _array(
@@ -148,12 +165,28 @@ def _refs(projection: dict[str, Any], rows: dict[str, Any]) -> None:
             expected.append({"id": row_id, "sha256": source_hash})
         if references != expected:
             raise ContractError(f"Source references differ from projected {group}")
+    if native_bound:
+        native_goal = projection["native_goal"]
+        protocol_ref = _array(rows["goal_protocols"], "source.rows.goal_protocols")
+        if protocol_ref != [{
+            "id": native_goal["binding"]["protocol_id"],
+            "sha256": native_goal["source_protocol_row_sha256"],
+        }]:
+            raise ContractError("Goal Protocol source reference differs from native binding")
 
 
 def _validate_projection(projection: Any, expected_sha256: str) -> dict[str, Any]:
     _hash(expected_sha256, "expected_projection_sha256")
-    projection = _object(projection, _PROJECTION_FIELDS, "HostLedgerProjection.v0")
-    if projection["contract"] != "HostLedgerProjection.v0" or projection["candidate_only"] is not True:
+    if not isinstance(projection, dict):
+        raise ContractError("Malformed HostLedgerProjection")
+    native_bound = projection.get("contract") == "HostLedgerProjection.v1"
+    projection = _object(
+        projection, _PROJECTION_FIELDS | ({"native_goal"} if native_bound else set()),
+        "HostLedgerProjection",
+    )
+    if projection["contract"] not in (
+        "HostLedgerProjection.v0", "HostLedgerProjection.v1",
+    ) or projection["candidate_only"] is not True:
         raise ContractError("Unsupported or authority-bearing host projection")
     if projection["sha256"] != expected_sha256 or _plain_hash({
         key: value for key, value in projection.items() if key != "sha256"
@@ -161,6 +194,27 @@ def _validate_projection(projection: Any, expected_sha256: str) -> dict[str, Any
         raise ContractError("Pinned host projection digest mismatch")
     workspace_id = _string(projection["workspace_id"], "workspace_id")
     run_id = _string(projection["run_id"], "run_id")
+    if native_bound:
+        native_goal = _object(
+            projection["native_goal"],
+            {"status", "binding", "source_protocol_row_sha256"},
+            "projection.native_goal",
+        )
+        if native_goal["status"] != "NATIVE_BOUND":
+            raise ContractError("Native Goal binding is not consistent and bound")
+        binding = _object(native_goal["binding"], _NATIVE_GOAL_FIELDS,
+                          "projection.native_goal.binding")
+        if (binding["contract"] != "NativeGoalBinding.v0" or
+                binding["identity_scope"] != "CREATION_TIME_BYTES_ONLY"):
+            raise ContractError("Unsupported native Goal binding identity")
+        _string(binding["goal_contract"], "native_goal.goal_contract")
+        _string(binding["protocol_id"], "native_goal.protocol_id")
+        if type(binding["protocol_version"]) is not int or binding["protocol_version"] < 1:
+            raise ContractError("Invalid native Goal Protocol version")
+        for field in ("protocol_sha256", "goal_sha256"):
+            _hash(binding[field], f"native_goal.{field}")
+        _hash(native_goal["source_protocol_row_sha256"],
+              "native_goal.source_protocol_row_sha256")
     source = _object(
         projection["source"],
         {"kind", "rows", "association_basis", "omissions", "sha256"},
@@ -170,7 +224,7 @@ def _validate_projection(projection: Any, expected_sha256: str) -> dict[str, Any
         raise ContractError("Unsupported source kind")
     if not isinstance(source["rows"], dict):
         raise ContractError("Malformed source rows")
-    _refs(projection, source["rows"])
+    _refs(projection, source["rows"], native_bound=native_bound)
     source_body = {
         "workspace_id": workspace_id, "run_id": run_id,
         "rows": source["rows"],
@@ -183,9 +237,17 @@ def _validate_projection(projection: Any, expected_sha256: str) -> dict[str, Any
         source["association_basis"],
         {"direct_run_id", "claim_related_via_recorded_attempt",
          "grant_related_via_consumed_invocation",
-         "admission_related_via_current_binding"},
+         "admission_related_via_current_binding"} |
+        ({"goal_protocol_id"} if native_bound else set()),
         "source association basis",
     )
+    if native_bound and basis["goal_protocol_id"] != projection["native_goal"]["binding"]["protocol_id"]:
+        raise ContractError("Goal Protocol association differs from native binding")
+    if native_bound and any(
+        isinstance(item, dict) and item.get("source") == "run_goal_binding"
+        for item in _array(source["omissions"], "source.omissions")
+    ):
+        raise ContractError("Bound native Goal conflicts with source omission")
     if basis["direct_run_id"] != _DIRECT_RUN_GROUPS:
         raise ContractError("Source direct Run association differs from native ledger")
     for field in ("claim_related_via_recorded_attempt",
@@ -529,7 +591,7 @@ def _validate_projection(projection: Any, expected_sha256: str) -> dict[str, Any
         "usage_lifecycle_conflict_attempt_ids": sorted(usage_lifecycle_conflicts),
         "orphan_claimed_invocation_ids": sorted(orphan_claimed_invocations),
         "verified_evidence": [],
-        "goal_binding": "NATIVE_UNBOUND",
+        "goal_binding": "NATIVE_BOUND" if native_bound else "NATIVE_UNBOUND",
     }:
         raise ContractError("Projected signals conflict with native facts")
     return projection
@@ -542,15 +604,30 @@ def replay_host_projection(
 ) -> dict[str, Any]:
     """Compare recorded activity while leaving goal progress unestablished.
 
-    The caller supplies a separately pinned frozen goal. Its association with
-    this native Run is a host assertion; the Run row has no Protocol/goal key.
-    No output authorizes dispatch, retry, qualification, or current use.
+    The caller supplies a separately pinned frozen goal. An unbound v0 Run
+    uses the casepack Goal digest and remains host-asserted. A bound v1 Run
+    uses the native creation-time Goal digest and verifies its Protocol bytes.
+    Neither path authorizes dispatch, retry, qualification, or current use.
     """
     _validate_goal(goal)
     _hash(expected_goal_sha256, "expected_goal_sha256")
-    if digest(goal) != expected_goal_sha256:
-        raise ContractError("Pinned goal digest mismatch")
     projection = _validate_projection(projection, expected_projection_sha256)
+    native_bound = projection["contract"] == "HostLedgerProjection.v1"
+    if native_bound:
+        binding = projection["native_goal"]["binding"]
+        expected_binding = {
+            "goal_contract": goal["contract"],
+            "protocol_id": goal["protocol"]["id"],
+            "protocol_version": goal["protocol"]["version"],
+            "protocol_sha256": _native_hash(_NATIVE_PROTOCOL_DOMAIN, goal["protocol"]),
+            "goal_sha256": _native_hash(_NATIVE_GOAL_DOMAIN, goal),
+        }
+        if expected_goal_sha256 != expected_binding["goal_sha256"]:
+            raise ContractError("Pinned native Goal digest mismatch")
+        if any(binding[field] != value for field, value in expected_binding.items()):
+            raise ContractError("Native Goal binding differs from pinned goal")
+    elif digest(goal) != expected_goal_sha256:
+        raise ContractError("Pinned goal digest mismatch")
     if goal["protocol"]["workspace_id"] != projection["workspace_id"]:
         raise ContractError("Goal and native Run belong to different workspaces")
     steps = projection["steps"]
@@ -572,6 +649,7 @@ def replay_host_projection(
         previous_sequence < step_by_id[item["step_id"]]["sequence"] <= current_sequence
     )]
     signals = projection["signals"]
+    goal_binding = "NATIVE_BOUND" if native_bound else "HOST_ASSERTED_NOT_NATIVE"
     historical_only = current_sequence < highest
     unresolved = sorted(set(
         signals["pending_operations"] +
@@ -598,14 +676,14 @@ def replay_host_projection(
     else:
         action, reason = "PAUSE", "native_goal_progress_not_established"
     body = {
-        "kind": "HostProjectionReplay.v0",
+        "kind": "HostProjectionReplay.v1" if native_bound else "HostProjectionReplay.v0",
         "candidate_only": True,
         "workspace_id": projection["workspace_id"],
         "run_id": projection["run_id"],
         "goal_sha256": expected_goal_sha256,
         "projection_sha256": expected_projection_sha256,
         "source_sha256": projection["source"]["sha256"],
-        "goal_binding": "HOST_ASSERTED_NOT_NATIVE",
+        "goal_binding": goal_binding,
         "goal_target": goal["target"],
         "goal_evidence_criteria": goal["policy"]["evidence_criteria"],
         "run": {
@@ -635,7 +713,7 @@ def replay_host_projection(
             ],
         },
         "progress_assessment": {
-            "kind": "NativeProgressDiagnostic.v0",
+            "kind": "NativeProgressDiagnostic.v1" if native_bound else "NativeProgressDiagnostic.v0",
             "M": {"status": "NOT_EVALUATED", "projected_verified_count": 0},
             "R": {"status": "NOT_EVALUATED"},
             "E": {"status": "NOT_EVALUATED", "projected_verified_count": 0,
@@ -644,14 +722,15 @@ def replay_host_projection(
             "U": {"pending_operations": unresolved,
                   "unknown_usage_attempt_ids": signals["unknown_usage_attempt_ids"],
                   "invalid_usage_attempt_ids": signals["invalid_usage_attempt_ids"],
-                  "goal_binding": "HOST_ASSERTED_NOT_NATIVE"},
+                  "goal_binding": goal_binding},
             "B": {"status": "NOT_EVALUATED", "recorded_steps_in_window": len(new_steps),
                   "model_attempts_in_window": len(usage),
                   "candidate_artifacts_in_window": len(artifacts)},
             "completion_evaluated": False,
         },
         "recovery_decision": {
-            "kind": "NativeRecoveryProposal.v0", "state": "PROPOSED",
+            "kind": "NativeRecoveryProposal.v1" if native_bound else "NativeRecoveryProposal.v0",
+            "state": "PROPOSED",
             "action": action, "reason": reason,
             "requires_host_state_refresh": True,
             "requires_existing_authorization": True,
@@ -661,4 +740,10 @@ def replay_host_projection(
         },
         "authority_effects_of_replay": _NO_AUTHORITY,
     }
+    if native_bound:
+        body["native_goal"] = {
+            "status": projection["native_goal"]["status"],
+            "binding": dict(projection["native_goal"]["binding"]),
+            "source_protocol_row_sha256": projection["native_goal"]["source_protocol_row_sha256"],
+        }
     return _seal(body)
