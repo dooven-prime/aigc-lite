@@ -26,6 +26,7 @@ from ..core.invalidation import (
     InvalidationReason,
     InvalidationScope,
     NoticeVerificationDraft,
+    selected_kernel_attempt_ids_v1,
 )
 from ..core.qualification import canonical_hash, claim_semantic_hash
 from ..database import get_repository
@@ -253,28 +254,14 @@ class InvalidationService:
                 raise InvalidEvidenceError(
                     "target_attempt_id", "Attempt is not in the target receipt's closure"
                 )
-            selected_artifact_ids = {
-                artifact_id
-                for criterion in receipt.get("criteria", [])
-                if criterion.get("code") == "statement_identity"
-                for artifact_id in criterion.get("evidence_node_ids", [])
-            }
-            if not selected_artifact_ids.intersection(attempt.get("artifact_ids") or []):
+            matching_attempts = selected_kernel_attempt_ids_v1(
+                receipt.get("criteria", []), evaluation["evidence_closure"],
+                receipt["profile_id"],
+            )
+            if attempt["id"] not in matching_attempts:
                 raise InvalidEvidenceError(
-                    "target_attempt_id", "Attempt was not selected by the target receipt"
-                )
-            matching_attempts = {
-                node["node_id"]
-                for node in evaluation["evidence_closure"].get("nodes", [])
-                if node.get("node_type") == "verification_attempt"
-                and node.get("payload", {}).get("validation_modality") == "kernel_check"
-                and selected_artifact_ids.intersection(
-                    node.get("payload", {}).get("artifact_ids") or []
-                )
-            }
-            if matching_attempts != {attempt["id"]}:
-                raise InvalidEvidenceError(
-                    "target_attempt_id", "Selected proof attempt is ambiguous"
+                    "target_attempt_id",
+                    "Attempt was not selected by the target receipt, including possible historical selections",
                 )
         if not draft.rationale.strip() or len(draft.rationale) > 4_000:
             raise InvalidEvidenceError("rationale", "A bounded decision rationale is required")

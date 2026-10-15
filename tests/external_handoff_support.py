@@ -30,11 +30,33 @@ def provision_external_grant(
 
     admin_context, authority = provision_admin(repository, context)
     receipt_id = str(uuid4())
+    evaluation_id = str(uuid4())
     claim_id = str(uuid4())
     receipt_hash = sha256(receipt_id.encode()).hexdigest()
     admission_hash = sha256(claim_id.encode()).hexdigest()
     now = "2026-09-29T00:00:00+00:00"
     with repository._connect() as connection:
+        connection.execute(
+            "INSERT INTO qualification_evaluations(id, tenant_id, claim_revision_id, "
+            "claim_semantic_hash, profile_id, profile_version, profile_hash, "
+            "profile_snapshot, evidence_closure_hash, evidence_closure, policy_version, "
+            "policy_hash, verdict, criteria, blockers, evidence_vector, "
+            "independence_summary, evaluated_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 1, ?, '{}', ?, '{\"nodes\":[]}', ?, ?, "
+            "'ADMITTED', '[]', '[]', '{}', '{}', NULL, ?)",
+            (
+                evaluation_id,
+                context.workspace_id,
+                claim_id,
+                "a" * 64,
+                "contract.profile.v1",
+                "9" * 64,
+                "b" * 64,
+                "contract-policy-v1",
+                "c" * 64,
+                now,
+            ),
+        )
         connection.execute(
             "INSERT INTO qualification_receipts(id, tenant_id, evaluation_id, "
             "claim_revision_id, claim_semantic_hash, profile_id, profile_version, "
@@ -44,7 +66,7 @@ def provision_external_grant(
             (
                 receipt_id,
                 context.workspace_id,
-                str(uuid4()),
+                evaluation_id,
                 claim_id,
                 "a" * 64,
                 "contract.profile.v1",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,11 +12,16 @@ from ..core.authority import AuthorityContext
 from ..core.authorization import grant_allows, invocation_view
 from ..core.contracts import RequestContext
 from ..core.enforcement import authorization_invocation_digest, enforcement_payload_hash
-from ..core.errors import AuthorityDeniedError
+from ..core.errors import AuthorityDeniedError, InvalidEvidenceError
+from ..core.invalidation import (
+    AMBIGUOUS_PROOF_SELECTION_VERSION,
+    PROOF_SELECTION_VERSION,
+    selected_kernel_attempt_ids_v1,
+)
 from .common import authorization_not_expired as _authorization_not_expired
 from .common import decode_list as _decode_list
 from .common import decode_metadata as _decode_metadata
-from .common import utc_now
+from .common import lock_qualification_authority_workspace, utc_now
 
 
 def _decode_qualification_evaluation(row: Any) -> dict[str, Any]:
@@ -43,6 +49,14 @@ def _decode_qualification_receipt(row: Any) -> dict[str, Any]:
     return value
 
 
+def _selected_attempts(criteria: str, closure: str, profile_id: str) -> frozenset[str]:
+    """Project an immutable receipt/evaluation pair into the proof index."""
+
+    return selected_kernel_attempt_ids_v1(
+        _decode_list(criteria), _decode_metadata(closure), profile_id
+    )
+
+
 def _decode_authorization_grant(row: Any) -> dict[str, Any]:
     value = dict(row)
     for field in ("scope", "conditions", "budget"):
@@ -59,6 +73,161 @@ _INVOCATION_FIELDS = (
     "adapter_target_id", "tool_spec_hash", "arguments_digest", "invocation_digest",
     "tool_timeout_seconds",
 )
+
+_CURRENT_RECEIPT_BINDING_SQL = (
+    "SELECT b.id FROM current_use_bindings b "
+    "JOIN qualification_receipts r ON r.tenant_id = b.tenant_id "
+    "AND r.id = b.qualification_receipt_id "
+    "WHERE r.tenant_id = :tenant_id AND r.id = :receipt_id "
+    "AND b.claim_revision_id = r.claim_revision_id "
+    "AND b.profile_id = r.profile_id AND b.state = 'current' "
+    "AND NOT EXISTS (SELECT 1 FROM invalidation_decisions d "
+    "WHERE d.tenant_id = r.tenant_id "
+    "AND d.target_claim_revision_id = r.claim_revision_id "
+    "AND (d.target_scope = 'claim_revision' OR d.target_receipt_id = r.id "
+    "OR (d.target_scope = 'proof_attempt' AND EXISTS ("
+    "SELECT 1 FROM qualification_receipt_attempt_selections s "
+    "WHERE s.tenant_id = r.tenant_id "
+    "AND s.qualification_receipt_id = r.id "
+    "AND s.attempt_id = d.target_attempt_id))))"
+)
+
+
+def _frozen_dependencies(closure_value: Any) -> list[tuple[str, str, str, str]]:
+    try:
+        closure = (
+            json.loads(closure_value) if isinstance(closure_value, str) else closure_value
+        )
+    except (TypeError, ValueError) as exc:
+        raise InvalidEvidenceError("evidence_closure", "Frozen dependency closure is invalid") from exc
+    if not isinstance(closure, dict) or not isinstance(closure.get("nodes"), list):
+        raise InvalidEvidenceError("evidence_closure", "Frozen dependency closure is invalid")
+    requirements = []
+    for node in closure["nodes"]:
+        if not isinstance(node, dict) or node.get("node_type") != "dependency_binding":
+            continue
+        payload = node.get("payload")
+        if not isinstance(payload, dict) or not all(
+            isinstance(value, str) and value
+            for value in (
+                node.get("node_id"), payload.get("profile_id"),
+                payload.get("use_scope"), payload.get("qualification_receipt_id"),
+            )
+        ):
+            raise InvalidEvidenceError("evidence_closure", "Frozen dependency binding is invalid")
+        requirements.append(
+            (
+                node["node_id"], payload["profile_id"], payload["use_scope"],
+                payload["qualification_receipt_id"],
+            )
+        )
+    return requirements
+
+
+def _assert_frozen_dependency_graph(
+    receipt_id: str,
+    load_closure: Callable[[str], Any | None],
+    assert_current: Callable[[str, str, str, str], None],
+) -> None:
+    """Check every frozen binding in the receipt graph within one transaction."""
+
+    pending = [(receipt_id, False)]
+    active: set[str] = set()
+    checked: set[str] = set()
+    while pending:
+        current_id, leaving = pending.pop()
+        if leaving:
+            active.remove(current_id)
+            checked.add(current_id)
+            continue
+        if current_id in active:
+            raise InvalidEvidenceError("evidence_closure", "Frozen dependency cycle is invalid")
+        if current_id in checked:
+            continue
+        closure = load_closure(current_id)
+        if closure is None:
+            raise InvalidEvidenceError("qualification_receipt_id", "Receipt closure is missing")
+        active.add(current_id)
+        pending.append((current_id, True))
+        for claim_id, profile_id, use_scope, dependency_id in reversed(
+            _frozen_dependencies(closure)
+        ):
+            assert_current(claim_id, profile_id, use_scope, dependency_id)
+            pending.append((dependency_id, False))
+
+
+def _assert_sqlite_current_dependencies(db: Any, tenant_id: str, receipt_id: str) -> None:
+    def load_closure(current_id: str) -> Any | None:
+        row = db.execute(
+            "SELECT e.evidence_closure FROM qualification_receipts r "
+            "JOIN qualification_evaluations e ON e.tenant_id = r.tenant_id "
+            "AND e.id = r.evaluation_id WHERE r.tenant_id = ? AND r.id = ?",
+            (tenant_id, current_id),
+        ).fetchone()
+        return row["evidence_closure"] if row is not None else None
+
+    def assert_current(
+        claim_id: str, profile_id: str, use_scope: str, dependency_id: str
+    ) -> None:
+        exact = db.execute(
+            "SELECT 1 FROM current_use_bindings WHERE tenant_id = ? "
+            "AND claim_revision_id = ? AND profile_id = ? AND use_scope = ? "
+            "AND qualification_receipt_id = ? AND state = 'current'",
+            (tenant_id, claim_id, profile_id, use_scope, dependency_id),
+        ).fetchone()
+        valid = db.execute(
+            _CURRENT_RECEIPT_BINDING_SQL,
+            {"tenant_id": tenant_id, "receipt_id": dependency_id},
+        ).fetchone()
+        if exact is None or valid is None:
+            raise InvalidEvidenceError(
+                "qualification_receipt_id", "Frozen dependency is not currently usable"
+            )
+
+    _assert_frozen_dependency_graph(receipt_id, load_closure, assert_current)
+
+
+def _assert_postgres_current_dependencies(
+    connection: Any, tenant_id: str, receipt_id: str
+) -> None:
+    from sqlalchemy import text
+
+    def load_closure(current_id: str) -> Any | None:
+        row = connection.execute(
+            text(
+                "SELECT e.evidence_closure FROM qualification_receipts r "
+                "JOIN qualification_evaluations e ON e.tenant_id = r.tenant_id "
+                "AND e.id = r.evaluation_id WHERE r.tenant_id = :tenant_id AND r.id = :receipt_id"
+            ),
+            {"tenant_id": tenant_id, "receipt_id": current_id},
+        ).mappings().first()
+        return row["evidence_closure"] if row is not None else None
+
+    def assert_current(
+        claim_id: str, profile_id: str, use_scope: str, dependency_id: str
+    ) -> None:
+        exact = connection.execute(
+            text(
+                "SELECT 1 FROM current_use_bindings WHERE tenant_id = :tenant_id "
+                "AND claim_revision_id = :claim_id AND profile_id = :profile_id "
+                "AND use_scope = :use_scope AND qualification_receipt_id = :receipt_id "
+                "AND state = 'current'"
+            ),
+            {
+                "tenant_id": tenant_id, "claim_id": claim_id, "profile_id": profile_id,
+                "use_scope": use_scope, "receipt_id": dependency_id,
+            },
+        ).first()
+        valid = connection.execute(
+            text(_CURRENT_RECEIPT_BINDING_SQL),
+            {"tenant_id": tenant_id, "receipt_id": dependency_id},
+        ).first()
+        if exact is None or valid is None:
+            raise InvalidEvidenceError(
+                "qualification_receipt_id", "Frozen dependency is not currently usable"
+            )
+
+    _assert_frozen_dependency_graph(receipt_id, load_closure, assert_current)
 
 
 def _invocation_row(
@@ -228,6 +397,20 @@ class SQLiteQualificationRepositoryMixin:
             "issued_at": values.get("issued_at") or utc_now(),
         }
         with self._connect() as db:
+            evaluation = db.execute(
+                "SELECT evidence_closure FROM qualification_evaluations "
+                "WHERE tenant_id = ? AND id = ?",
+                (tenant_id, value["evaluation_id"]),
+            ).fetchone()
+            if evaluation is None:
+                raise KeyError(value["evaluation_id"])
+            selected_attempts = _selected_attempts(
+                value["criteria"], evaluation["evidence_closure"], value["profile_id"]
+            )
+            selection_version = (
+                AMBIGUOUS_PROOF_SELECTION_VERSION
+                if len(selected_attempts) > 1 else PROOF_SELECTION_VERSION
+            )
             db.execute(
                 "INSERT INTO qualification_receipts(id, tenant_id, evaluation_id, "
                 "claim_revision_id, claim_semantic_hash, profile_id, profile_version, "
@@ -236,6 +419,13 @@ class SQLiteQualificationRepositoryMixin:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(value.values()),
             )
+            for attempt_id in sorted(selected_attempts):
+                db.execute(
+                    "INSERT INTO qualification_receipt_attempt_selections "
+                    "(tenant_id, qualification_receipt_id, attempt_id, selection_version) "
+                    "VALUES (?, ?, ?, ?)",
+                    (tenant_id, value["id"], attempt_id, selection_version),
+                )
         return _decode_qualification_receipt(value)
 
     def get_qualification_receipt(self, tenant_id: str, receipt_id: str) -> dict | None:
@@ -311,6 +501,11 @@ class SQLiteQualificationRepositoryMixin:
             "updated_at": now,
         }
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if value["state"] == "current":
+                _assert_sqlite_current_dependencies(
+                    db, tenant_id, value["qualification_receipt_id"]
+                )
             db.execute(
                 "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, "
                 "profile_id, use_scope, qualification_receipt_id, "
@@ -376,6 +571,9 @@ class SQLiteQualificationRepositoryMixin:
                 raise AuthorityDeniedError("qualification:admit")
             self._assert_admin_write_authority(
                 db, context, authority, "qualification:admit"
+            )
+            _assert_sqlite_current_dependencies(
+                db, tenant_id, admission["qualification_receipt_id"]
             )
             db.execute(
                 "INSERT INTO knowledge_admission_receipts(id, tenant_id, "
@@ -497,6 +695,17 @@ class SQLiteQualificationRepositoryMixin:
                 is None
             ):
                 raise KeyError(value["qualification_receipt_id"])
+            if db.execute(
+                _CURRENT_RECEIPT_BINDING_SQL,
+                {"tenant_id": tenant_id, "receipt_id": value["qualification_receipt_id"]},
+            ).fetchone() is None:
+                raise InvalidEvidenceError(
+                    "qualification_receipt_id",
+                    "Authorization requires a current, non-invalidated binding",
+                )
+            _assert_sqlite_current_dependencies(
+                db, tenant_id, value["qualification_receipt_id"]
+            )
             db.execute(
                 "INSERT INTO authorization_grants(id, tenant_id, qualification_receipt_id, "
                 "actor_id, action, target, scope, conditions, expires_at, budget, max_calls, "
@@ -562,6 +771,17 @@ class SQLiteQualificationRepositoryMixin:
             ).fetchall()
             for row in rows:
                 grant = dict(row)
+                if db.execute(
+                    _CURRENT_RECEIPT_BINDING_SQL,
+                    {"tenant_id": tenant_id, "receipt_id": grant["qualification_receipt_id"]},
+                ).fetchone() is None:
+                    continue
+                try:
+                    _assert_sqlite_current_dependencies(
+                        db, tenant_id, grant["qualification_receipt_id"]
+                    )
+                except InvalidEvidenceError:
+                    continue
                 if invocation is not None and not _invocation_matches_grant(
                     tenant_id, actor_id, action, target, grant, invocation
                 ):
@@ -675,17 +895,53 @@ class PostgresQualificationRepositoryMixin:
             "receipt_hash": values["receipt_hash"],
             "issued_at": values.get("issued_at") or utc_now(),
         }
-        self._execute(
-            "INSERT INTO qualification_receipts(id, tenant_id, evaluation_id, "
-            "claim_revision_id, claim_semantic_hash, profile_id, profile_version, "
-            "evidence_closure_hash, policy_version, policy_hash, verdict, criteria, "
-            "blockers, evidence_vector, independence_summary, receipt_hash, issued_at) "
-            "VALUES (:id, :tenant_id, :evaluation_id, :claim_revision_id, "
-            ":claim_semantic_hash, :profile_id, :profile_version, :evidence_closure_hash, "
-            ":policy_version, :policy_hash, :verdict, :criteria, :blockers, "
-            ":evidence_vector, :independence_summary, :receipt_hash, :issued_at)",
-            value,
-        )
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            evaluation = connection.execute(
+                text(
+                    "SELECT evidence_closure FROM qualification_evaluations "
+                    "WHERE tenant_id = :tenant_id AND id = :evaluation_id"
+                ),
+                value,
+            ).mappings().first()
+            if evaluation is None:
+                raise KeyError(value["evaluation_id"])
+            selected_attempts = _selected_attempts(
+                value["criteria"], evaluation["evidence_closure"], value["profile_id"]
+            )
+            selection_version = (
+                AMBIGUOUS_PROOF_SELECTION_VERSION
+                if len(selected_attempts) > 1 else PROOF_SELECTION_VERSION
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO qualification_receipts(id, tenant_id, evaluation_id, "
+                    "claim_revision_id, claim_semantic_hash, profile_id, profile_version, "
+                    "evidence_closure_hash, policy_version, policy_hash, verdict, criteria, "
+                    "blockers, evidence_vector, independence_summary, receipt_hash, issued_at) "
+                    "VALUES (:id, :tenant_id, :evaluation_id, :claim_revision_id, "
+                    ":claim_semantic_hash, :profile_id, :profile_version, "
+                    ":evidence_closure_hash, :policy_version, :policy_hash, :verdict, "
+                    ":criteria, :blockers, :evidence_vector, :independence_summary, "
+                    ":receipt_hash, :issued_at)"
+                ),
+                value,
+            )
+            for attempt_id in sorted(selected_attempts):
+                connection.execute(
+                    text(
+                        "INSERT INTO qualification_receipt_attempt_selections "
+                        "(tenant_id, qualification_receipt_id, attempt_id, selection_version) "
+                        "VALUES (:tenant_id, :receipt_id, :attempt_id, :selection_version)"
+                    ),
+                    {
+                        "tenant_id": tenant_id,
+                        "receipt_id": value["id"],
+                        "attempt_id": attempt_id,
+                        "selection_version": selection_version,
+                    },
+                )
         return _decode_qualification_receipt(value)
 
     def get_qualification_receipt(self, tenant_id: str, receipt_id: str) -> dict | None:
@@ -759,25 +1015,44 @@ class PostgresQualificationRepositoryMixin:
             "created_at": now,
             "updated_at": now,
         }
-        self._execute(
-            "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, profile_id, "
-            "use_scope, qualification_receipt_id, knowledge_admission_receipt_id, state, "
-            "stale_reason, bound_by, created_at, updated_at) VALUES (:id, :tenant_id, "
-            ":claim_revision_id, :profile_id, :use_scope, :qualification_receipt_id, "
-            ":knowledge_admission_receipt_id, :state, :stale_reason, :bound_by, "
-            ":created_at, :updated_at) ON CONFLICT(tenant_id, claim_revision_id, "
-            "profile_id, use_scope) DO UPDATE SET qualification_receipt_id = "
-            "excluded.qualification_receipt_id, knowledge_admission_receipt_id = "
-            "excluded.knowledge_admission_receipt_id, state = excluded.state, stale_reason = "
-            "excluded.stale_reason, bound_by = excluded.bound_by, updated_at = excluded.updated_at",
-            value,
-        )
-        return (
-            self.get_current_use_binding(
-                tenant_id, value["claim_revision_id"], value["profile_id"], value["use_scope"]
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            lock_qualification_authority_workspace(connection, tenant_id)
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"{tenant_id}:{value['claim_revision_id']}"},
             )
-            or value
-        )
+            if value["state"] == "current":
+                _assert_postgres_current_dependencies(
+                    connection, tenant_id, value["qualification_receipt_id"]
+                )
+            connection.execute(
+                text(
+                    "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, "
+                    "profile_id, use_scope, qualification_receipt_id, "
+                    "knowledge_admission_receipt_id, state, stale_reason, bound_by, "
+                    "created_at, updated_at) VALUES (:id, :tenant_id, :claim_revision_id, "
+                    ":profile_id, :use_scope, :qualification_receipt_id, "
+                    ":knowledge_admission_receipt_id, :state, :stale_reason, :bound_by, "
+                    ":created_at, :updated_at) ON CONFLICT(tenant_id, claim_revision_id, "
+                    "profile_id, use_scope) DO UPDATE SET qualification_receipt_id = "
+                    "excluded.qualification_receipt_id, knowledge_admission_receipt_id = "
+                    "excluded.knowledge_admission_receipt_id, state = excluded.state, "
+                    "stale_reason = excluded.stale_reason, bound_by = excluded.bound_by, "
+                    "updated_at = excluded.updated_at"
+                ),
+                value,
+            )
+            row = connection.execute(
+                text(
+                    "SELECT * FROM current_use_bindings WHERE tenant_id = :tenant_id "
+                    "AND claim_revision_id = :claim_revision_id "
+                    "AND profile_id = :profile_id AND use_scope = :use_scope"
+                ),
+                value,
+            ).mappings().one()
+        return dict(row)
 
     def admit_knowledge(
         self, tenant_id: str, values: dict[str, Any], *,
@@ -827,9 +1102,13 @@ class PostgresQualificationRepositoryMixin:
             self._assert_admin_write_authority(
                 connection, context, authority, "qualification:admit"
             )
+            lock_qualification_authority_workspace(connection, tenant_id)
             connection.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"{tenant_id}:{admission['claim_revision_id']}"},
+            )
+            _assert_postgres_current_dependencies(
+                connection, tenant_id, admission["qualification_receipt_id"]
             )
             connection.execute(
                 text(
@@ -963,15 +1242,32 @@ class PostgresQualificationRepositoryMixin:
             self._assert_admin_write_authority(
                 connection, context, authority, "authorization:grant"
             )
+            lock_qualification_authority_workspace(connection, tenant_id)
             receipt = connection.execute(
                 text(
-                    "SELECT 1 FROM qualification_receipts WHERE tenant_id = :tenant_id "
+                    "SELECT claim_revision_id FROM qualification_receipts "
+                    "WHERE tenant_id = :tenant_id "
                     "AND id = :qualification_receipt_id"
                 ),
                 value,
-            ).first()
+            ).mappings().first()
             if receipt is None:
                 raise KeyError(value["qualification_receipt_id"])
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"{tenant_id}:{receipt['claim_revision_id']}"},
+            )
+            if connection.execute(
+                text(_CURRENT_RECEIPT_BINDING_SQL + " FOR UPDATE OF b"),
+                {"tenant_id": tenant_id, "receipt_id": value["qualification_receipt_id"]},
+            ).first() is None:
+                raise InvalidEvidenceError(
+                    "qualification_receipt_id",
+                    "Authorization requires a current, non-invalidated binding",
+                )
+            _assert_postgres_current_dependencies(
+                connection, tenant_id, value["qualification_receipt_id"]
+            )
             connection.execute(
                 text(
                     "INSERT INTO authorization_grants(id, tenant_id, qualification_receipt_id, "
@@ -1017,6 +1313,24 @@ class PostgresQualificationRepositoryMixin:
 
         from sqlalchemy import text
 
+        if grant_id is None:
+            # Each candidate has one immutable claim identity. Claim locks must
+            # be acquired before Grant row locks, never across several claims.
+            for candidate in self.list_authorization_grants(tenant_id):
+                if (
+                    candidate["actor_id"] != actor_id
+                    or candidate["action"] != action
+                    or candidate["target"] != target
+                ):
+                    continue
+                consumed = self.consume_authorization_grant(
+                    tenant_id, actor_id, action, target, used_at,
+                    grant_id=candidate["id"], invocation=invocation,
+                )
+                if consumed is not None:
+                    return consumed
+            return None
+
         parameters = {
             "tenant_id": tenant_id,
             "actor_id": actor_id,
@@ -1026,10 +1340,39 @@ class PostgresQualificationRepositoryMixin:
         }
         grant_filter = " AND g.id = :grant_id" if grant_id is not None else ""
         with self.engine.begin() as connection:
+            lock_qualification_authority_workspace(connection, tenant_id)
             if invocation is not None and connection.execute(
                 text("SELECT 1 FROM agent_runs WHERE tenant_id = :tenant_id AND id = :run_id"),
                 {"tenant_id": tenant_id, "run_id": invocation["run_id"]},
             ).first() is None:
+                return None
+            subject = connection.execute(
+                text(
+                    "SELECT r.claim_revision_id, r.id AS receipt_id FROM authorization_grants g "
+                    "JOIN qualification_receipts r ON r.tenant_id = g.tenant_id "
+                    "AND r.id = g.qualification_receipt_id "
+                    "WHERE g.tenant_id = :tenant_id AND g.id = :grant_id "
+                    "AND g.actor_id = :actor_id AND g.action = :action "
+                    "AND g.target = :target"
+                ),
+                parameters,
+            ).mappings().first()
+            if subject is None:
+                return None
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"{tenant_id}:{subject['claim_revision_id']}"},
+            )
+            if connection.execute(
+                text(_CURRENT_RECEIPT_BINDING_SQL + " FOR UPDATE OF b"),
+                {"tenant_id": tenant_id, "receipt_id": subject["receipt_id"]},
+            ).first() is None:
+                return None
+            try:
+                _assert_postgres_current_dependencies(
+                    connection, tenant_id, subject["receipt_id"]
+                )
+            except InvalidEvidenceError:
                 return None
             rows = connection.execute(
                 text(

@@ -8,6 +8,7 @@ from typing import Any
 from ..core.authority import AuthorityContext
 from ..core.contracts import RequestContext
 from ..core.errors import AuthorityDeniedError
+from .common import lock_qualification_authority_workspace
 
 
 def _decode_decision(value: Any) -> dict[str, Any]:
@@ -48,6 +49,48 @@ _NOTICE_NAMES = (
     "requested_by",
     "verified_at",
 )
+
+
+def _dependent_binding_ids(
+    binding_rows: list[dict[str, Any]], direct_ids: list[str]
+) -> list[str]:
+    """Find current hard dependents of a directly invalidated binding."""
+
+    affected = set(direct_ids)
+    affected_keys = {
+        (
+            row["claim_revision_id"], row["profile_id"], row["use_scope"],
+            row["qualification_receipt_id"],
+        )
+        for row in binding_rows if row["id"] in affected
+    }
+    while True:
+        added = False
+        for row in binding_rows:
+            if row["id"] in affected:
+                continue
+            closure = json.loads(row["evidence_closure"])
+            for node in closure.get("nodes", []):
+                if node.get("node_type") != "dependency_binding":
+                    continue
+                frozen = node.get("payload") or {}
+                key = (
+                    node.get("node_id"), frozen.get("profile_id"),
+                    frozen.get("use_scope"), frozen.get("qualification_receipt_id"),
+                )
+                if key in affected_keys:
+                    affected.add(row["id"])
+                    affected_keys.add(
+                        (
+                            row["claim_revision_id"], row["profile_id"],
+                            row["use_scope"], row["qualification_receipt_id"],
+                        )
+                    )
+                    added = True
+                    break
+        if not added:
+            break
+    return sorted(affected - set(direct_ids))
 
 
 class SQLiteInvalidationRepositoryMixin:
@@ -105,10 +148,33 @@ class SQLiteInvalidationRepositoryMixin:
                 "SELECT id FROM current_use_bindings WHERE tenant_id = ? "
                 "AND claim_revision_id = ? AND state = 'current'"
             )
-            if values["target_scope"] != "claim_revision":
+            if values["target_scope"] == "receipt":
                 query += " AND qualification_receipt_id = ?"
                 parameters.append(values["target_receipt_id"])
-            affected_ids = [row["id"] for row in db.execute(query, parameters).fetchall()]
+            elif values["target_scope"] == "proof_attempt":
+                query += (
+                    " AND EXISTS (SELECT 1 FROM qualification_receipt_attempt_selections s "
+                    "WHERE s.tenant_id = current_use_bindings.tenant_id "
+                    "AND s.qualification_receipt_id = "
+                    "current_use_bindings.qualification_receipt_id "
+                    "AND s.attempt_id = ?)"
+                )
+                parameters.append(values["target_attempt_id"])
+            direct_ids = sorted(row["id"] for row in db.execute(query, parameters).fetchall())
+            binding_rows = [
+                dict(item) for item in db.execute(
+                    "SELECT b.id, b.claim_revision_id, b.profile_id, b.use_scope, "
+                    "b.qualification_receipt_id, "
+                    "e.evidence_closure FROM current_use_bindings b "
+                    "JOIN qualification_receipts r ON r.tenant_id = b.tenant_id "
+                    "AND r.id = b.qualification_receipt_id "
+                    "JOIN qualification_evaluations e ON e.tenant_id = r.tenant_id "
+                    "AND e.id = r.evaluation_id "
+                    "WHERE b.tenant_id = ? AND b.state = 'current'",
+                    (tenant_id,),
+                ).fetchall()
+            ]
+            affected_ids = direct_ids + _dependent_binding_ids(binding_rows, direct_ids)
             row = _decision_row({**values, "tenant_id": tenant_id}, affected_ids)
             db.execute(
                 f"INSERT INTO invalidation_decisions({_DECISION_COLUMNS}) "
@@ -121,7 +187,7 @@ class SQLiteInvalidationRepositoryMixin:
                     "bound_by = ?, updated_at = ? WHERE tenant_id = ? AND id = ? "
                     "AND state = 'current'",
                     (
-                        values["effect_state"],
+                        values["effect_state"] if binding_id in direct_ids else "stale",
                         f"invalidation_decision:{values['id']}",
                         "system:invalidation-decision",
                         values["decided_at"],
@@ -188,13 +254,22 @@ class PostgresInvalidationRepositoryMixin:
             "tenant_id": tenant_id,
             "claim_id": values["target_claim_revision_id"],
             "receipt_id": values["target_receipt_id"],
+            "attempt_id": values["target_attempt_id"],
         }
         query = (
             "SELECT id FROM current_use_bindings WHERE tenant_id = :tenant_id "
             "AND claim_revision_id = :claim_id AND state = 'current'"
         )
-        if values["target_scope"] != "claim_revision":
+        if values["target_scope"] == "receipt":
             query += " AND qualification_receipt_id = :receipt_id"
+        elif values["target_scope"] == "proof_attempt":
+            query += (
+                " AND EXISTS (SELECT 1 FROM qualification_receipt_attempt_selections s "
+                "WHERE s.tenant_id = current_use_bindings.tenant_id "
+                "AND s.qualification_receipt_id = "
+                "current_use_bindings.qualification_receipt_id "
+                "AND s.attempt_id = :attempt_id)"
+            )
         query += " FOR UPDATE"
         with self.engine.begin() as connection:
             if tenant_id != context.workspace_id:
@@ -202,13 +277,31 @@ class PostgresInvalidationRepositoryMixin:
             self._assert_admin_write_authority(
                 connection, context, authority, "qualification:invalidate"
             )
+            lock_qualification_authority_workspace(connection, tenant_id)
             connection.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                 {"lock_key": f"{tenant_id}:{values['target_claim_revision_id']}"},
             )
-            affected_ids = [
-                item["id"] for item in connection.execute(text(query), parameters).mappings().all()
+            direct_ids = sorted(
+                item["id"]
+                for item in connection.execute(text(query), parameters).mappings().all()
+            )
+            binding_rows = [
+                dict(item) for item in connection.execute(
+                    text(
+                        "SELECT b.id, b.claim_revision_id, b.profile_id, b.use_scope, "
+                        "b.qualification_receipt_id, "
+                        "e.evidence_closure FROM current_use_bindings b "
+                        "JOIN qualification_receipts r ON r.tenant_id = b.tenant_id "
+                        "AND r.id = b.qualification_receipt_id "
+                        "JOIN qualification_evaluations e ON e.tenant_id = r.tenant_id "
+                        "AND e.id = r.evaluation_id "
+                        "WHERE b.tenant_id = :tenant_id AND b.state = 'current'"
+                    ),
+                    {"tenant_id": tenant_id},
+                ).mappings().all()
             ]
+            affected_ids = direct_ids + _dependent_binding_ids(binding_rows, direct_ids)
             row = _decision_row({**values, "tenant_id": tenant_id}, affected_ids)
             placeholders = ", ".join(f":{name}" for name in _DECISION_NAMES)
             connection.execute(
@@ -225,7 +318,7 @@ class PostgresInvalidationRepositoryMixin:
                         "WHERE tenant_id = :tenant_id AND id = :binding_id AND state = 'current'"
                     ),
                     {
-                        "state": values["effect_state"],
+                        "state": values["effect_state"] if binding_id in direct_ids else "stale",
                         "reason": f"invalidation_decision:{values['id']}",
                         "updated_at": values["decided_at"],
                         "tenant_id": tenant_id,
