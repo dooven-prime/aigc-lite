@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from .config import settings
 from .core.contracts import AgentStepRecord, StepKind, StepStatus, ToolInvocationResult
-from .core.errors import AgentModelTurnLimitError, AgentToolCallLimitError
+from .core.errors import AgentModelTurnLimitError, AgentToolCallLimitError, UpstreamResponseError
 from .database import search_documents
 from .providers import completion
 from .redaction import safe_json_text
 from .tools import invoke, schemas
+
+if TYPE_CHECKING:
+    from .services.model_usage import ModelUsageObserver
 
 StepObserver = Callable[[AgentStepRecord], None]
 ToolInvoker = Callable[[str, str], Awaitable[ToolInvocationResult]]
@@ -63,6 +67,7 @@ async def run_agent(
     tool_invoker: ToolInvoker | None = None,
     max_tool_calls: int | None = None,
     model_completion: ModelCompletion | None = None,
+    model_call_observer: ModelUsageObserver | None = None,
 ) -> str:
     """Run a bounded OpenAI-compatible tool loop."""
     max_steps = settings.max_agent_steps if max_steps is None else max_steps
@@ -84,30 +89,73 @@ async def run_agent(
             {key: value for key, value in message.items() if not key.startswith("_")}
             for message in messages
         ]
-        if model_completion is not None:
-            message = await model_completion(
-                provider_messages,
-                model,
-                tool_schemas if step < max_steps - 1 else None,
-                provider,
+        if model_call_observer is not None:
+            selected_model = model or (provider or {}).get("model") or settings.llm_model
+            model_call_observer.begin(step + 1, model_input, selected_model)
+        message = None
+        try:
+            if model_completion is not None:
+                message = await model_completion(
+                    provider_messages,
+                    model,
+                    tool_schemas if step < max_steps - 1 else None,
+                    provider,
+                )
+            elif provider is None:
+                message = await completion(
+                    provider_messages, model, tool_schemas if step < max_steps - 1 else None
+                )
+            else:
+                message = await completion(
+                    provider_messages,
+                    model,
+                    tool_schemas if step < max_steps - 1 else None,
+                    provider=provider,
+                )
+            if not isinstance(message, dict):
+                raise UpstreamResponseError("LLM returned an invalid message")
+            if message.get("content") is not None and not isinstance(message["content"], str):
+                raise UpstreamResponseError("LLM returned invalid text content")
+            if message.get("content") is not None:
+                try:
+                    message["content"].encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise UpstreamResponseError("LLM returned non-UTF-8 text content") from exc
+            calls = message.get("tool_calls") or []
+            if not isinstance(calls, list) or any(
+                not isinstance(call, dict)
+                or not isinstance(call.get("function"), dict)
+                or not isinstance(call["function"].get("name"), str)
+                or not isinstance(call["function"].get("arguments", "{}"), str)
+                for call in calls
+            ):
+                raise UpstreamResponseError("LLM returned invalid tool calls")
+        except BaseException as exc:
+            if model_call_observer is not None:
+                model_call_observer.finish(
+                    message=message if isinstance(message, dict) else None,
+                    error=exc,
+                )
+            raise
+        usage_raw = message.pop("_usage", None)
+        provider_request_id = message.pop("_provider_request_id", None)
+        finish_reason = message.pop("_finish_reason", None)
+        usage = usage_raw if isinstance(usage_raw, dict) else {}
+        tool_calls = message.get("tool_calls") or []
+        if model_call_observer is not None:
+            model_call_observer.finish(
+                message={
+                    "_usage": usage_raw,
+                    "_provider_request_id": provider_request_id,
+                    "_finish_reason": finish_reason,
+                },
+                output_content=message.get("content") or "",
+                tool_calls=tool_calls,
             )
-        elif provider is None:
-            message = await completion(
-                provider_messages, model, tool_schemas if step < max_steps - 1 else None
-            )
-        else:
-            message = await completion(
-                provider_messages,
-                model,
-                tool_schemas if step < max_steps - 1 else None,
-                provider=provider,
-            )
-        usage = message.pop("_usage", {})
-        if usage and usage_callback:
+        elif usage and usage_callback:
             usage_callback(usage)
         messages.append(message)
-        tool_calls = message.get("tool_calls") or []
-        if step_callback:
+        if step_callback and model_call_observer is None:
             output = message.get("content") or ""
             selected_model = model or (provider or {}).get("model") or settings.llm_model
             step_callback(

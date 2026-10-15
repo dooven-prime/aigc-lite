@@ -40,6 +40,56 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_postgres_model_usage_receipt_transaction_and_summary() -> None:
+    repository = PostgresRepository(POSTGRES_URL)
+    repository.init()
+    workspace_id = f"model-usage-{uuid4()}"
+    repository.create_tenant("Model usage contract", workspace_id)
+    session = repository.create_session(workspace_id, "usage")
+    run = repository.create_run(workspace_id, session["id"], "request-pg", None, "model-pg")
+
+    def begin(sequence: int) -> dict:
+        return {
+            "attempt_id": str(uuid4()), "model_call_id": str(uuid4()), "step_id": str(uuid4()),
+            "tenant_id": workspace_id, "principal_id": None, "api_key_id": "test-key-id",
+            "request_id": "request-pg", "run_id": run["id"], "sequence": sequence,
+            "iteration": sequence, "model": "model-pg", "provider_config_id": None,
+            "pricing_snapshot": {"version": 1, "price_known": False, "unit": "per_1000_tokens"},
+            "input_content": "prompt", "step_metadata": {"iteration": sequence},
+        }
+
+    def finish(status: str, final_hash: str) -> dict:
+        return {
+            "usage_status": status,
+            "prompt_tokens": 2**63 - 1 if status == "REPORTED" else None,
+            "completion_tokens": 0 if status == "REPORTED" else None,
+            "estimated_cost": None,
+            "termination": "COMPLETED", "finish_reason": "stop", "provider_request_id": None,
+            "output_bytes": 2, "finalization_hash": final_hash,
+            "step_status": "succeeded", "output_content": "ok", "step_metadata": {},
+        }
+
+    attempts = [begin(index) for index in (1, 2, 3)]
+    for attempt in attempts:
+        assert repository.begin_model_usage(attempt)["usage_status"] == "IN_FLIGHT"
+    first_result = finish("REPORTED", "pg-first")
+    assert repository.finish_model_usage(workspace_id, attempts[0]["attempt_id"], first_result)["usage_status"] == "REPORTED"
+    assert repository.finish_model_usage(workspace_id, attempts[0]["attempt_id"], first_result)["usage_status"] == "REPORTED"
+    with pytest.raises(ValueError):
+        repository.finish_model_usage(
+            workspace_id, attempts[0]["attempt_id"], {**first_result, "finalization_hash": "conflict"}
+        )
+    repository.finish_model_usage(workspace_id, attempts[1]["attempt_id"], finish("REPORTED", "pg-second"))
+    repository.finish_model_usage(workspace_id, attempts[2]["attempt_id"], finish("UNKNOWN", "pg-unknown"))
+    assert repository.get_model_usage(workspace_id, attempts[0]["attempt_id"])["run_id"] == run["id"]
+    assert repository.get_model_usage("wrong-workspace", attempts[0]["attempt_id"]) is None
+    summary = repository.usage_summary(workspace_id)
+    assert summary["prompt_tokens"] == 2 * (2**63 - 1)
+    assert summary["receipt_attempts"] == 3
+    assert summary["unknown_requests"] == 1
+    assert summary["unpriced_reported_requests"] == 2
+
+
 def test_postgres_scheduled_firing_is_unique_across_repository_instances() -> None:
     first = PostgresRepository(POSTGRES_URL)
     first.init()
@@ -79,7 +129,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
     repository = PostgresRepository(POSTGRES_URL)
     repository.init()
-    assert repository.schema_revision() == "0025_invocation_timeout"
+    assert repository.schema_revision() == "0027_stream_lifecycle"
     workspace_id = f"contract-{uuid4()}"
     repository.create_tenant("PostgreSQL contract", workspace_id)
     context = RequestContext(request_id="postgres-contract", workspace_id=workspace_id)
@@ -532,7 +582,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
                 )
             )
         }
-    assert revision == "0025_invocation_timeout"
+    assert revision == "0027_stream_lifecycle"
     assert {
         "signature_verified",
         "enforcement_request_id",

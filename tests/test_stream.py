@@ -14,7 +14,7 @@ from app.core.contracts import (
     ToolSource,
     ToolSpec,
 )
-from app.core.errors import AgentToolCallLimitError, UpstreamRequestError
+from app.core.errors import AgentCancelledError, AgentToolCallLimitError, UpstreamRequestError
 from app.repository import SQLiteRepository
 from app.services.gateway import GatewayService
 from app.services.tool_catalog import ToolCatalog
@@ -137,7 +137,7 @@ def test_stream_explicit_cancel_reaches_upstream_and_records_run(tmp_path) -> No
         service.cancel_run(context, result.run_id)
         try:
             await consumer
-        except asyncio.CancelledError:
+        except AgentCancelledError:
             pass
         else:
             raise AssertionError("stream cancellation was swallowed")

@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
 from ..core.artifacts import ArtifactDraft, ArtifactKind
-from ..core.contracts import ChatCommand, RequestContext, RunStatus, StepKind, StepStatus
+from ..core.contracts import ChatCommand, RequestContext, StepKind, StepStatus
 from ..core.errors import (
     ApplicationError,
     ErrorCode,
@@ -53,6 +54,9 @@ _RESULT_FIELDS = frozenset(
         "limitations",
     }
 )
+_MAX_RESULT_JSON_BYTES = 1_048_576
+_MAX_RESULT_JSON_DEPTH = 32
+_INVALID_OUTPUT_EXCERPT = "[invalid or unsafe verification JSON omitted]"
 
 
 class VerificationRunner:
@@ -261,12 +265,9 @@ class VerificationRunner:
                 raw_output=chat_result.content,
                 run_id=chat_result.run_id,
             )
-            repository.finish_run(
-                context.workspace_id,
-                chat_result.run_id,
-                RunStatus.FAILED.value,
-                exc.code.value,
-            )
+            # The Gateway has already closed its Run after successfully
+            # producing model output. Contract validation belongs to the
+            # verification execution and its result Step, not that Run status.
             raise
 
         try:
@@ -293,12 +294,6 @@ class VerificationRunner:
                         "result_contract_version": RESULT_CONTRACT_VERSION,
                     },
                 },
-            )
-            repository.finish_run(
-                context.workspace_id,
-                chat_result.run_id,
-                RunStatus.FAILED.value,
-                self._error_code(exc),
             )
             raise
 
@@ -345,9 +340,10 @@ class VerificationRunner:
             "limitations": [f"execution_error:{error_code}"],
         }
         if raw_output is not None:
-            result["raw_output_excerpt"] = redact_record_text(
-                raw_output, max_chars=20_000
-            )
+            # Invalid model output is not safe to parse again for redaction. The
+            # MODEL Step remains the execution record; this closure
+            # never echoes an untrusted, potentially secret-bearing excerpt.
+            result["raw_output_excerpt"] = _INVALID_OUTPUT_EXCERPT
         return self._record_result(
             context,
             plan,
@@ -586,12 +582,7 @@ class VerificationRunner:
 
     @staticmethod
     def _parse_result(content: str) -> dict:
-        try:
-            value = json.loads(content.strip())
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise InvalidVerificationResultError(
-                "Agent verification output must be one valid JSON object"
-            ) from exc
+        value = VerificationRunner._decode_result_json(content)
         if not isinstance(value, dict):
             raise InvalidVerificationResultError(
                 "Agent verification output must be a JSON object"
@@ -629,12 +620,78 @@ class VerificationRunner:
         }
 
     @staticmethod
+    def _decode_result_json(content: str) -> object:
+        if not isinstance(content, str) or len(content) > _MAX_RESULT_JSON_BYTES:
+            raise InvalidVerificationResultError(
+                "Agent verification output exceeds the JSON input limit"
+            )
+        try:
+            if len(content.encode("utf-8")) > _MAX_RESULT_JSON_BYTES:
+                raise InvalidVerificationResultError(
+                    "Agent verification output exceeds the JSON input limit"
+                )
+            value = json.loads(
+                content.strip(),
+                object_pairs_hook=VerificationRunner._unique_json_object,
+                parse_constant=VerificationRunner._reject_json_constant,
+                parse_float=VerificationRunner._finite_json_float,
+            )
+        except (UnicodeEncodeError, ValueError, RecursionError, OverflowError) as exc:
+            raise InvalidVerificationResultError(
+                "Agent verification output must be one unambiguous JSON document"
+            ) from exc
+        pending: list[tuple[object, int]] = [(value, 1)]
+        while pending:
+            item, depth = pending.pop()
+            if depth > _MAX_RESULT_JSON_DEPTH:
+                raise InvalidVerificationResultError(
+                    "Agent verification JSON exceeds the nesting limit"
+                )
+            if isinstance(item, dict):
+                pending.extend((child, depth + 1) for child in item.values())
+                pending.extend((key, depth + 1) for key in item)
+            elif isinstance(item, list):
+                pending.extend((child, depth + 1) for child in item)
+            elif isinstance(item, str) and any(
+                0xD800 <= ord(char) <= 0xDFFF for char in item
+            ):
+                raise InvalidVerificationResultError(
+                    "Agent verification JSON contains invalid Unicode"
+                )
+        return value
+
+    @staticmethod
+    def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("Duplicate JSON object key")
+            value[key] = item
+        return value
+
+    @staticmethod
+    def _reject_json_constant(value: str) -> object:
+        raise ValueError(f"Non-finite JSON constant: {value}")
+
+    @staticmethod
+    def _finite_json_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("Non-finite JSON number")
+        return parsed
+
+    @staticmethod
     def _result_text(field: str, value: Any, maximum: int) -> str:
         if not isinstance(value, str):
             raise InvalidVerificationResultError(
                 f"Agent verification field {field} must be a string"
             )
-        cleaned = redact_record_text(value.strip(), max_chars=maximum)
+        try:
+            cleaned = redact_record_text(value.strip(), max_chars=maximum)
+        except (RecursionError, UnicodeError, ValueError, OverflowError) as exc:
+            raise InvalidVerificationResultError(
+                f"Agent verification field {field} is not safely recordable"
+            ) from exc
         if not cleaned:
             raise InvalidVerificationResultError(
                 f"Agent verification field {field} is required"
@@ -654,7 +711,7 @@ class VerificationRunner:
                 f"Agent verification field {field} must be a bounded string array"
             )
         return [
-            redact_record_text(item.strip(), max_chars=maximum_chars)
+            VerificationRunner._result_text(field, item, maximum_chars)
             for item in value
             if item.strip()
         ]

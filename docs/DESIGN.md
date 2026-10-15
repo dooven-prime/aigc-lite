@@ -45,7 +45,8 @@ qualified knowledge 必须经过 Qualification 和显式 Knowledge Admission。
 
 - SQLite/PostgreSQL repository、Alembic 迁移、workspace 身份、模型配置、审计与用量；
 - `GatewayService` 驱动的同步和 SSE Chat；两者共享认证、模型解析、capability decision、
-  Run 生命周期、错误分类与终态记录，同步路径额外执行有界工具循环；
+  有界工具循环、Run 生命周期、错误分类与终态记录；SSE 在首次读取时一次性领取，
+  未领取的 Run 可回收，已领取但终态未知的请求保留不确定性；
 - 统一 Tool Catalog、local/MCP/workspace provider、预算、超时、取消、稳定 Tool Step，
   以及线程/进程 Tool Execution Backend；
 - 与 Run/Step 双向关联并进入统一搜索的 Artifact/Citation；SQLite 使用 FTS5，PostgreSQL
@@ -55,6 +56,9 @@ qualified knowledge 必须经过 Qualification 和显式 Knowledge Admission。
 - 不可变 PolicyProposal/PermissionDiff/EnforcementReceipt，以及独立 Enforcer Adapter、
   host-owned trust roots 和签名回执验证；
 - HTTP application/control API 与 AI-first MCP capability surface；ROS 2 能力保持在独立扩展包。
+- 逐次 Model Usage Receipt 区分真实零用量与未知用量；只读
+  [Host Ledger Projection](TRUSTED_LEDGER_PROJECTION.md) 从单一数据库快照导出
+  原生执行事实，Recovery casepack 仅产生候选诊断，不据此认定科学证据或执行权限。
 
 精确 HTTP 路由以 [API.md](API.md) 和运行时 OpenAPI `/docs` 为准；安全边界以
 [THREAT_MODEL.md](THREAT_MODEL.md) 为准。这里描述跨模块的不变量，不复制完整接口清单。
@@ -201,8 +205,9 @@ Step status: running -> succeeded|failed|cancelled
 ```
 
 Step 按 Run 内 sequence 持久化，保存稳定状态、脱敏输入/输出和 metadata；Artifact/Citation
-通过 Run/Step ID 关联。SSE 返回内容 chunk，并在同一 Run 中持久化最终 model Step；当前没有
-公共的持久化 event-stream 查询或 WebSocket transport。
+通过 Run/Step ID 关联。SSE 返回内容 chunk，并在同一 Run 中持久化 model Step；其
+启动由首次读取领取，未启动与已发出但用量未知是不同状态。当前没有公共的持久化
+event-stream 查询或 WebSocket transport。
 
 至少提供以下预算：
 

@@ -16,6 +16,7 @@ from app.core.research import (
     VerificationOutcome,
     VerificationPlanDraft,
 )
+from app.redaction import redact_record_text
 from app.repository import SQLiteRepository
 from app.services.artifacts import ArtifactService
 from app.services.assurance import AssuranceBundleService, AssuranceBundleVerifier
@@ -146,6 +147,179 @@ def _draft() -> VerificationPlanDraft:
         system="Act as a careful verification agent.",
         model="fixture-model",
         auto_promote=True,
+    )
+
+
+def _result_payload() -> dict:
+    return {
+        "contract_version": RESULT_CONTRACT_VERSION,
+        "outcome": "passed",
+        "summary": "Verified.",
+        "findings": ["A bounded finding."],
+        "evidence_refs": [],
+        "limitations": [],
+    }
+
+
+def _invalid_result_examples() -> list[str]:
+    valid = json.dumps(_result_payload())
+    return [
+        valid.replace('"outcome": "passed"', '"outcome": "passed", "outcome": "failed"'),
+        valid.replace(
+            '"summary": "Verified."',
+            '"summary": "Verified.", "probe": {"key": 1, "key": 2}',
+        ),
+        valid.replace('"summary": "Verified."', '"summary": NaN'),
+        valid.replace('"summary": "Verified."', '"summary": Infinity'),
+        valid.replace('"summary": "Verified."', '"summary": 1e999'),
+        valid.replace('"summary": "Verified."', '"summary": ' + "[" * 80 + "0" + "]" * 80),
+        json.dumps({**_result_payload(), "summary": "x" * 1_048_576}),
+        json.dumps(
+            {**_result_payload(), "summary": "😀" * 262_144}, ensure_ascii=False
+        ),
+        json.dumps({**_result_payload(), "summary": "\ud800"}),
+        valid + " trailing prose",
+        valid + valid,
+        f"```json\n{valid}\n```",
+        valid[:-1],
+    ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    _invalid_result_examples(),
+    ids=[
+        "duplicate-outcome",
+        "nested-duplicate-key",
+        "nan",
+        "infinity",
+        "float-overflow",
+        "over-depth",
+        "over-byte-limit",
+        "multibyte-over-byte-limit",
+        "escaped-unpaired-surrogate",
+        "trailing-prose",
+        "two-documents",
+        "markdown-fence",
+        "truncated-json",
+    ],
+)
+def test_verification_result_json_boundary_rejects_ambiguous_output(content) -> None:
+    with pytest.raises(InvalidVerificationResultError):
+        VerificationRunner._parse_result(content)
+
+
+def test_verification_result_json_boundary_accepts_plain_unicode_and_whitespace() -> None:
+    content = json.dumps({**_result_payload(), "summary": "中文与 emoji 😀"}, ensure_ascii=False)
+    result = VerificationRunner._parse_result(f"  \n{content}\n  ")
+    assert result["summary"] == "中文与 emoji 😀"
+    with pytest.raises(InvalidVerificationResultError):
+        VerificationRunner._parse_result(
+            json.dumps({**_result_payload(), "summary": "\ud800"}, ensure_ascii=False)
+        )
+
+
+def test_verification_result_json_byte_limit_is_exact() -> None:
+    empty = json.dumps({**_result_payload(), "summary": ""})
+    padding = "x" * (1_048_576 - len(empty.encode("utf-8")))
+    content = json.dumps({**_result_payload(), "summary": padding})
+    assert len(content.encode("utf-8")) == 1_048_576
+    assert VerificationRunner._parse_result(content)["summary"] == "x" * 8_000
+    with pytest.raises(InvalidVerificationResultError, match="JSON input limit"):
+        VerificationRunner._parse_result(content + " ")
+
+
+def test_model_step_redaction_omits_malformed_json_but_preserves_plain_prose() -> None:
+    assert redact_record_text('{"api_key":"private-marker",') == (
+        "[malformed structured content omitted]"
+    )
+    assert redact_record_text('[{"token":"private-marker"}') == (
+        "[malformed structured content omitted]"
+    )
+    assert redact_record_text("Ordinary response: Bearer synthetic-token") == (
+        "Ordinary response: Bearer ***"
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        _invalid_result_examples()[0],
+        _invalid_result_examples()[5],
+        _invalid_result_examples()[6],
+        _invalid_result_examples()[7],
+        _invalid_result_examples()[8],
+        json.dumps(
+            {**_result_payload(), "summary": "\ud800"}, ensure_ascii=False
+        ),
+        _invalid_result_examples()[12],
+        json.dumps(
+            {
+                **_result_payload(),
+                "summary": "Bearer synthetic-token",
+                "api_key": "private-marker",
+            }
+        ),
+        '{"api_key":"private-marker",',
+        '{"api_key":"private-marker","nested":'
+        + "[" * 1_500
+        + "0"
+        + "]" * 1_500
+        + "}",
+    ],
+    ids=[
+        "duplicate-outcome",
+        "over-depth",
+        "over-byte-limit",
+        "multibyte-over-byte-limit",
+        "escaped-unpaired-surrogate",
+        "literal-unpaired-surrogate",
+        "truncated-json",
+        "secret-bearing-unsupported-field",
+        "secret-bearing-malformed-json",
+        "deep-secret-bearing-json",
+    ],
+)
+def test_invalid_json_closes_execution_without_echoing_unsafe_output(
+    tmp_path, content: str
+) -> None:
+    repository, research, runner = _services(tmp_path, content)
+    context = RequestContext(
+        request_id="request-invalid-json",
+        workspace_id="workspace-a",
+        principal_id="admin-a",
+    )
+    claim = _claim(research, context)
+    plan = runner.create_plan(context, claim["id"], _draft())
+
+    with pytest.raises(InvalidVerificationResultError):
+        asyncio.run(runner.execute(context, plan["id"]))
+
+    detail = research.get_claim(context, claim["id"])
+    execution = detail["verification_executions"][0]
+    attempt = detail["verification_attempts"][-1]
+    gate = detail["promotion_evaluations"][0]
+    run = repository.get_run(context.workspace_id, execution["run_id"])
+    artifact = repository.get_artifact(context.workspace_id, execution["artifact_id"])
+    assert execution["status"] == "invalid_output"
+    assert execution["error_code"] == "invalid_verification_result"
+    assert attempt["outcome"] == "error"
+    assert gate["decision"] == "blocked"
+    assert run["status"] == "succeeded"
+    assert run["error_code"] is None
+    assert run["steps"][-1]["name"] == "verification_result_contract"
+    assert run["steps"][-1]["status"] == "failed"
+    assert run["steps"][-1]["metadata"]["error_code"] == "invalid_verification_result"
+    assert artifact is not None
+    assert json.loads(artifact["content_text"])["raw_output_excerpt"] == (
+        "[invalid or unsafe verification JSON omitted]"
+    )
+    assert "private-marker" not in artifact["content_text"]
+    assert "synthetic-token" not in artifact["content_text"]
+    assert all(
+        "private-marker" not in step["output_content"]
+        and "synthetic-token" not in step["output_content"]
+        for step in run["steps"]
     )
 
 
@@ -283,8 +457,10 @@ def test_invalid_agent_result_is_retained_as_error_receipt_and_blocked_gate(
     assert attempt["receipt_id"]
     assert gate["decision"] == "blocked"
     assert gate["blockers"] == ["triggering_attempt_passed"]
-    assert run["status"] == "failed"
-    assert run["error_code"] == "invalid_verification_result"
+    assert run["status"] == "succeeded"
+    assert run["error_code"] is None
+    assert run["steps"][-1]["status"] == "failed"
+    assert run["steps"][-1]["metadata"]["error_code"] == "invalid_verification_result"
     assert run["artifacts"][0]["id"] == execution["artifact_id"]
 
 

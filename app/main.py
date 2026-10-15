@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -63,6 +64,7 @@ from .core.errors import (
     InvalidScheduleError,
     InvalidVerificationResultError,
     KernelVerifierNotConfiguredError,
+    LedgerProjectionTooLargeError,
     LLMError,
     ProviderNotConfiguredError,
     ResourceConflictError,
@@ -111,6 +113,7 @@ from .services.gateway import GatewayService
 from .services.http_poll import HTTPPollService
 from .services.invalidation import InvalidationService
 from .services.kernel_verification import KernelVerificationService
+from .services.ledger_projection import LedgerProjectionService
 from .services.math_release_imports import MathReleaseImportService
 from .services.mcp_probe import MCPProbeService
 from .services.memory import MemoryService
@@ -167,6 +170,7 @@ gateway_service = GatewayService(
     chat_capability_policy=chat_capability_policy,
 )
 memory_service = MemoryService()
+ledger_projection_service = LedgerProjectionService()
 mcp_probe_service = MCPProbeService()
 http_poll_service = HTTPPollService()
 credential_service = CredentialService()
@@ -336,6 +340,15 @@ class MCPAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+async def _reconcile_streams_forever() -> None:
+    while True:
+        await asyncio.sleep(settings.stream_reconcile_seconds)
+        try:
+            gateway_service.reconcile_stream_runs()
+        except Exception:
+            logger.exception("Could not reconcile stale streaming runs")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("startup phase: validating deployment security")
@@ -346,11 +359,16 @@ async def lifespan(_app: FastAPI):
     ensure_bootstrap_admin()
     logger.info("startup phase: validating persisted security state")
     validate_startup_security(settings, get_repository())
-    if settings.scheduler_enabled:
-        logger.info("startup phase: recovering scheduler")
-        await timewheel_scheduler.start()
-    logger.info("startup phase: starting MCP session manager")
+    logger.info("startup phase: reconciling streaming runs")
+    gateway_service.reconcile_stream_runs()
+    stream_reaper = asyncio.create_task(
+        _reconcile_streams_forever(), name="stream-run-reconciler"
+    )
     try:
+        if settings.scheduler_enabled:
+            logger.info("startup phase: recovering scheduler")
+            await timewheel_scheduler.start()
+        logger.info("startup phase: starting MCP session manager")
         try:
             async with mcp_server.session_manager.run():
                 logger.info("startup complete")
@@ -362,6 +380,8 @@ async def lifespan(_app: FastAPI):
             # repeated in-process test clients; a production process starts once.
             yield
     finally:
+        stream_reaper.cancel()
+        await asyncio.gather(stream_reaper, return_exceptions=True)
         if settings.scheduler_enabled:
             await timewheel_scheduler.stop()
 
@@ -396,6 +416,8 @@ async def validation_error_handler(
 async def application_error_handler(_request: Request, exc: ApplicationError) -> JSONResponse:
     if isinstance(exc, ResourceNotFoundError):
         status_code = 404
+    elif isinstance(exc, LedgerProjectionTooLargeError):
+        status_code = 413
     elif isinstance(
         exc, (ResourceConflictError, RunNotActiveError, ScheduleNotActiveError)
     ):
@@ -491,6 +513,7 @@ def request_context(request: Request, tenant: Tenant) -> RequestContext:
         request_id=str(uuid4()),
         workspace_id=tenant.id,
         principal_id=getattr(request.state, "user_id", None),
+        api_key_id=getattr(request.state, "api_key_id", None),
         scopes=getattr(request.state, "scopes", frozenset()),
     )
 
@@ -722,6 +745,30 @@ async def run_detail(
     tenant: Tenant = Depends(current_tenant),
 ) -> dict:
     return memory_service.get_run(request_context(http_request, tenant), run_id)
+
+
+@app.get("/api/runs/{run_id}/model-usage")
+async def run_model_usage(
+    run_id: str,
+    http_request: Request,
+    tenant: Tenant = Depends(current_tenant),
+) -> list[dict]:
+    # Resolve the Run through the application service before projecting its
+    # host-owned accounting receipts; a receipt ID is never a cross-tenant key.
+    memory_service.get_run(request_context(http_request, tenant), run_id)
+    return get_repository().list_model_usage(tenant.id, run_id)
+
+
+@app.get("/api/runs/{run_id}/ledger-projection")
+async def run_ledger_projection(
+    run_id: str,
+    http_request: Request,
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    """Return host-recorded execution facts without certifying goal evidence."""
+    return ledger_projection_service.export_run(
+        request_context(http_request, tenant), run_id
+    )
 
 
 @app.get("/api/artifacts")

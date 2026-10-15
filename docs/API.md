@@ -20,6 +20,7 @@ configuration, and deployment constraints are documented separately in
 - `GET /api/chat/capability-sets`：列出服务端注册的 Chat capability set、版本与内容哈希
 - `GET /api/runs`：列出当前租户的 Agent 运行记录
 - `GET /api/runs/{run_id}`：读取运行详情和步骤
+- `GET /api/runs/{run_id}/ledger-projection`：只读导出宿主账本快照、来源行摘要与执行不确定性；不判定研究证据或授权有效性
 - `POST /api/runs/{run_id}/cancel`：取消当前进程中正在执行的 Run
 - `GET /api/artifacts`：列出当前 workspace 的产物，可按 `run_id` 过滤
 - `GET /api/artifacts/{artifact_id}`：读取产物及其 Citation

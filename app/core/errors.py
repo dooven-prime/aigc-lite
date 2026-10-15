@@ -14,6 +14,7 @@ from typing import Any
 class ErrorCode(StrEnum):
     RESOURCE_NOT_FOUND = "resource_not_found"
     RESOURCE_CONFLICT = "resource_conflict"
+    LEDGER_PROJECTION_TOO_LARGE = "ledger_projection_too_large"
     PROVIDER_NOT_CONFIGURED = "provider_not_configured"
     UPSTREAM_REQUEST_FAILED = "upstream_request_failed"
     UPSTREAM_INVALID_RESPONSE = "upstream_invalid_response"
@@ -35,6 +36,8 @@ class ErrorCode(StrEnum):
     AGENT_WALL_TIME_LIMIT_REACHED = "agent_wall_time_limit_reached"
     AGENT_CANCELLED = "agent_cancelled"
     RUN_NOT_ACTIVE = "run_not_active"
+    STREAM_NOT_STARTED = "stream_not_started"
+    STREAM_EXECUTION_INDETERMINATE = "stream_execution_indeterminate"
     INVALID_SCHEDULE = "invalid_schedule"
     SCHEDULE_NOT_ACTIVE = "schedule_not_active"
     INVALID_ARTIFACT = "invalid_artifact"
@@ -107,6 +110,15 @@ class ResourceConflictError(ApplicationError):
             f"{resource.replace('_', ' ').title()} already exists",
             metadata={"resource": resource, "field": field},
         )
+
+
+class LedgerProjectionTooLargeError(ApplicationError):
+    """A read-only Run snapshot exceeds the export resource contract."""
+
+    code = ErrorCode.LEDGER_PROJECTION_TOO_LARGE
+
+    def __init__(self) -> None:
+        super().__init__("Run ledger projection exceeds bounded export limits")
 
 
 class LLMError(ApplicationError):
@@ -187,9 +199,36 @@ class RunNotActiveError(ApplicationError):
 
     def __init__(self, run_id: str):
         super().__init__(
-            "Agent run is not active in this process",
+            "Agent run is not active",
             metadata={"resource": "agent_run", "resource_id": run_id},
         )
+
+
+class AgentCancelledError(ApplicationError):
+    """A requested cancellation won the streaming Run terminal transition."""
+
+    code = ErrorCode.AGENT_CANCELLED
+
+    def __init__(self):
+        super().__init__("Agent run was cancelled")
+
+
+class StreamNotStartedError(ApplicationError):
+    """The response body was never claimed before its start deadline."""
+
+    code = ErrorCode.STREAM_NOT_STARTED
+
+    def __init__(self):
+        super().__init__("Stream was not started before its deadline")
+
+
+class StreamExecutionIndeterminateError(ApplicationError):
+    """The claimed stream lease expired with a possibly sent request."""
+
+    code = ErrorCode.STREAM_EXECUTION_INDETERMINATE
+
+    def __init__(self):
+        super().__init__("Stream execution ended without a confirmed terminal result")
 
 
 class ChatCapabilityDeniedError(ApplicationError):

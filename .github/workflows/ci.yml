@@ -24,6 +24,7 @@ jobs:
       - run: ruff check app tests extensions/ros2-bridge/src
       - run: python -m compileall -q app
       - run: pytest
+      - run: pytest casepacks/long-horizon-recovery-v0/tests -q
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -92,7 +93,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev,postgres]"
-      - run: pytest tests/test_postgres_contract.py tests/test_release_v0_7_upgrade.py -q
+      - run: pytest tests/test_postgres_contract.py tests/test_release_v0_7_upgrade.py tests/test_ledger_projection.py -q
 
   docker-smoke:
     runs-on: ubuntu-latest

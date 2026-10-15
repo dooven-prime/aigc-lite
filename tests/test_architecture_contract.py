@@ -344,6 +344,9 @@ def test_chat_route_delegates_to_gateway_service(monkeypatch) -> None:
     captured: dict = {}
 
     class FakeGatewayService:
+        def reconcile_stream_runs(self) -> dict[str, int]:
+            return {"pending": 0, "claimed": 0}
+
         async def chat(self, command, context) -> ChatResult:
             captured["command"] = command
             captured["context"] = context
