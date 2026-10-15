@@ -12,6 +12,27 @@ roadmap items remain in `docs/DESIGN.md`.
   against a workspace frozen Protocol when a Run is created; historical Runs
   remain unbound and retain their v0 projection identity. This does not
   verify domain evidence, admit knowledge, or authorize recovery actions.
+- Added the read-only Goal Progress Evidence Bridge v0 and a workspace-scoped
+  HTTP endpoint. It compares a natively bound Goal with the frozen
+  qualification, admission, and current-use records in one database snapshot;
+  its result is a conditional diagnosis, not a substitute for the live
+  authority check, scientific truth, or recovery authorization.
+- Versioned its fail-closed mathematical proof-selection diagnostic as Bridge
+  v0.1: historical zero-candidate selections no longer report support, and
+  formal invalidation of any historically possible selected Attempt is
+  reflected in the read-only result. Saved v0 outputs remain historical.
+- Indexed the kernel proof Attempt selected by new mathematical qualification
+  receipts. Historical receipts with indistinguishable eligible Attempts keep
+  an explicitly versioned possible-selection set. Formal invalidation of any
+  selected or historically possible Attempt now propagates across receipts,
+  hard dependencies, qualified search, grant issuance and consumption, and
+  Assurance export without rewriting the historical receipts. This is a
+  conservative authority rule, not proof that every old selection can be
+  reconstructed exactly.
+- Candidate hardening: an `ADMITTED` mathematical Receipt whose frozen proof
+  selection cannot be reconstructed now fails closed when current use is
+  refreshed. This does not certify that such a malformed historical Receipt
+  was ever legitimately issued, nor does it rewrite the historical record.
 
 ## 0.7.0 - 2026-10-14
 

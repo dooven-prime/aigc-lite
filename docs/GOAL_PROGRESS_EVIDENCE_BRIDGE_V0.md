@@ -1,5 +1,13 @@
 # Goal Progress Evidence Bridge v0
 
+> Historical contract. The v0 proof-selection check was only reached when a
+> proof-attempt invalidation decision was present. A synthetic old math receipt
+> with no reconstructible selected Attempt could therefore receive
+> `SUPPORTED_AS_OF_SNAPSHOT` here while the authoritative qualification path
+> failed closed. The current read-only evaluator is explicitly versioned as
+> [v0.1](GOAL_PROGRESS_EVIDENCE_BRIDGE_V0_1.md); do not reinterpret a saved v0
+> response as a v0.1 result.
+
 This is a read-only, candidate-only interpretation of one narrow Goal metric:
 **does an exact ClaimRevision have a qualification under a specified Profile
 that remains selected for current knowledge use as of one database snapshot?**
