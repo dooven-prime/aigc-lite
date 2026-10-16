@@ -494,8 +494,10 @@ SSE 仅发布文本增量和脱敏步骤状态。
 4. credential master-key rotation、批量重加密、备份/恢复演练和租户数据导出/删除流程尚未闭合。
 5. 当前没有跨 workspace 的 platform-admin 身份；现有 `/api/admin/tenants` 有意保持 workspace-local。
    若引入平台治理，必须使用独立 identity/scope，不能扩大现有 `admin` 角色。
-6. 已支持撤销当前登录 session；登录/注册仍缺少专门的分布式暴力破解防护，
-   全 session 撤销、密码变更和过期会话清理仍需完整生命周期接口。
+6. 登录/注册已有数据库共享的预认证限流；全 session 撤销、密码变更和过期清理已有版本化
+   生命周期合同。尚未提供账户恢复或 MFA；公开注册的重复邮箱响应仍可能暴露账户存在性，
+   并发同邮箱注册的 workspace 创建仍待原子化。
+   反向代理后的源地址预算还需要部署侧可信代理配置与边缘限流。
 7. repository 已拆出多个 domain port/mixin，但 identity/gateway/run/knowledge 等兼容面仍集中在
    `repository.py`；`main.py` 仍承担部分 route 和 composition 兼容职责。
 8. `math.formal.v1` 是保守的单文件 proof replay profile；项目级 content-addressed import closure、

@@ -340,7 +340,7 @@ def test_sqlite_upgrade_keeps_older_runs_unbound(tmp_path: Path) -> None:
         assert row["status"] == "succeeded"
         assert all(row[field] is None for field in _FIELDS)
         assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
-            "0030_auth_lifecycle"
+            "0031_stream_replay"
         )
 
     command.downgrade(config, "0027_stream_lifecycle")
