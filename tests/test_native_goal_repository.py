@@ -7,6 +7,7 @@ import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
@@ -332,12 +333,30 @@ def test_sqlite_upgrade_keeps_older_runs_unbound(tmp_path: Path) -> None:
     after = LedgerProjectionService(
         repository_provider=lambda: repository,
     ).export_run(context, "older-run")
-    assert after == before
+    # The 0031 replay column changes the raw-row identity even for a historical
+    # non-streaming Run. Keep provenance hashes honest while requiring the
+    # projected execution and Goal semantics to remain unchanged.
+    assert before["signals"]["goal_binding"] == "NATIVE_UNBOUND"
+    assert after["signals"]["goal_binding"] == "NATIVE_UNBOUND"
+    assert after["run"]["source_sha256"] != before["run"]["source_sha256"]
+    for projection in (before, after):
+        assert projection["source"]["rows"]["agent_runs"][0]["sha256"] == (
+            projection["run"]["source_sha256"]
+        )
+    before_semantics = deepcopy(before)
+    after_semantics = deepcopy(after)
+    for projection in (before_semantics, after_semantics):
+        projection.pop("sha256")
+        projection["source"].pop("sha256")
+        projection["source"]["rows"]["agent_runs"][0].pop("sha256")
+        projection["run"].pop("source_sha256")
+    assert after_semantics == before_semantics
     with sqlite3.connect(database_path) as db:
         db.row_factory = sqlite3.Row
         row = db.execute("SELECT * FROM agent_runs WHERE id = 'older-run'").fetchone()
         assert row is not None
         assert row["status"] == "succeeded"
+        assert row["stream_replay_available"] == 0
         assert all(row[field] is None for field in _FIELDS)
         assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == (
             "0031_stream_replay"
