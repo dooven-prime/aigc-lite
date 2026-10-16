@@ -167,6 +167,33 @@ def _admin_authority_claims_match(
     )
 
 
+def _pre_auth_window(
+    kind: str, key_hash: str, window_seconds: int, limit: int,
+) -> tuple[int, int]:
+    """Validate opaque throttle keys and choose the current fixed UTC window."""
+
+    if (
+        not isinstance(kind, str)
+        or not 1 <= len(kind) <= 48
+        or not kind.isascii()
+        or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789_.:-" for char in kind)
+    ):
+        raise ValueError("Invalid pre-auth throttle kind")
+    if (
+        not isinstance(key_hash, str)
+        or len(key_hash) != 64
+        or any(char not in "0123456789abcdef" for char in key_hash)
+    ):
+        raise ValueError("Pre-auth throttle keys must be SHA-256 hex digests")
+    if not isinstance(window_seconds, int) or window_seconds <= 0:
+        raise ValueError("Pre-auth throttle window must be positive")
+    if not isinstance(limit, int) or limit <= 0:
+        raise ValueError("Pre-auth throttle limit must be positive")
+    now_epoch = int(datetime.now(UTC).timestamp())
+    start = now_epoch - now_epoch % window_seconds
+    return start, start + window_seconds
+
+
 class Repository(
     ResearchRepository,
     QualificationRepository,
@@ -210,11 +237,27 @@ class Repository(
 
     def count_users(self) -> int: ...
 
-    def save_auth_session(self, token_hash: str, user_id: str, tenant_id: str, expires_at: str) -> None: ...
+    def save_auth_session(
+        self, token_hash: str, user_id: str, tenant_id: str, expires_at: str,
+        expected_auth_version: int,
+    ) -> bool: ...
 
     def get_auth_session(self, token_hash: str) -> dict | None: ...
 
     def revoke_auth_session(self, token_hash: str, user_id: str) -> bool: ...
+
+    def revoke_all_auth_sessions(self, token_hash: str, user_id: str) -> bool: ...
+
+    def change_password_and_revoke_sessions(
+        self, token_hash: str, user_id: str, expected_password_hash: str,
+        new_password_hash: str,
+    ) -> bool: ...
+
+    def consume_pre_auth_limit(
+        self, kind: str, key_hash: str, window_seconds: int, limit: int,
+    ) -> bool: ...
+
+    def cleanup_expired_auth_state(self) -> None: ...
 
     def search_qualified_claims(
         self, tenant_id: str, profile_id: str, query: str, limit: int = 20
@@ -603,7 +646,8 @@ class SQLiteRepository(
             "SELECT 1 FROM auth_sessions s JOIN users u ON u.id = s.user_id "
             "AND u.tenant_id = s.tenant_id WHERE s.token_hash = ? "
             "AND s.user_id = ? AND s.tenant_id = ? AND s.expires_at > ? "
-            "AND u.role = 'admin' AND u.is_active = 1",
+            "AND u.role = 'admin' AND u.is_active = 1 "
+            "AND s.auth_version = u.auth_version",
             (
                 authority.session_hash,
                 context.principal_id,
@@ -786,7 +830,10 @@ class SQLiteRepository(
                 "INSERT INTO users(id, tenant_id, email, name, password_hash, role, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(value.values()),
             )
-        return {key: item for key, item in value.items() if key != "password_hash"}
+        return {
+            **{key: item for key, item in value.items() if key != "password_hash"},
+            "auth_version": 0,
+        }
 
     def get_user_by_email(self, email: str) -> dict | None:
         with self._connect() as db:
@@ -811,17 +858,35 @@ class SQLiteRepository(
             row = db.execute("SELECT COUNT(*) AS count FROM users").fetchone()
         return int(row["count"])
 
-    def save_auth_session(self, token_hash: str, user_id: str, tenant_id: str, expires_at: str) -> None:
+    def save_auth_session(
+        self, token_hash: str, user_id: str, tenant_id: str, expires_at: str,
+        expected_auth_version: int,
+    ) -> bool:
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            user = db.execute(
+                "SELECT auth_version, is_active, tenant_id FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            if user is None or not user["is_active"] or user["tenant_id"] != tenant_id:
+                return False
+            version = int(user["auth_version"])
+            if version != expected_auth_version:
+                return False
             db.execute(
-                "INSERT INTO auth_sessions VALUES (?, ?, ?, ?, ?)",
-                (token_hash, user_id, tenant_id, expires_at, utc_now()),
+                "INSERT INTO auth_sessions(token_hash, user_id, tenant_id, expires_at, "
+                "created_at, auth_version) VALUES (?, ?, ?, ?, ?, ?)",
+                (token_hash, user_id, tenant_id, expires_at, utc_now(), version),
             )
+        return True
 
     def get_auth_session(self, token_hash: str) -> dict | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM auth_sessions WHERE token_hash = ? AND expires_at > ?",
+                "SELECT s.* FROM auth_sessions s JOIN users u ON u.id = s.user_id "
+                "AND u.tenant_id = s.tenant_id WHERE s.token_hash = ? "
+                "AND s.expires_at > ? AND u.is_active = 1 "
+                "AND s.auth_version = u.auth_version",
                 (token_hash, utc_now()),
             ).fetchone()
         return dict(row) if row else None
@@ -834,6 +899,74 @@ class SQLiteRepository(
                 (token_hash, user_id),
             )
         return result.rowcount == 1
+
+    def revoke_all_auth_sessions(self, token_hash: str, user_id: str) -> bool:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            session = db.execute(
+                "SELECT 1 FROM auth_sessions s JOIN users u ON u.id = s.user_id "
+                "AND u.tenant_id = s.tenant_id WHERE s.token_hash = ? "
+                "AND s.user_id = ? AND s.expires_at > ? AND u.is_active = 1 "
+                "AND s.auth_version = u.auth_version",
+                (token_hash, user_id, utc_now()),
+            ).fetchone()
+            if session is None:
+                return False
+            db.execute(
+                "UPDATE users SET auth_version = auth_version + 1 WHERE id = ?",
+                (user_id,),
+            )
+            db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+        return True
+
+    def change_password_and_revoke_sessions(
+        self, token_hash: str, user_id: str, expected_password_hash: str,
+        new_password_hash: str,
+    ) -> bool:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            user = db.execute(
+                "SELECT u.password_hash FROM auth_sessions s JOIN users u "
+                "ON u.id = s.user_id AND u.tenant_id = s.tenant_id "
+                "WHERE s.token_hash = ? AND s.user_id = ? AND s.expires_at > ? "
+                "AND u.is_active = 1 AND s.auth_version = u.auth_version",
+                (token_hash, user_id, utc_now()),
+            ).fetchone()
+            if user is None or user["password_hash"] != expected_password_hash:
+                return False
+            db.execute(
+                "UPDATE users SET password_hash = ?, auth_version = auth_version + 1 "
+                "WHERE id = ?",
+                (new_password_hash, user_id),
+            )
+            db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+        return True
+
+    def consume_pre_auth_limit(
+        self, kind: str, key_hash: str, window_seconds: int, limit: int,
+    ) -> bool:
+        window_start, expires_at = _pre_auth_window(
+            kind, key_hash, window_seconds, limit
+        )
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            result = db.execute(
+                "INSERT INTO pre_auth_rate_limits(kind, key_hash, window_start, "
+                "window_seconds, expires_at, attempts) VALUES (?, ?, ?, ?, ?, 1) "
+                "ON CONFLICT(kind, key_hash, window_start, window_seconds) "
+                "DO UPDATE SET attempts = attempts + 1 WHERE attempts < ?",
+                (kind, key_hash, window_start, window_seconds, expires_at, limit),
+            )
+        return result.rowcount == 1
+
+    def cleanup_expired_auth_state(self) -> None:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (utc_now(),))
+            db.execute(
+                "DELETE FROM pre_auth_rate_limits WHERE expires_at <= ?",
+                (int(datetime.now(UTC).timestamp()),),
+            )
 
     def save_model_config(self, tenant_id: str, values: dict[str, Any]) -> dict:
         credential_reference = values["credential_reference"]
@@ -2363,18 +2496,31 @@ class PostgresRepository(
 
         if not _admin_authority_claims_match(context, authority, scope):
             raise AuthorityDeniedError(scope)
+        user = connection.execute(
+            text(
+                "SELECT auth_version FROM users WHERE id = :user_id "
+                "AND tenant_id = :tenant_id AND role = 'admin' AND is_active = 1 "
+                "FOR UPDATE"
+            ),
+            {
+                "user_id": context.principal_id,
+                "tenant_id": context.workspace_id,
+            },
+        ).mappings().first()
+        if user is None:
+            raise AuthorityDeniedError(scope)
         active = connection.execute(
             text(
-                "SELECT s.token_hash FROM auth_sessions s JOIN users u "
-                "ON u.id = s.user_id AND u.tenant_id = s.tenant_id "
-                "WHERE s.token_hash = :token_hash AND s.user_id = :user_id "
-                "AND s.tenant_id = :tenant_id AND s.expires_at > :now "
-                "AND u.role = 'admin' AND u.is_active = 1 FOR UPDATE OF s, u"
+                "SELECT 1 FROM auth_sessions WHERE token_hash = :token_hash "
+                "AND user_id = :user_id AND tenant_id = :tenant_id "
+                "AND expires_at > :now AND auth_version = :auth_version "
+                "FOR UPDATE"
             ),
             {
                 "token_hash": authority.session_hash,
                 "user_id": context.principal_id,
                 "tenant_id": context.workspace_id,
+                "auth_version": user["auth_version"],
                 "now": utc_now(),
             },
         ).first()
@@ -2505,7 +2651,10 @@ class PostgresRepository(
             "INSERT INTO users(id, tenant_id, email, name, password_hash, role, created_at) "
             "VALUES (:id, :tenant_id, :email, :name, :password_hash, :role, :created_at)", value,
         )
-        return {key: item for key, item in value.items() if key != "password_hash"}
+        return {
+            **{key: item for key, item in value.items() if key != "password_hash"},
+            "auth_version": 0,
+        }
 
     def get_user_by_email(self, email: str) -> dict | None:
         return self._one("SELECT * FROM users WHERE email = :email AND is_active = 1", {"email": email.lower()})
@@ -2523,21 +2672,49 @@ class PostgresRepository(
         row = self._one("SELECT COUNT(*) AS count FROM users")
         return int(row["count"]) if row else 0
 
-    def save_auth_session(self, token_hash: str, user_id: str, tenant_id: str, expires_at: str) -> None:
-        self._execute(
-            "INSERT INTO auth_sessions VALUES (:token_hash, :user_id, :tenant_id, :expires_at, :created_at)",
-            {
-                "token_hash": token_hash,
-                "user_id": user_id,
-                "tenant_id": tenant_id,
-                "expires_at": expires_at,
-                "created_at": utc_now(),
-            },
-        )
+    def save_auth_session(
+        self, token_hash: str, user_id: str, tenant_id: str, expires_at: str,
+        expected_auth_version: int,
+    ) -> bool:
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            user = connection.execute(
+                text(
+                    "SELECT auth_version, is_active, tenant_id FROM users "
+                    "WHERE id = :user_id FOR UPDATE"
+                ),
+                {"user_id": user_id},
+            ).mappings().first()
+            if user is None or not user["is_active"] or user["tenant_id"] != tenant_id:
+                return False
+            version = int(user["auth_version"])
+            if version != expected_auth_version:
+                return False
+            connection.execute(
+                text(
+                    "INSERT INTO auth_sessions(token_hash, user_id, tenant_id, "
+                    "expires_at, created_at, auth_version) "
+                    "VALUES (:token_hash, :user_id, :tenant_id, :expires_at, "
+                    ":created_at, :auth_version)"
+                ),
+                {
+                    "token_hash": token_hash,
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "expires_at": expires_at,
+                    "created_at": utc_now(),
+                    "auth_version": version,
+                },
+            )
+        return True
 
     def get_auth_session(self, token_hash: str) -> dict | None:
         return self._one(
-            "SELECT * FROM auth_sessions WHERE token_hash = :token_hash AND expires_at > :now",
+            "SELECT s.* FROM auth_sessions s JOIN users u ON u.id = s.user_id "
+            "AND u.tenant_id = s.tenant_id WHERE s.token_hash = :token_hash "
+            "AND s.expires_at > :now AND u.is_active = 1 "
+            "AND s.auth_version = u.auth_version",
             {"token_hash": token_hash, "now": utc_now()},
         )
 
@@ -2547,6 +2724,131 @@ class PostgresRepository(
             {"token_hash": token_hash, "user_id": user_id},
         )
         return result.rowcount == 1
+
+    def revoke_all_auth_sessions(self, token_hash: str, user_id: str) -> bool:
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            user = connection.execute(
+                text(
+                    "SELECT tenant_id, auth_version FROM users WHERE id = :user_id "
+                    "AND is_active = 1 FOR UPDATE"
+                ),
+                {"user_id": user_id},
+            ).mappings().first()
+            if user is None:
+                return False
+            session = connection.execute(
+                text(
+                    "SELECT 1 FROM auth_sessions WHERE token_hash = :token_hash "
+                    "AND user_id = :user_id AND tenant_id = :tenant_id "
+                    "AND expires_at > :now AND auth_version = :auth_version "
+                    "FOR UPDATE"
+                ),
+                {
+                    "token_hash": token_hash, "user_id": user_id,
+                    "tenant_id": user["tenant_id"],
+                    "auth_version": user["auth_version"], "now": utc_now(),
+                },
+            ).first()
+            if session is None:
+                return False
+            connection.execute(
+                text("UPDATE users SET auth_version = auth_version + 1 WHERE id = :user_id"),
+                {"user_id": user_id},
+            )
+            connection.execute(
+                text("DELETE FROM auth_sessions WHERE user_id = :user_id"),
+                {"user_id": user_id},
+            )
+        return True
+
+    def change_password_and_revoke_sessions(
+        self, token_hash: str, user_id: str, expected_password_hash: str,
+        new_password_hash: str,
+    ) -> bool:
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            user = connection.execute(
+                text(
+                    "SELECT tenant_id, auth_version, password_hash FROM users "
+                    "WHERE id = :user_id AND is_active = 1 FOR UPDATE"
+                ),
+                {"user_id": user_id},
+            ).mappings().first()
+            if user is None or user["password_hash"] != expected_password_hash:
+                return False
+            session = connection.execute(
+                text(
+                    "SELECT 1 FROM auth_sessions WHERE token_hash = :token_hash "
+                    "AND user_id = :user_id AND tenant_id = :tenant_id "
+                    "AND expires_at > :now AND auth_version = :auth_version "
+                    "FOR UPDATE"
+                ),
+                {
+                    "token_hash": token_hash, "user_id": user_id,
+                    "tenant_id": user["tenant_id"],
+                    "auth_version": user["auth_version"], "now": utc_now(),
+                },
+            ).first()
+            if session is None:
+                return False
+            connection.execute(
+                text(
+                    "UPDATE users SET password_hash = :password_hash, "
+                    "auth_version = auth_version + 1 WHERE id = :user_id"
+                ),
+                {"password_hash": new_password_hash, "user_id": user_id},
+            )
+            connection.execute(
+                text("DELETE FROM auth_sessions WHERE user_id = :user_id"),
+                {"user_id": user_id},
+            )
+        return True
+
+    def consume_pre_auth_limit(
+        self, kind: str, key_hash: str, window_seconds: int, limit: int,
+    ) -> bool:
+        from sqlalchemy import text
+
+        window_start, expires_at = _pre_auth_window(
+            kind, key_hash, window_seconds, limit
+        )
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                text(
+                    "INSERT INTO pre_auth_rate_limits(kind, key_hash, window_start, "
+                    "window_seconds, expires_at, attempts) "
+                    "VALUES (:kind, :key_hash, :window_start, :window_seconds, "
+                    ":expires_at, 1) "
+                    "ON CONFLICT(kind, key_hash, window_start, window_seconds) "
+                    "DO UPDATE SET attempts = pre_auth_rate_limits.attempts + 1 "
+                    "WHERE pre_auth_rate_limits.attempts < :limit RETURNING attempts"
+                ),
+                {
+                    "kind": kind,
+                    "key_hash": key_hash,
+                    "window_start": window_start,
+                    "window_seconds": window_seconds,
+                    "expires_at": expires_at,
+                    "limit": limit,
+                },
+            ).first()
+        return result is not None
+
+    def cleanup_expired_auth_state(self) -> None:
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM auth_sessions WHERE expires_at <= :now"),
+                {"now": utc_now()},
+            )
+            connection.execute(
+                text("DELETE FROM pre_auth_rate_limits WHERE expires_at <= :now"),
+                {"now": int(datetime.now(UTC).timestamp())},
+            )
 
     def save_model_config(self, tenant_id: str, values: dict[str, Any]) -> dict:
         credential_reference = values["credential_reference"]

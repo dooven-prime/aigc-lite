@@ -33,6 +33,11 @@ def test_loopback_binding_allows_local_development_defaults() -> None:
     validate_startup_security(Settings(host="127.0.0.1"))
 
 
+def test_auth_throttle_cannot_be_disabled_by_nonpositive_configuration() -> None:
+    with pytest.raises(RuntimeError, match="rate-limit settings must be positive"):
+        validate_startup_security(Settings(host="127.0.0.1", auth_login_account_limit=0))
+
+
 def test_non_loopback_binding_rejects_insecure_defaults() -> None:
     with pytest.raises(RuntimeError, match="Unsafe non-loopback startup refused") as caught:
         validate_startup_security(

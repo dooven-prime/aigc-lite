@@ -13,6 +13,8 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/auth/login`：创建登录 session
 - `GET /api/auth/me`：读取当前登录身份和角色
 - `POST /api/auth/logout`：撤销当前 bearer 登录 session（其他 session 不受影响）
+- `POST /api/auth/logout-all`：原子撤销该用户全部登录 session；并发登录按认证版本拒绝陈旧会话
+- `POST /api/auth/password`：核对当前密码，修改密码并撤销全部 session；调用者需重新登录
 - `GET|POST /api/sessions`：创建和列出会话
 - `GET /api/sessions/{session_id}`：读取当前租户会话及消息
 - `POST /api/chat`：同步 Agent 对话

@@ -129,6 +129,7 @@ def test_final_authority_operations_fail_closed_before_write(tmp_path, tamper: s
             member["id"],
             context.workspace_id,
             (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            expected_auth_version=0,
         )
         context = replace(context, principal_id=member["id"])
         authority = AuthorityContext(
@@ -141,6 +142,7 @@ def test_final_authority_operations_fail_closed_before_write(tmp_path, tamper: s
             context.principal_id,
             context.workspace_id,
             (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+            expected_auth_version=repository.get_user(context.principal_id)["auth_version"],
         )
         authority = replace(authority, session_hash=expired_hash)
     elif tamper == "revoked_session":
@@ -256,6 +258,7 @@ def test_http_final_authority_requires_session_even_if_admin_dependency_is_overr
             context.principal_id,
             context.workspace_id,
             (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            expected_auth_version=repository.get_user(context.principal_id)["auth_version"],
         )
         for path, payload in (
             ("/api/qualification/receipts/missing-receipt/knowledge-admissions", admission),

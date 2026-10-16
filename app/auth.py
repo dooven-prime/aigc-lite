@@ -40,10 +40,24 @@ def token_hash(token: str) -> str:
     return hmac.new(settings.auth_secret.encode(), token.encode(), hashlib.sha256).hexdigest()
 
 
+def pre_auth_key(kind: str, value: str) -> str:
+    """Store only a purpose-separated digest, never an email or client address."""
+    return hmac.new(
+        settings.auth_secret.encode(),
+        f"pre-auth:{kind}:{value.strip().casefold()}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def create_login_session(user: dict) -> str:
     token = secrets.token_urlsafe(32)
     expires = datetime.now(UTC) + timedelta(hours=settings.session_ttl_hours)
-    get_repository().save_auth_session(token_hash(token), user["id"], user["tenant_id"], expires.isoformat())
+    saved = get_repository().save_auth_session(
+        token_hash(token), user["id"], user["tenant_id"], expires.isoformat(),
+        expected_auth_version=int(user["auth_version"]),
+    )
+    if not saved:
+        raise HTTPException(status_code=401, detail="Authentication state changed; please log in again")
     return token
 
 

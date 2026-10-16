@@ -72,6 +72,7 @@ def provision_admin(repository, context: RequestContext) -> tuple[RequestContext
     repository.save_auth_session(
         session_hash, user["id"], context.workspace_id,
         (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        expected_auth_version=0,
     )
     return replace(context, principal_id=user["id"]), AuthorityContext(
         context.workspace_id, user["id"], session_hash, ADMIN_AUTHORITY_SCOPES
@@ -1077,6 +1078,7 @@ def test_http_invalidation_requires_admin_route_and_exposes_decision(tmp_path, m
         context.principal_id,
         context.workspace_id,
         (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        expected_auth_version=repository.get_user(context.principal_id)["auth_version"],
     )
     app = FastAPI()
     app.include_router(
@@ -1271,6 +1273,7 @@ def test_http_historical_possible_attempt_can_invalidate_binding(
     repository.save_auth_session(
         token_hash(token), context.principal_id, context.workspace_id,
         (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        expected_auth_version=repository.get_user(context.principal_id)["auth_version"],
     )
     app = FastAPI()
     app.include_router(

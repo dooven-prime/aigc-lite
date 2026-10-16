@@ -1,5 +1,7 @@
 """Login session revocation and tenant binding contracts."""
 
+import sqlite3
+
 from fastapi.testclient import TestClient
 
 from app import database, tenancy
@@ -67,9 +69,21 @@ def test_session_cannot_cross_workspace_after_its_user_changes(tmp_path, monkeyp
             headers={"Authorization": f"Bearer {created.json()['access_token']}"},
         ).json()["id"]
         mismatched_token = "mismatched-tenant-session"
-        database.get_repository().save_auth_session(
-            token_hash(mismatched_token), user_id, "different-workspace", "2999-01-01T00:00:00+00:00"
+        # Exercise a historical/corrupt row: the repository now refuses to
+        # create a cross-workspace session through its normal write path.
+        repository = database.get_repository()
+        assert not repository.save_auth_session(
+            token_hash(mismatched_token), user_id, "different-workspace",
+            "2999-01-01T00:00:00+00:00",
+            expected_auth_version=0,
         )
+        with sqlite3.connect(repository.database_path) as db:
+            db.execute(
+                "INSERT INTO auth_sessions(token_hash, user_id, tenant_id, expires_at, "
+                "created_at, auth_version) VALUES (?, ?, ?, ?, ?, ?)",
+                (token_hash(mismatched_token), user_id, "different-workspace",
+                 "2999-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", 0),
+            )
         headers = {"Authorization": f"Bearer {mismatched_token}"}
         assert client.get("/api/auth/me", headers=headers).status_code == 401
         monkeypatch.setattr(tenancy, "is_loopback_binding", lambda _host: False)

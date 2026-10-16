@@ -1,6 +1,8 @@
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from uuid import uuid4
 
 import pytest
@@ -38,6 +40,53 @@ POSTGRES_URL = os.getenv("AIGC_LITE_TEST_POSTGRES_URL", "")
 pytestmark = pytest.mark.skipif(
     not POSTGRES_URL, reason="AIGC_LITE_TEST_POSTGRES_URL is not configured"
 )
+
+
+def test_postgres_pre_auth_limit_and_session_version_are_shared_across_workers() -> None:
+    first = PostgresRepository(POSTGRES_URL)
+    first.init()
+    second = PostgresRepository(POSTGRES_URL)
+    workspace_id = f"auth-lifecycle-{uuid4()}"
+    first.create_tenant("Authentication lifecycle", workspace_id)
+    user = first.create_user(
+        workspace_id, f"{workspace_id}@example.test", "User", "old-hash"
+    )
+    assert first.save_auth_session(
+        "first-" + workspace_id, user["id"], workspace_id,
+        "2999-01-01T00:00:00+00:00", expected_auth_version=0,
+    )
+    assert second.save_auth_session(
+        "second-" + workspace_id, user["id"], workspace_id,
+        "2999-01-01T00:00:00+00:00", expected_auth_version=0,
+    )
+
+    key_hash = sha256(workspace_id.encode()).hexdigest()
+
+    def consume(index: int) -> bool:
+        repository = first if index % 2 else second
+        return repository.consume_pre_auth_limit("login:account", key_hash, 3600, 4)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(consume, range(12)))
+    assert results.count(True) == 4
+    assert results.count(False) == 8
+
+    # Both revocations lock the same user before touching individual sessions;
+    # only one can be the linearized all-session revocation.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(first.revoke_all_auth_sessions, "first-" + workspace_id, user["id"]),
+            pool.submit(second.revoke_all_auth_sessions, "second-" + workspace_id, user["id"]),
+        ]
+        revoked = [future.result(timeout=15) for future in futures]
+    assert revoked.count(True) == 1
+    assert revoked.count(False) == 1
+    assert first.get_auth_session("first-" + workspace_id) is None
+    assert second.get_auth_session("second-" + workspace_id) is None
+    assert not first.save_auth_session(
+        "stale-" + workspace_id, user["id"], workspace_id,
+        "2999-01-01T00:00:00+00:00", expected_auth_version=0,
+    )
 
 
 def test_postgres_model_usage_receipt_transaction_and_summary() -> None:
@@ -132,7 +181,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     monkeypatch.setattr(settings, "master_key", Fernet.generate_key().decode())
     repository = PostgresRepository(POSTGRES_URL)
     repository.init()
-    assert repository.schema_revision() == "0029_shared_attempt_invalidation"
+    assert repository.schema_revision() == "0030_auth_lifecycle"
     workspace_id = f"contract-{uuid4()}"
     repository.create_tenant("PostgreSQL contract", workspace_id)
     context = RequestContext(request_id="postgres-contract", workspace_id=workspace_id)
@@ -142,7 +191,10 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
     auth_user = repository.create_user(
         workspace_id, f"{workspace_id}@example.test", "Session owner", "hash"
     )
-    repository.save_auth_session("postgres-session-token", auth_user["id"], workspace_id, "2999-01-01T00:00:00+00:00")
+    repository.save_auth_session(
+        "postgres-session-token", auth_user["id"], workspace_id,
+        "2999-01-01T00:00:00+00:00", expected_auth_version=0,
+    )
     assert repository.get_auth_session("postgres-session-token") is not None
     assert not repository.revoke_auth_session("postgres-session-token", "wrong-user")
     assert repository.revoke_auth_session("postgres-session-token", auth_user["id"])
@@ -605,7 +657,7 @@ def test_postgres_migration_and_workspace_contract(monkeypatch) -> None:
                 )
             )
         }
-    assert revision == "0029_shared_attempt_invalidation"
+    assert revision == "0030_auth_lifecycle"
     assert {
         "signature_verified",
         "enforcement_request_id",

@@ -47,6 +47,14 @@ def validate_startup_security(
 ) -> None:
     """Reject unsafe defaults whenever the process listens beyond loopback."""
 
+    if min(
+        config.auth_rate_window_seconds,
+        config.auth_login_account_limit,
+        config.auth_login_source_limit,
+        config.auth_register_source_limit,
+        config.auth_password_change_limit,
+    ) <= 0:
+        raise RuntimeError("Authentication rate-limit settings must be positive")
     if is_loopback_binding(config.host):
         return
     failures: list[str] = []
