@@ -1,0 +1,89 @@
+{
+  "contract": "external.math.alignment.record-source-manifest.v1",
+  "record_version": "external.math.alignment.pilot-001.pressure-flux-10-19.v1",
+  "record_path": "../PRESSURE_FLUX_10_19.md",
+  "scope": "Human primary-source comparison of manuscript (10.19) with a named Lean pressure-flux estimate and selected downstream source; not an automated semantic verifier.",
+  "audit_mode": "human_primary_source_comparison",
+  "sources": [
+    {
+      "id": "openai_manuscript_pdf",
+      "role": "primary_manuscript",
+      "url": "https://cdn.openai.com/pdf/32d9f210-8b73-45e0-91bc-82a30aef8a9a/navier-stokes.pdf",
+      "sha256": "0e779481c4da40bd28d1e642e1d8ca57447d129610df28dfa5a11e9af8ae228f",
+      "bytes": 2959204,
+      "location": "Physical/printed PDF pages 122–123: A_R and B_R definitions, (10.17), (10.19)",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    },
+    {
+      "id": "named_lean_declaration",
+      "role": "primary_formal_source",
+      "url": "https://github.com/openai/NavierStokesAndEuler/blob/f9e8bc5b38b6e212696e8a30e3e91517af887bbd/NavierStokes/R3/PressureFlux.lean#L576-L598",
+      "git_commit_claim": "f9e8bc5b38b6e212696e8a30e3e91517af887bbd",
+      "repository_path": "NavierStokes/R3/PressureFlux.lean",
+      "sha256": "0adffc7879e8e5e226e5d4b2d721139a4ff12a04b4c9b4ebc12cf0d0f597fc2a",
+      "bytes": 34598,
+      "location": "exists_uniform_actual_pressure_flux_bound, lines 576–598; proof-route slice lines 289–572",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    },
+    {
+      "id": "comparison_setup",
+      "role": "formal_definition_source",
+      "url": "https://github.com/openai/NavierStokesAndEuler/blob/f9e8bc5b38b6e212696e8a30e3e91517af887bbd/NavierStokes/R3/ComparisonSetup.lean#L44-L51",
+      "git_commit_claim": "f9e8bc5b38b6e212696e8a30e3e91517af887bbd",
+      "repository_path": "NavierStokes/R3/ComparisonSetup.lean",
+      "sha256": "2c1335d9da753d25c73b2b102b0c7686648c8928ddfac416d87284bb9b20fbde",
+      "bytes": 1985,
+      "location": "Definitions of formal A and B, lines 44–51",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    },
+    {
+      "id": "comparison_cutoffs",
+      "role": "formal_definition_source",
+      "url": "https://github.com/openai/NavierStokesAndEuler/blob/f9e8bc5b38b6e212696e8a30e3e91517af887bbd/NavierStokes/R3/ComparisonCutoffs.lean#L31-L38",
+      "git_commit_claim": "f9e8bc5b38b6e212696e8a30e3e91517af887bbd",
+      "repository_path": "NavierStokes/R3/ComparisonCutoffs.lean",
+      "sha256": "a4fba9b793ad51dca007cc6d8f6adf30f06b4f79c9c9811384ec299da230ab6b",
+      "bytes": 11984,
+      "location": "Cutoff weight chi_R = phi_R^8, lines 31–38",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    },
+    {
+      "id": "whole_space_uniqueness",
+      "role": "selected_downstream_source",
+      "url": "https://github.com/openai/NavierStokesAndEuler/blob/f9e8bc5b38b6e212696e8a30e3e91517af887bbd/NavierStokes/R3/WholeSpaceUniqueness.lean#L60-L68",
+      "git_commit_claim": "f9e8bc5b38b6e212696e8a30e3e91517af887bbd",
+      "repository_path": "NavierStokes/R3/WholeSpaceUniqueness.lean",
+      "sha256": "c5db96b5a524d852cecc34947be821e1ccab983febdb3fd71f398cabf5e46dcf",
+      "bytes": 5893,
+      "location": "Use of named formal estimate, lines 60–68",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    },
+    {
+      "id": "whole_space_comparison_closure",
+      "role": "selected_downstream_source",
+      "url": "https://github.com/openai/NavierStokesAndEuler/blob/f9e8bc5b38b6e212696e8a30e3e91517af887bbd/NavierStokes/R3/WholeSpaceComparisonClosure.lean#L90-L103",
+      "git_commit_claim": "f9e8bc5b38b6e212696e8a30e3e91517af887bbd",
+      "repository_path": "NavierStokes/R3/WholeSpaceComparisonClosure.lean",
+      "sha256": "a341c40686a2ab0f4b5916b2813814a176438210df63350b2d88b308ce106b3d",
+      "bytes": 8409,
+      "location": "A_R-based envelope and closure, lines 25–52 and 90–103",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    },
+    {
+      "id": "published_external_review",
+      "role": "known_answer_posthoc_comparison_not_primary_substitute",
+      "url": "https://arxiv.org/pdf/2610.08144v1",
+      "version": "arXiv:2610.08144v1",
+      "sha256": "3282e2c4103b955d635173749e7bf887fef7af7dd39e1abdb750b951030c538b",
+      "bytes": 1710171,
+      "location": "Section 3.2",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    }
+  ],
+  "not_closed": [
+    "These selected file-byte identities do not verify the full Git tree, a signed publisher release or the complete Lean import/axiom closure.",
+    "The pressure-flux comparison is human source checking; no pressure-flux source-reading detector or Lean kernel replay ran for this record.",
+    "Full hypothesis equivalence, any alternative bound, downstream theorem validity and Clay-target alignment remain unresolved."
+  ],
+  "authority_effect": "none"
+}

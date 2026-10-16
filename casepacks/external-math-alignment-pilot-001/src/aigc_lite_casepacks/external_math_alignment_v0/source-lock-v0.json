@@ -1,0 +1,50 @@
+{
+  "contract": "external.math.alignment.source-lock.v0",
+  "case_id": "external-math-alignment-pilot-001-lemma-8-6",
+  "development_only": true,
+  "sources": {
+    "manuscript_pdf": {
+      "role": "development_input",
+      "url": "https://cdn.openai.com/pdf/32d9f210-8b73-45e0-91bc-82a30aef8a9a/navier-stokes.pdf",
+      "sha256": "0e779481c4da40bd28d1e642e1d8ca57447d129610df28dfa5a11e9af8ae228f",
+      "bytes": 2959204,
+      "pdf_page_index": 94,
+      "printed_page": 95,
+      "label": "(8.19)",
+      "manuscript_location": "Section 8, Lemma 8.6, equation (8.19)"
+    },
+    "formal_source": {
+      "role": "development_input",
+      "url": "https://raw.githubusercontent.com/openai/NavierStokesAndEuler/f9e8bc5b38b6e212696e8a30e3e91517af887bbd/NavierStokes/SmoothFamilyTorusInverse.lean",
+      "git_commit": "f9e8bc5b38b6e212696e8a30e3e91517af887bbd",
+      "path": "NavierStokes/SmoothFamilyTorusInverse.lean",
+      "declaration": "norm_derivativeWord_inverse_le",
+      "line_start": 1059,
+      "line_end": 1080,
+      "sha256": "165c097077dc3687fd1d6f93c356059e5254be17c799950873f54d91a71e90c8",
+      "bytes": 57334
+    },
+    "external_review": {
+      "role": "posthoc_comparison_only",
+      "url": "https://arxiv.org/pdf/2610.08144v1",
+      "version": "arXiv:2610.08144v1",
+      "local_location": "PDF pages 4–5, Example 3.1; comparison equations (3.1) and (3.2) on page 4",
+      "sha256": "3282e2c4103b955d635173749e7bf887fef7af7dd39e1abdb750b951030c538b",
+      "bytes": 1710171,
+      "detector_input": false
+    },
+    "clay_statement": {
+      "role": "external_target_context_only",
+      "url": "https://www.claymath.org/wp-content/uploads/2022/06/navierstokes.pdf",
+      "materialization_status": "SOURCE_NOT_MATERIALIZED",
+      "sha256": null,
+      "bytes": null,
+      "detector_input": false
+    }
+  },
+  "source_identity_limitations": [
+    "The recorded digests identify retrieved file bytes, not a verified Git tree, signed release, or authenticated publisher identity.",
+    "Clay's problem-statement PDF could not be completely retrieved in this environment and is not part of a closed local source set.",
+    "The independent review is a known-answer comparator only and must not be passed to the development detector as an input."
+  ]
+}
