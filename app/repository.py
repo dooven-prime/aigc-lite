@@ -111,6 +111,32 @@ def _stream_recovery_hash(attempt_id: str) -> str:
     return sha256(f"stream-reconcile-v1:{attempt_id}".encode()).hexdigest()
 
 
+_MAX_STREAM_EVENTS_PER_RUN = 4096
+_MAX_STREAM_EVENT_PAYLOAD_BYTES = 2 * 1024 * 1024 + 4096
+_MAX_STREAM_REPLAY_PAGE = 200
+_MAX_STREAM_CURSOR = 2**63 - 1
+
+
+class StreamEventLimitError(ValueError):
+    """The durable event ledger reached its per-Run resource bound."""
+
+
+def _stream_event_payload(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        raise ValueError("Stream event payload must be an object")
+    rendered = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    if len(rendered.encode("utf-8")) > _MAX_STREAM_EVENT_PAYLOAD_BYTES:
+        raise StreamEventLimitError("Stream event payload exceeds the size limit")
+    return rendered
+
+
+def _stream_replay_args(after: int, limit: int) -> None:
+    if isinstance(after, bool) or not isinstance(after, int) or not 0 <= after <= _MAX_STREAM_CURSOR:
+        raise ValueError("Stream cursor must be a nonnegative 64-bit integer")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_STREAM_REPLAY_PAGE:
+        raise ValueError("Stream replay limit must be between 1 and 200")
+
+
 def _usage_summary_rows(legacy_rows: Any, receipt_rows: Any) -> dict:
     """Sum rows in Python: SQLite integer SUM can overflow before returning."""
     prompt_tokens = completion_tokens = requests = legacy_requests = 0
@@ -384,6 +410,14 @@ class Repository(
     ) -> str | None: ...
 
     def get_stream_run_state(self, tenant_id: str, run_id: str) -> dict | None: ...
+
+    def append_stream_event(
+        self, tenant_id: str, run_id: str, payload: dict[str, Any]
+    ) -> int: ...
+
+    def read_stream_events(
+        self, tenant_id: str, run_id: str, *, after: int = 0, limit: int = 200
+    ) -> dict | None: ...
 
     def reconcile_expired_stream_run(
         self, tenant_id: str, run_id: str, *, now: str,
@@ -1439,6 +1473,7 @@ class SQLiteRepository(
             "goal_protocol_sha256": None,
             "goal_sha256": None,
             "goal_json": None,
+            "stream_replay_available": 1 if stream_deadline is not None else 0,
         }
         with self._connect() as db:
             if goal_binding is not None:
@@ -1459,8 +1494,8 @@ class SQLiteRepository(
                 "stream_state, stream_start_deadline_at, stream_claimed_at, "
                 "stream_lease_until, stream_cancel_requested_at, goal_contract, "
                 "goal_protocol_id, goal_protocol_version, goal_protocol_sha256, "
-                "goal_sha256, goal_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "goal_sha256, goal_json, stream_replay_available) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(value.values()),
             )
         return value
@@ -1611,6 +1646,21 @@ class SQLiteRepository(
                 ":status, :input_content, :output_content, :metadata, :created_at)",
                 step,
             )
+        event_sequence = db.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM stream_events "
+            "WHERE tenant_id = ? AND run_id = ?", (tenant_id, run_id),
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO stream_events(tenant_id, run_id, sequence, event_type, "
+            "payload_json, created_at) VALUES (?, ?, ?, 'terminal', ?, ?)",
+            (
+                tenant_id, run_id, event_sequence,
+                _stream_event_payload({
+                    "event": "terminal", "status": status, "error_code": error_code,
+                }),
+                closed_at,
+            ),
+        )
         return True
 
     def close_stream_run(
@@ -1662,6 +1712,78 @@ class SQLiteRepository(
                 (tenant_id, run_id),
             ).fetchone()
         return dict(row) if row else None
+
+    def append_stream_event(
+        self, tenant_id: str, run_id: str, payload: dict[str, Any]
+    ) -> int:
+        rendered = _stream_event_payload(payload)
+        now = _stream_time(utc_now())
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            run = db.execute(
+                "SELECT status, stream_state, stream_lease_until, "
+                "stream_cancel_requested_at FROM agent_runs "
+                "WHERE tenant_id = ? AND id = ?", (tenant_id, run_id),
+            ).fetchone()
+            if (
+                run is None or run["status"] != "running"
+                or run["stream_state"] != "claimed"
+                or run["stream_cancel_requested_at"] is not None
+                or run["stream_lease_until"] is None
+                or run["stream_lease_until"] <= now
+            ):
+                raise ValueError("Stream Run is not active for event append")
+            sequence = db.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM stream_events "
+                "WHERE tenant_id = ? AND run_id = ?", (tenant_id, run_id),
+            ).fetchone()[0]
+            if sequence > _MAX_STREAM_EVENTS_PER_RUN:
+                raise StreamEventLimitError("Stream event count exceeds the limit")
+            db.execute(
+                "INSERT INTO stream_events(tenant_id, run_id, sequence, "
+                "event_type, payload_json, created_at) "
+                "VALUES (?, ?, ?, 'data', ?, ?)",
+                (tenant_id, run_id, sequence, rendered, now),
+            )
+        return sequence
+
+    def read_stream_events(
+        self, tenant_id: str, run_id: str, *, after: int = 0, limit: int = 200
+    ) -> dict | None:
+        _stream_replay_args(after, limit)
+        with self._connect() as db:
+            db.execute("BEGIN")
+            run = db.execute(
+                "SELECT id, session_id, status, error_code, stream_replay_available "
+                "FROM agent_runs "
+                "WHERE tenant_id = ? AND id = ? AND stream_state IS NOT NULL",
+                (tenant_id, run_id),
+            ).fetchone()
+            if run is None:
+                return None
+            rows = db.execute(
+                "SELECT sequence, event_type, payload_json FROM stream_events "
+                "WHERE tenant_id = ? AND run_id = ? AND sequence > ? "
+                "ORDER BY sequence LIMIT ?",
+                (tenant_id, run_id, after, limit + 1),
+            ).fetchall()
+        selected = rows[:limit]
+        available = bool(run["stream_replay_available"])
+        return {
+            "id": run["id"], "session_id": run["session_id"],
+            "status": run["status"], "error_code": run["error_code"],
+            "replay_available": available,
+            "replay_boundary": None if available else "pre_0031",
+            "events": [
+                {
+                    "cursor": row["sequence"], "event_type": row["event_type"],
+                    "data": json.loads(row["payload_json"]),
+                }
+                for row in selected
+            ],
+            "next_cursor": selected[-1]["sequence"] if selected else after,
+            "has_more": len(rows) > limit,
+        }
 
     def reconcile_expired_stream_run(
         self, tenant_id: str, run_id: str, *, now: str,
@@ -3313,6 +3435,7 @@ class PostgresRepository(
             "goal_protocol_sha256": None,
             "goal_sha256": None,
             "goal_json": None,
+            "stream_replay_available": 1 if stream_deadline is not None else 0,
         }
         from sqlalchemy import text
 
@@ -3335,13 +3458,15 @@ class PostgresRepository(
                     "error_code, created_at, completed_at, stream_state, stream_start_deadline_at, "
                     "stream_claimed_at, stream_lease_until, stream_cancel_requested_at, "
                     "goal_contract, goal_protocol_id, goal_protocol_version, "
-                    "goal_protocol_sha256, goal_sha256, goal_json) "
+                    "goal_protocol_sha256, goal_sha256, goal_json, "
+                    "stream_replay_available) "
                     "VALUES (:id, :tenant_id, :session_id, :request_id, :status, :requested_model, "
                     ":selected_model, :capability_set_id, :capability_policy_hash, :error_code, "
                     ":created_at, :completed_at, :stream_state, :stream_start_deadline_at, "
                     ":stream_claimed_at, :stream_lease_until, :stream_cancel_requested_at, "
                     ":goal_contract, :goal_protocol_id, :goal_protocol_version, "
-                    ":goal_protocol_sha256, :goal_sha256, :goal_json)"
+                    ":goal_protocol_sha256, :goal_sha256, :goal_json, "
+                    ":stream_replay_available)"
                 ),
                 value,
             )
@@ -3529,6 +3654,25 @@ class PostgresRepository(
                      ":metadata, :created_at)"),
                 step,
             )
+        event_sequence = connection.execute(
+            text("SELECT COALESCE(MAX(sequence), 0) + 1 FROM stream_events "
+                 "WHERE tenant_id = :tenant_id AND run_id = :run_id"),
+            {"tenant_id": tenant_id, "run_id": run_id},
+        ).scalar_one()
+        connection.execute(
+            text("INSERT INTO stream_events(tenant_id, run_id, sequence, "
+                 "event_type, payload_json, created_at) VALUES "
+                 "(:tenant_id, :run_id, :sequence, 'terminal', :payload_json, "
+                 ":created_at)"),
+            {
+                "tenant_id": tenant_id, "run_id": run_id,
+                "sequence": event_sequence,
+                "payload_json": _stream_event_payload({
+                    "event": "terminal", "status": status, "error_code": error_code,
+                }),
+                "created_at": closed_at,
+            },
+        )
         return True
 
     def close_stream_run(
@@ -3579,6 +3723,95 @@ class PostgresRepository(
             "AND stream_state IS NOT NULL",
             {"tenant_id": tenant_id, "run_id": run_id},
         )
+
+    def append_stream_event(
+        self, tenant_id: str, run_id: str, payload: dict[str, Any]
+    ) -> int:
+        from sqlalchemy import text
+
+        rendered = _stream_event_payload(payload)
+        now = _stream_time(utc_now())
+        with self.engine.begin() as connection:
+            run = connection.execute(
+                text("SELECT status, stream_state, stream_lease_until, "
+                     "stream_cancel_requested_at FROM agent_runs "
+                     "WHERE tenant_id = :tenant_id AND id = :run_id FOR UPDATE"),
+                {"tenant_id": tenant_id, "run_id": run_id},
+            ).mappings().first()
+            if (
+                run is None or run["status"] != "running"
+                or run["stream_state"] != "claimed"
+                or run["stream_cancel_requested_at"] is not None
+                or run["stream_lease_until"] is None
+                or run["stream_lease_until"] <= now
+            ):
+                raise ValueError("Stream Run is not active for event append")
+            sequence = connection.execute(
+                text("SELECT COALESCE(MAX(sequence), 0) + 1 FROM stream_events "
+                     "WHERE tenant_id = :tenant_id AND run_id = :run_id"),
+                {"tenant_id": tenant_id, "run_id": run_id},
+            ).scalar_one()
+            if sequence > _MAX_STREAM_EVENTS_PER_RUN:
+                raise StreamEventLimitError("Stream event count exceeds the limit")
+            connection.execute(
+                text("INSERT INTO stream_events(tenant_id, run_id, sequence, "
+                     "event_type, payload_json, created_at) VALUES "
+                     "(:tenant_id, :run_id, :sequence, 'data', :payload_json, "
+                     ":created_at)"),
+                {
+                    "tenant_id": tenant_id, "run_id": run_id,
+                    "sequence": sequence, "payload_json": rendered,
+                    "created_at": now,
+                },
+            )
+        return sequence
+
+    def read_stream_events(
+        self, tenant_id: str, run_id: str, *, after: int = 0, limit: int = 200
+    ) -> dict | None:
+        from sqlalchemy import text
+
+        _stream_replay_args(after, limit)
+        with self.engine.connect().execution_options(
+            isolation_level="REPEATABLE READ"
+        ) as connection:
+            with connection.begin():
+                run = connection.execute(
+                    text("SELECT id, session_id, status, error_code, "
+                         "stream_replay_available "
+                         "FROM agent_runs WHERE tenant_id = :tenant_id "
+                         "AND id = :run_id AND stream_state IS NOT NULL"),
+                    {"tenant_id": tenant_id, "run_id": run_id},
+                ).mappings().first()
+                if run is None:
+                    return None
+                rows = connection.execute(
+                    text("SELECT sequence, event_type, payload_json "
+                         "FROM stream_events WHERE tenant_id = :tenant_id "
+                         "AND run_id = :run_id AND sequence > :after "
+                         "ORDER BY sequence LIMIT :page_size"),
+                    {
+                        "tenant_id": tenant_id, "run_id": run_id,
+                        "after": after, "page_size": limit + 1,
+                    },
+                ).mappings().all()
+        selected = rows[:limit]
+        available = bool(run["stream_replay_available"])
+        return {
+            "id": run["id"], "session_id": run["session_id"],
+            "status": run["status"], "error_code": run["error_code"],
+            "replay_available": available,
+            "replay_boundary": None if available else "pre_0031",
+            "events": [
+                {
+                    "cursor": row["sequence"], "event_type": row["event_type"],
+                    "data": json.loads(row["payload_json"]),
+                }
+                for row in selected
+            ],
+            "next_cursor": selected[-1]["sequence"] if selected else after,
+            "has_more": len(rows) > limit,
+        }
 
     def reconcile_expired_stream_run(
         self, tenant_id: str, run_id: str, *, now: str,

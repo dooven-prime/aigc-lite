@@ -46,7 +46,7 @@ from ..core.errors import (
 from ..core.goal_binding import prepare_native_goal_binding
 from ..database import get_repository
 from ..providers import stream_completion
-from ..repository import Repository
+from ..repository import Repository, StreamEventLimitError
 from .artifacts import ArtifactService
 from .chat_capabilities import ChatCapabilityPolicy
 from .model_usage import ModelUsageObserver
@@ -569,6 +569,19 @@ class GatewayService:
             sequence += 1
             return sequence
 
+        def publish_event(payload: dict[str, Any]) -> None:
+            try:
+                cursor = repository.append_stream_event(
+                    context.workspace_id, run["id"], payload
+                )
+            except StreamEventLimitError as exc:
+                raise UpstreamResponseError(str(exc)) from exc
+            except ValueError as exc:
+                if not claim_is_current():
+                    raise asyncio.CancelledError from exc
+                raise UpstreamResponseError("LLM stream event cannot be recorded") from exc
+            events.put_nowait({**payload, "_stream_cursor": cursor})
+
         def record_step(step: AgentStepRecord) -> None:
             if not claim_is_current():
                 raise asyncio.CancelledError
@@ -584,7 +597,7 @@ class GatewayService:
                     context, run_id=run["id"], step_id=stored_step["id"],
                     artifacts=step.artifacts, citations=step.citations,
                 )
-            events.put_nowait({
+            publish_event({
                 "event": "step", "sequence": current_sequence, "kind": step.kind.value,
                 "name": step.name, "status": step.status.value,
             })
@@ -599,7 +612,7 @@ class GatewayService:
             ),
             reserve_sequence=reserve_sequence,
             step_metadata={"chat_capability": capability_metadata, "stream": True},
-            on_step=lambda index, kind, status: events.put_nowait({
+            on_step=lambda index, kind, status: publish_event({
                 "event": "step", "sequence": index, "kind": kind,
                 "name": selected_model, "status": status,
             }) if status == "succeeded" else None,
@@ -701,7 +714,7 @@ class GatewayService:
                     stream_bytes += len(content.encode())
                     if stream_bytes > _MAX_STREAM_BYTES:
                         raise UpstreamResponseError("LLM stream exceeds the output size limit")
-                    events.put_nowait({"content": content, "turn": turn})
+                    publish_event({"content": content, "turn": turn})
 
                 if self._stream_runner is not None:
                     # Legacy injectable text-only stream used by local adapters/tests.
@@ -891,6 +904,18 @@ class GatewayService:
         return self._repository_provider().reconcile_stale_stream_runs(
             now or datetime.now(UTC).isoformat()
         )
+
+    def replay_stream_events(
+        self, context: RequestContext, run_id: str, *, after: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Read a finite event snapshot without claiming or continuing a Run."""
+        snapshot = self._repository_provider().read_stream_events(
+            context.workspace_id, run_id, after=after, limit=limit
+        )
+        if snapshot is None:
+            raise ResourceNotFoundError("agent_run", run_id)
+        return snapshot
 
     @staticmethod
     def _record_terminal_run(

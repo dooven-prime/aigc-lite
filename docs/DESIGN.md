@@ -485,13 +485,12 @@ SSE 仅发布文本增量和脱敏步骤状态。
 
 下列项目才是当前待办；历史 roadmap 中出现的 “后续” 不应覆盖本节：
 
-1. SSE Chat 已复用同步路径的迭代工具循环；跨进程 Chat Run 取消、SSE 断线重连/事件回放
-   仍未实现。
+1. SSE Chat 已复用同步路径的迭代工具循环，支持跨进程取消和按游标只读回放；断线后继续
+   原模型/工具执行仍未实现，断线仍取消原 Run。
 2. token budget 仍依赖 provider 能可靠返回 usage/finish reason；当前已强制模型轮次、工具次数、
    墙钟、单工具 timeout 和结果大小。
 3. Scheduler 已用持久化 firing 身份/lease 防止多 worker 同一到期点重复领取；过期执行保留为
-   `indeterminate`，不自动重放。跨 worker Chat Run 取消、外部 target 的端到端幂等与共享 rate limiter
-   仍未实现。
+   `indeterminate`，不自动重放。外部 target 的端到端幂等与共享 rate limiter 仍未实现。
 4. credential master-key rotation、批量重加密、备份/恢复演练和租户数据导出/删除流程尚未闭合。
 5. 当前没有跨 workspace 的 platform-admin 身份；现有 `/api/admin/tenants` 有意保持 workspace-local。
    若引入平台治理，必须使用独立 identity/scope，不能扩大现有 `admin` 角色。

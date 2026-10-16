@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -830,7 +830,9 @@ async def chat_stream(
         try:
             async with aclosing(result.chunks):
                 async for event in result.chunks:
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    cursor = event["_stream_cursor"]
+                    payload = {key: value for key, value in event.items() if key != "_stream_cursor"}
+                    yield f"id: {cursor}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
         except ApplicationError as exc:
             yield f"data: {json.dumps({'error': str(exc), 'code': exc.code.value}, ensure_ascii=False)}\n\n"
             return
@@ -840,6 +842,22 @@ async def chat_stream(
         events(),
         media_type="text/event-stream",
         headers={"X-Run-Id": result.run_id, "X-Session-Id": result.session_id},
+    )
+
+
+@app.get("/api/runs/{run_id}/events")
+async def run_stream_events(
+    run_id: str,
+    http_request: Request,
+    response: Response,
+    after: int = Query(0, ge=0, le=2**63 - 1),
+    limit: int = Query(200, ge=1, le=200),
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    """Read one finite page of stored stream events; never resume the producer."""
+    response.headers["Cache-Control"] = "no-store"
+    return gateway_service.replay_stream_events(
+        request_context(http_request, tenant), run_id, after=after, limit=limit
     )
 
 
