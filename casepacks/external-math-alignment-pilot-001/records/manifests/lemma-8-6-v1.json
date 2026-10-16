@@ -1,0 +1,67 @@
+{
+  "contract": "external.math.alignment.record-source-manifest.v1",
+  "record_version": "external.math.alignment.pilot-001.lemma-8-6.v1",
+  "record_path": "../LEMMA_8_6.md",
+  "scope": "Local comparison of manuscript Lemma 8.6 equation (8.19) and the named Lean derivative-word estimate; not full theorem identity.",
+  "audit_mode": "bounded_source_detector_plus_human_dependency_trace",
+  "sources": [
+    {
+      "id": "openai_manuscript_pdf",
+      "role": "primary_manuscript_and_detector_input",
+      "url": "https://cdn.openai.com/pdf/32d9f210-8b73-45e0-91bc-82a30aef8a9a/navier-stokes.pdf",
+      "sha256": "0e779481c4da40bd28d1e642e1d8ca57447d129610df28dfa5a11e9af8ae228f",
+      "bytes": 2959204,
+      "location": "Physical PDF page 95 (zero-based page 94), Lemma 8.6 and (8.19); page 96 proof",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    },
+    {
+      "id": "named_lean_declaration",
+      "role": "primary_formal_source_and_detector_input",
+      "url": "https://raw.githubusercontent.com/openai/NavierStokesAndEuler/f9e8bc5b38b6e212696e8a30e3e91517af887bbd/NavierStokes/SmoothFamilyTorusInverse.lean",
+      "git_commit_claim": "f9e8bc5b38b6e212696e8a30e3e91517af887bbd",
+      "repository_path": "NavierStokes/SmoothFamilyTorusInverse.lean",
+      "sha256": "165c097077dc3687fd1d6f93c356059e5254be17c799950873f54d91a71e90c8",
+      "bytes": 57334,
+      "location": "norm_derivativeWord_inverse_le, lines 1059–1080",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    },
+    {
+      "id": "coefficient_seminorm_helper",
+      "role": "direct_proof_dependency_locator_only",
+      "url": "https://github.com/openai/NavierStokesAndEuler/blob/f9e8bc5b38b6e212696e8a30e3e91517af887bbd/NavierStokes/SmoothFourierData.lean#L368-L385",
+      "git_commit_claim": "f9e8bc5b38b6e212696e8a30e3e91517af887bbd",
+      "repository_path": "NavierStokes/SmoothFourierData.lean",
+      "sha256": null,
+      "bytes": null,
+      "location": "coefficient_seminorm_bound, lines 368–385; called at SmoothFamilyTorusInverse.lean:1069",
+      "materialization": "byte_identity_not_recorded"
+    },
+    {
+      "id": "inverse_derivative_word_helper",
+      "role": "direct_proof_dependency_locator_only",
+      "url": "https://github.com/openai/NavierStokesAndEuler/blob/f9e8bc5b38b6e212696e8a30e3e91517af887bbd/NavierStokes/TorusInverse.lean#L502-L525",
+      "git_commit_claim": "f9e8bc5b38b6e212696e8a30e3e91517af887bbd",
+      "repository_path": "NavierStokes/TorusInverse.lean",
+      "sha256": null,
+      "bytes": null,
+      "location": "inverse_derivativeWord_bound, lines 502–525; called at SmoothFamilyTorusInverse.lean:1075",
+      "materialization": "byte_identity_not_recorded"
+    },
+    {
+      "id": "published_external_review",
+      "role": "known_answer_posthoc_comparison_not_detector_input",
+      "url": "https://arxiv.org/pdf/2610.08144v1",
+      "version": "arXiv:2610.08144v1",
+      "sha256": "3282e2c4103b955d635173749e7bf887fef7af7dd39e1abdb750b951030c538b",
+      "bytes": 1710171,
+      "location": "Section 3.1",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    }
+  ],
+  "not_closed": [
+    "No authenticated full Git tree or signed upstream release is established by the file digests or Git commit claim.",
+    "The direct proof-dependency locators have no separate file-byte identities in this record; transitive imports, axioms, toolchain and Mathlib closure were not rebuilt.",
+    "No Lean kernel replay, full manuscript-to-formal statement identity, Clay-target alignment or final-theorem verdict is claimed."
+  ],
+  "authority_effect": "none"
+}

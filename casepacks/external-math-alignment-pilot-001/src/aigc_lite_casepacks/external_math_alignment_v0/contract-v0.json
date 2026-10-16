@@ -1,0 +1,38 @@
+{
+  "contract": "external.math.statement-alignment.candidate.v0",
+  "case_id": "external-math-alignment-pilot-001-lemma-8-6",
+  "scope": "A source-bound, deterministic, local derivative-order comparison between OpenAI manuscript Lemma 8.6 equation (8.19) and the hypotheses of norm_derivativeWord_inverse_le at one pinned source commit.",
+  "development_item": true,
+  "required_inputs": [
+    "Operator-supplied expected SHA-256 of source-lock-v0.json",
+    "OpenAI manuscript PDF with the locked byte count and SHA-256",
+    "Pinned Lean source file with the locked byte count and SHA-256"
+  ],
+  "detector_excluded_inputs": [
+    "Independent mathematical review or its conclusions",
+    "Clay problem statement",
+    "Any unpinned or later repository content"
+  ],
+  "checked_relation": "If the manuscript's displayed estimate requires input order m+k and both named Lean hypotheses require xJet (w.length+j), the local comparison reports an order gap when j>k. A missing, ambiguous, or contradictory extraction is unresolved, not aligned.",
+  "report_fields": {
+    "local_requirement_alignment": [
+      "ALIGNMENT_GAP",
+      "NO_LOCAL_OFFSET_GAP_DETECTED",
+      "UNRESOLVED"
+    ],
+    "full_statement_alignment": "UNRESOLVED",
+    "proof_method_alignment": "NOT_EVALUATED",
+    "kernel_verification": "NOT_RUN",
+    "qualification": "NOT_REQUESTED",
+    "current_use": "NOT_REQUESTED"
+  },
+  "interpretation_limitations": [
+    "The Lean declaration is a derivative-word statement; rewriting it as a C_y^m estimate involves additional mathematical interpretation that this detector does not certify.",
+    "A stronger Lean hypothesis does not prove the stronger manuscript estimate false or the final Navier-Stokes result false.",
+    "Matching derivative orders alone would not establish equality of objects, definitions, quantifiers, domains, or all hypotheses.",
+    "A successful Lean build, if later obtained, would establish kernel acceptance of formalized declarations, not manuscript or Clay statement identity.",
+    "This candidate diagnostic cannot issue or mutate QualificationReceipts, CurrentUseBindings, AuthorizationGrants, or execution authority."
+  ],
+  "failure_behavior": "Absent, ambiguous, altered, oversized, or unparseable source bytes fail closed without a positive alignment verdict.",
+  "authority": "candidate_only"
+}

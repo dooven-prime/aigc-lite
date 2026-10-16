@@ -25,6 +25,17 @@ jobs:
       - run: python -m compileall -q app
       - run: pytest
       - run: pytest casepacks/long-horizon-recovery-v0/tests -q
+  external-math-alignment-casepack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ./casepacks/external-math-alignment-pilot-001 pytest ruff
+      - run: python -m pytest -q casepacks/external-math-alignment-pilot-001/tests
+      - run: python -m ruff check casepacks/external-math-alignment-pilot-001/src casepacks/external-math-alignment-pilot-001/tests
+      - run: python -m compileall -q casepacks/external-math-alignment-pilot-001/src
   frontend:
     runs-on: ubuntu-latest
     defaults:

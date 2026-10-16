@@ -1,0 +1,38 @@
+{
+  "contract": "external.math.alignment.record-source-manifest.v1",
+  "record_version": "external.math.alignment.pilot-001.trace-square-control.v1",
+  "record_path": "../POSITIVE_CONTROL_TRACE_SQUARE.md",
+  "scope": "Known-answer development control for same stated matrix result under different proof routes; not an OpenAI manuscript/formal pair or a blind evaluation item.",
+  "audit_mode": "human_curated_statement_fields_plus_pure_comparator_regression",
+  "sources": [
+    {
+      "id": "published_example_pdf",
+      "roles": [
+        "natural_language_statement_and_diagonalization_proof",
+        "embedded_image_of_lean_statement_and_sum_of_squares_proof",
+        "known_answer_interpretation"
+      ],
+      "url": "https://arxiv.org/pdf/2610.08144v1",
+      "version": "arXiv:2610.08144v1",
+      "sha256": "3282e2c4103b955d635173749e7bf887fef7af7dd39e1abdb750b951030c538b",
+      "bytes": 1710171,
+      "location": "Physical PDF page 3, Example 2.2 and Figure 2; page 4 natural-language proof and route comparison",
+      "materialization": "retrieved_and_hashed_at_audit_not_bundled"
+    },
+    {
+      "id": "independent_lean_source_file",
+      "role": "would_be_required_for_fresh_kernel_replay",
+      "url": null,
+      "sha256": null,
+      "bytes": null,
+      "location": "Figure 2 contains only a photographed/published code snippet, not an independently committed Lean source file",
+      "materialization": "not_identified_or_materialized"
+    }
+  ],
+  "not_closed": [
+    "The screenshot and natural-language argument come from the same known-answer review; there is no independent formal-source byte identity or blind information barrier.",
+    "The fields were manually curated rather than extracted by a source-reading detector.",
+    "Fresh Lean/Mathlib kernel replay was not completed because dependency setup failed before theorem checking; no formal build closure or kernel PASS is claimed."
+  ],
+  "authority_effect": "none"
+}
