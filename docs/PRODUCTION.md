@@ -75,9 +75,14 @@ key without the matching database is not useful.
 - `/health` is dependency-free liveness. Use `/ready` for database connectivity,
   exact Alembic head, and scheduler loop state; it returns 503 on a failed check
   without exposing database exception text.
-- Current-session logout/revocation is available. Login-specific lockout,
-  all-session revocation, password change, and expired-session cleanup APIs
-  are not yet complete.
+- Login and registration use shared database pre-auth throttling. The packaged
+  server disables proxy-header rewriting; other ASGI deployments must preserve
+  an equivalent trusted-proxy boundary. Behind a reverse proxy, the source
+  bucket may be shared by many users and is only a supplemental control;
+  configure an edge limit and suitable source budget for that topology. The
+  per-account digest bucket remains separate. Session revocation, all-session logout and
+  password change are versioned and transactionally checked; expired sessions
+  are rejected at read time and cleaned periodically.
 - Scheduler wakeups may run on multiple workers, but each due occurrence has one
   durable firing identity and owner lease. Expired/interrupted firings become
   `indeterminate` and are not automatically replayed. Inspect the admin

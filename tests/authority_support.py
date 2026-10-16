@@ -26,6 +26,7 @@ def provision_admin(repository, context: RequestContext) -> tuple[RequestContext
         user["id"],
         context.workspace_id,
         (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        expected_auth_version=0,
     )
     privileged = replace(context, principal_id=user["id"])
     authority = AuthorityContext(

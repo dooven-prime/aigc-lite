@@ -44,6 +44,7 @@ def provision_admin(repository, context: RequestContext) -> tuple[RequestContext
         user["id"],
         context.workspace_id,
         (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        expected_auth_version=0,
     )
     return replace(context, principal_id=user["id"]), AuthorityContext(
         context.workspace_id, user["id"], session_hash, ADMIN_AUTHORITY_SCOPES

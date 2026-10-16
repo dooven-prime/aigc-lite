@@ -485,18 +485,19 @@ SSE 仅发布文本增量和脱敏步骤状态。
 
 下列项目才是当前待办；历史 roadmap 中出现的 “后续” 不应覆盖本节：
 
-1. SSE Chat 已复用同步路径的迭代工具循环；跨进程 Chat Run 取消、SSE 断线重连/事件回放
-   仍未实现。
+1. SSE Chat 已复用同步路径的迭代工具循环，支持跨进程取消和按游标只读回放；断线后继续
+   原模型/工具执行仍未实现，断线仍取消原 Run。
 2. token budget 仍依赖 provider 能可靠返回 usage/finish reason；当前已强制模型轮次、工具次数、
    墙钟、单工具 timeout 和结果大小。
 3. Scheduler 已用持久化 firing 身份/lease 防止多 worker 同一到期点重复领取；过期执行保留为
-   `indeterminate`，不自动重放。跨 worker Chat Run 取消、外部 target 的端到端幂等与共享 rate limiter
-   仍未实现。
+   `indeterminate`，不自动重放。外部 target 的端到端幂等与共享 rate limiter 仍未实现。
 4. credential master-key rotation、批量重加密、备份/恢复演练和租户数据导出/删除流程尚未闭合。
 5. 当前没有跨 workspace 的 platform-admin 身份；现有 `/api/admin/tenants` 有意保持 workspace-local。
    若引入平台治理，必须使用独立 identity/scope，不能扩大现有 `admin` 角色。
-6. 已支持撤销当前登录 session；登录/注册仍缺少专门的分布式暴力破解防护，
-   全 session 撤销、密码变更和过期会话清理仍需完整生命周期接口。
+6. 登录/注册已有数据库共享的预认证限流；全 session 撤销、密码变更和过期清理已有版本化
+   生命周期合同。尚未提供账户恢复或 MFA；公开注册的重复邮箱响应仍可能暴露账户存在性，
+   并发同邮箱注册的 workspace 创建仍待原子化。
+   反向代理后的源地址预算还需要部署侧可信代理配置与边缘限流。
 7. repository 已拆出多个 domain port/mixin，但 identity/gateway/run/knowledge 等兼容面仍集中在
    `repository.py`；`main.py` 仍承担部分 route 和 composition 兼容职责。
 8. `math.formal.v1` 是保守的单文件 proof replay profile；项目级 content-addressed import closure、

@@ -148,7 +148,7 @@ Fernet master key。所有变量、MiniMax 示例和租户配置见
 | [Design](docs/DESIGN.md) | 产品边界、核心契约、架构决策和路线 |
 | [ROS 2 Bridge](extensions/ros2-bridge/README.md) | Simulator/Nav2 provider、物理动作和安全边界 |
 | [Changelog](CHANGELOG.md) | 版本变化 |
-| [v0.6.0 release closure](docs/releases/v0.6.0.md) | 当前 authority separation 基线和验证范围 |
+| [v0.8.0 release closure](docs/releases/v0.8.0.md) | 当前工程基线、验证范围与未完成边界 |
 
 ## 开发
 

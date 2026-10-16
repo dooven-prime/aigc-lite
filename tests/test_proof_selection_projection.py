@@ -266,30 +266,38 @@ def test_legacy_receipt_is_invalidated_by_either_eligible_attempt(
                 json.dumps(criteria), "e" * 64, now,
             ),
         )
-    admission = repository.admit_knowledge(
-        context.workspace_id,
-        {
-            "id": str(uuid4()),
-            "contract_version": "knowledge.admission.v1",
-            "qualification_receipt_id": receipt_id,
-            "qualification_receipt_hash": "e" * 64,
-            "claim_revision_id": claim_id,
-            "claim_semantic_hash": "a" * 64,
-            "profile_id": "math.formal.v1",
-            "profile_version": 1,
-            "use_scope": "knowledge",
-            "admission_policy_id": "knowledge.default.v1",
-            "admission_policy_version": 1,
-            "admission_policy_hash": "f" * 64,
-            "approved_by": context.principal_id,
-            "rationale": "Historical receipt selected for current use.",
-            "receipt_hash": uuid4().hex * 2,
-            "issued_at": now,
-        },
-        context=context,
-        authority=authority,
-    )
-    binding_id = admission["current_use_binding"]["id"]
+    # Materialize old-runtime rows at the old schema. Current repository
+    # authority checks intentionally require 0030 auth_version columns and
+    # cannot be used against a downgraded database.
+    admission_id = str(uuid4())
+    binding_id = str(uuid4())
+    with repository._connect() as db:
+        db.execute(
+            "INSERT INTO knowledge_admission_receipts(id, tenant_id, "
+            "contract_version, qualification_receipt_id, qualification_receipt_hash, "
+            "claim_revision_id, claim_semantic_hash, profile_id, profile_version, "
+            "use_scope, admission_policy_id, admission_policy_version, "
+            "admission_policy_hash, approved_by, rationale, receipt_hash, issued_at) "
+            "VALUES (?, ?, 'knowledge.admission.v1', ?, ?, ?, ?, "
+            "'math.formal.v1', 1, 'knowledge', 'knowledge.default.v1', 1, "
+            "?, ?, ?, ?, ?)",
+            (
+                admission_id, context.workspace_id, receipt_id, "e" * 64,
+                claim_id, "a" * 64, "f" * 64, context.principal_id,
+                "Historical receipt selected for current use.", uuid4().hex * 2, now,
+            ),
+        )
+        db.execute(
+            "INSERT INTO current_use_bindings(id, tenant_id, claim_revision_id, "
+            "profile_id, use_scope, qualification_receipt_id, "
+            "knowledge_admission_receipt_id, state, stale_reason, bound_by, "
+            "created_at, updated_at) VALUES (?, ?, ?, 'math.formal.v1', "
+            "'knowledge', ?, ?, 'current', NULL, ?, ?, ?)",
+            (
+                binding_id, context.workspace_id, claim_id, receipt_id,
+                admission_id, context.principal_id, now, now,
+            ),
+        )
     command.upgrade(config, "head")
 
     with repository._connect() as db:

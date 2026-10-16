@@ -24,7 +24,12 @@ in [`PRODUCTION.md`](PRODUCTION.md).
 | `AIGC_LITE_ALLOW_SIGNUP` | `true` | Public registration; must be `false` for non-loopback startup. |
 | `AIGC_LITE_ADMIN_EMAIL` / `AIGC_LITE_ADMIN_PASSWORD` | empty | Bootstrap administrator pair; production password must be 12+ characters. |
 | `AIGC_LITE_SESSION_TTL_HOURS` | `168` | Session lifetime. |
-| `AIGC_LITE_RATE_LIMIT_PER_MINUTE` | `60` | General request rate limit; not a dedicated login lockout. |
+| `AIGC_LITE_AUTH_RATE_WINDOW_SECONDS` | `300` | Shared database pre-auth rate-limit window. |
+| `AIGC_LITE_AUTH_LOGIN_ACCOUNT_LIMIT` | `10` | Login attempts per normalized email digest in one window. |
+| `AIGC_LITE_AUTH_LOGIN_SOURCE_LIMIT` | `60` | Login attempts per ASGI peer in one window; the packaged server disables proxy-header rewriting. |
+| `AIGC_LITE_AUTH_REGISTER_SOURCE_LIMIT` | `10` | Registration attempts per ASGI peer in one window. |
+| `AIGC_LITE_AUTH_PASSWORD_CHANGE_LIMIT` | `5` | Authenticated current-password checks per user in one window. |
+| `AIGC_LITE_RATE_LIMIT_PER_MINUTE` | `60` | Separate general authenticated request rate limit. |
 | `AIGC_LITE_API_KEY` | empty | Single-tenant compatibility API key. |
 | `AIGC_LITE_TENANTS_JSON` | empty | Static tenant/API-key list. |
 

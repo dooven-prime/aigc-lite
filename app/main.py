@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -42,6 +42,7 @@ from .auth import (
     current_user,
     ensure_bootstrap_admin,
     hash_password,
+    pre_auth_key,
     verify_password,
 )
 from .config import settings
@@ -253,6 +254,11 @@ class RegisterRequest(LoginRequest):
     workspace_name: str | None = Field(default=None, min_length=1, max_length=100)
 
 
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=8, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
 class UserCreateRequest(RegisterRequest):
     role: str = Field(default="member", pattern="^(member|admin)$")
 
@@ -351,6 +357,15 @@ async def _reconcile_streams_forever() -> None:
             logger.exception("Could not reconcile stale streaming runs")
 
 
+async def _cleanup_auth_state_forever() -> None:
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            get_repository().cleanup_expired_auth_state()
+        except Exception:
+            logger.exception("Could not clean up expired authentication state")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("startup phase: validating deployment security")
@@ -359,12 +374,16 @@ async def lifespan(_app: FastAPI):
     init_db()
     logger.info("startup phase: ensuring bootstrap administrator")
     ensure_bootstrap_admin()
+    get_repository().cleanup_expired_auth_state()
     logger.info("startup phase: validating persisted security state")
     validate_startup_security(settings, get_repository())
     logger.info("startup phase: reconciling streaming runs")
     gateway_service.reconcile_stream_runs()
     stream_reaper = asyncio.create_task(
         _reconcile_streams_forever(), name="stream-run-reconciler"
+    )
+    auth_reaper = asyncio.create_task(
+        _cleanup_auth_state_forever(), name="auth-state-reaper"
     )
     try:
         if settings.scheduler_enabled:
@@ -383,7 +402,8 @@ async def lifespan(_app: FastAPI):
             yield
     finally:
         stream_reaper.cancel()
-        await asyncio.gather(stream_reaper, return_exceptions=True)
+        auth_reaper.cancel()
+        await asyncio.gather(stream_reaper, auth_reaper, return_exceptions=True)
         if settings.scheduler_enabled:
             await timewheel_scheduler.stop()
 
@@ -608,10 +628,50 @@ async def home() -> RedirectResponse:
     return RedirectResponse("/ui/")
 
 
+_DUMMY_PASSWORD_HASH = hash_password("not-a-valid-account-password")
+
+
+def _consume_auth_budget(kind: str, value: str, limit: int) -> None:
+    window = settings.auth_rate_window_seconds
+    if window <= 0 or limit <= 0:
+        raise RuntimeError("Authentication rate limits must be positive")
+    if not get_repository().consume_pre_auth_limit(
+        kind, pre_auth_key(kind, value), window, limit
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many authentication attempts; try again later",
+            headers={"Retry-After": str(window)},
+        )
+
+
+def _consume_pre_auth_budget(
+    http_request: Request, action: Literal["login", "register"], email: str,
+) -> None:
+    """Check shared DB budgets before expensive password hashing or account lookup.
+
+    The source is the ASGI peer supplied by the server. The packaged Uvicorn
+    entry point disables proxy-header rewriting; other deployments must retain
+    that boundary or explicitly configure and trust their proxy. Only HMAC
+    digests are persisted in the table.
+    """
+    source_limit = (
+        settings.auth_login_source_limit if action == "login"
+        else settings.auth_register_source_limit
+    )
+    limits = (
+        (f"{action}:source", http_request.client.host if http_request.client else "unknown", source_limit),
+        (f"{action}:account", email, settings.auth_login_account_limit),
+    )
+    for kind, value, limit in limits:
+        _consume_auth_budget(kind, value, limit)
+
+
 @app.post("/api/auth/register")
-async def register(request: RegisterRequest) -> dict[str, str]:
+async def register(request: RegisterRequest, http_request: Request) -> dict[str, str]:
     if not settings.allow_signup:
         raise HTTPException(status_code=403, detail="Registration is disabled")
+    _consume_pre_auth_budget(http_request, "register", request.email)
     repository = get_repository()
     if repository.get_user_by_email(request.email):
         raise HTTPException(status_code=409, detail="Email is already registered")
@@ -627,9 +687,13 @@ async def register(request: RegisterRequest) -> dict[str, str]:
 
 
 @app.post("/api/auth/login")
-async def login(request: LoginRequest) -> dict[str, str]:
+async def login(request: LoginRequest, http_request: Request) -> dict[str, str]:
+    _consume_pre_auth_budget(http_request, "login", request.email)
     user = get_repository().get_user_by_email(request.email)
-    if not user or not verify_password(request.password, user["password_hash"]):
+    password_ok = verify_password(
+        request.password, user["password_hash"] if user else _DUMMY_PASSWORD_HASH
+    )
+    if not user or not password_ok:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     return {
         "access_token": create_login_session(user),
@@ -640,13 +704,46 @@ async def login(request: LoginRequest) -> dict[str, str]:
 
 @app.get("/api/auth/me")
 async def me(user: dict = Depends(current_user)) -> dict:
-    return {key: value for key, value in user.items() if key != "password_hash"}
+    return {
+        key: value for key, value in user.items()
+        if key not in {"password_hash", "auth_version"}
+    }
 
 
 @app.post("/api/auth/logout")
 async def logout(http_request: Request, user: dict = Depends(current_user)) -> dict[str, bool]:
     get_repository().revoke_auth_session(http_request.state.auth_token_hash, user["id"])
     return {"revoked": True}
+
+
+@app.post("/api/auth/logout-all")
+async def logout_all(http_request: Request, user: dict = Depends(current_user)) -> dict[str, bool]:
+    revoked = get_repository().revoke_all_auth_sessions(
+        http_request.state.auth_token_hash, user["id"]
+    )
+    if not revoked:
+        raise HTTPException(status_code=401, detail="User session is invalid")
+    return {"revoked": True}
+
+
+@app.post("/api/auth/password")
+async def change_password(
+    request: PasswordChangeRequest,
+    http_request: Request,
+    user: dict = Depends(current_user),
+) -> dict[str, bool]:
+    _consume_auth_budget("password:account", user["id"], settings.auth_password_change_limit)
+    if not verify_password(request.current_password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Current password is invalid")
+    changed = get_repository().change_password_and_revoke_sessions(
+        http_request.state.auth_token_hash,
+        user["id"],
+        user["password_hash"],
+        hash_password(request.new_password),
+    )
+    if not changed:
+        raise HTTPException(status_code=401, detail="Authentication state changed; please log in again")
+    return {"changed": True, "sessions_revoked": True}
 
 
 @app.post("/api/sessions")
@@ -733,7 +830,9 @@ async def chat_stream(
         try:
             async with aclosing(result.chunks):
                 async for event in result.chunks:
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    cursor = event["_stream_cursor"]
+                    payload = {key: value for key, value in event.items() if key != "_stream_cursor"}
+                    yield f"id: {cursor}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
         except ApplicationError as exc:
             yield f"data: {json.dumps({'error': str(exc), 'code': exc.code.value}, ensure_ascii=False)}\n\n"
             return
@@ -743,6 +842,22 @@ async def chat_stream(
         events(),
         media_type="text/event-stream",
         headers={"X-Run-Id": result.run_id, "X-Session-Id": result.session_id},
+    )
+
+
+@app.get("/api/runs/{run_id}/events")
+async def run_stream_events(
+    run_id: str,
+    http_request: Request,
+    response: Response,
+    after: int = Query(0, ge=0, le=2**63 - 1),
+    limit: int = Query(200, ge=1, le=200),
+    tenant: Tenant = Depends(current_tenant),
+) -> dict:
+    """Read one finite page of stored stream events; never resume the producer."""
+    response.headers["Cache-Control"] = "no-store"
+    return gateway_service.replay_stream_events(
+        request_context(http_request, tenant), run_id, after=after, limit=limit
     )
 
 
@@ -1078,7 +1193,10 @@ async def mcp(request: dict, tenant: Tenant = Depends(current_tenant)) -> dict:
 def run() -> None:
     import uvicorn
 
-    uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=settings.debug)
+    uvicorn.run(
+        "app.main:app", host=settings.host, port=settings.port,
+        reload=settings.debug, proxy_headers=False,
+    )
 
 
 if __name__ == "__main__":

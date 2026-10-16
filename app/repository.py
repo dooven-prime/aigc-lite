@@ -111,6 +111,32 @@ def _stream_recovery_hash(attempt_id: str) -> str:
     return sha256(f"stream-reconcile-v1:{attempt_id}".encode()).hexdigest()
 
 
+_MAX_STREAM_EVENTS_PER_RUN = 4096
+_MAX_STREAM_EVENT_PAYLOAD_BYTES = 2 * 1024 * 1024 + 4096
+_MAX_STREAM_REPLAY_PAGE = 200
+_MAX_STREAM_CURSOR = 2**63 - 1
+
+
+class StreamEventLimitError(ValueError):
+    """The durable event ledger reached its per-Run resource bound."""
+
+
+def _stream_event_payload(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        raise ValueError("Stream event payload must be an object")
+    rendered = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    if len(rendered.encode("utf-8")) > _MAX_STREAM_EVENT_PAYLOAD_BYTES:
+        raise StreamEventLimitError("Stream event payload exceeds the size limit")
+    return rendered
+
+
+def _stream_replay_args(after: int, limit: int) -> None:
+    if isinstance(after, bool) or not isinstance(after, int) or not 0 <= after <= _MAX_STREAM_CURSOR:
+        raise ValueError("Stream cursor must be a nonnegative 64-bit integer")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_STREAM_REPLAY_PAGE:
+        raise ValueError("Stream replay limit must be between 1 and 200")
+
+
 def _usage_summary_rows(legacy_rows: Any, receipt_rows: Any) -> dict:
     """Sum rows in Python: SQLite integer SUM can overflow before returning."""
     prompt_tokens = completion_tokens = requests = legacy_requests = 0
@@ -167,6 +193,33 @@ def _admin_authority_claims_match(
     )
 
 
+def _pre_auth_window(
+    kind: str, key_hash: str, window_seconds: int, limit: int,
+) -> tuple[int, int]:
+    """Validate opaque throttle keys and choose the current fixed UTC window."""
+
+    if (
+        not isinstance(kind, str)
+        or not 1 <= len(kind) <= 48
+        or not kind.isascii()
+        or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789_.:-" for char in kind)
+    ):
+        raise ValueError("Invalid pre-auth throttle kind")
+    if (
+        not isinstance(key_hash, str)
+        or len(key_hash) != 64
+        or any(char not in "0123456789abcdef" for char in key_hash)
+    ):
+        raise ValueError("Pre-auth throttle keys must be SHA-256 hex digests")
+    if not isinstance(window_seconds, int) or window_seconds <= 0:
+        raise ValueError("Pre-auth throttle window must be positive")
+    if not isinstance(limit, int) or limit <= 0:
+        raise ValueError("Pre-auth throttle limit must be positive")
+    now_epoch = int(datetime.now(UTC).timestamp())
+    start = now_epoch - now_epoch % window_seconds
+    return start, start + window_seconds
+
+
 class Repository(
     ResearchRepository,
     QualificationRepository,
@@ -210,11 +263,27 @@ class Repository(
 
     def count_users(self) -> int: ...
 
-    def save_auth_session(self, token_hash: str, user_id: str, tenant_id: str, expires_at: str) -> None: ...
+    def save_auth_session(
+        self, token_hash: str, user_id: str, tenant_id: str, expires_at: str,
+        expected_auth_version: int,
+    ) -> bool: ...
 
     def get_auth_session(self, token_hash: str) -> dict | None: ...
 
     def revoke_auth_session(self, token_hash: str, user_id: str) -> bool: ...
+
+    def revoke_all_auth_sessions(self, token_hash: str, user_id: str) -> bool: ...
+
+    def change_password_and_revoke_sessions(
+        self, token_hash: str, user_id: str, expected_password_hash: str,
+        new_password_hash: str,
+    ) -> bool: ...
+
+    def consume_pre_auth_limit(
+        self, kind: str, key_hash: str, window_seconds: int, limit: int,
+    ) -> bool: ...
+
+    def cleanup_expired_auth_state(self) -> None: ...
 
     def search_qualified_claims(
         self, tenant_id: str, profile_id: str, query: str, limit: int = 20
@@ -341,6 +410,14 @@ class Repository(
     ) -> str | None: ...
 
     def get_stream_run_state(self, tenant_id: str, run_id: str) -> dict | None: ...
+
+    def append_stream_event(
+        self, tenant_id: str, run_id: str, payload: dict[str, Any]
+    ) -> int: ...
+
+    def read_stream_events(
+        self, tenant_id: str, run_id: str, *, after: int = 0, limit: int = 200
+    ) -> dict | None: ...
 
     def reconcile_expired_stream_run(
         self, tenant_id: str, run_id: str, *, now: str,
@@ -603,7 +680,8 @@ class SQLiteRepository(
             "SELECT 1 FROM auth_sessions s JOIN users u ON u.id = s.user_id "
             "AND u.tenant_id = s.tenant_id WHERE s.token_hash = ? "
             "AND s.user_id = ? AND s.tenant_id = ? AND s.expires_at > ? "
-            "AND u.role = 'admin' AND u.is_active = 1",
+            "AND u.role = 'admin' AND u.is_active = 1 "
+            "AND s.auth_version = u.auth_version",
             (
                 authority.session_hash,
                 context.principal_id,
@@ -786,7 +864,10 @@ class SQLiteRepository(
                 "INSERT INTO users(id, tenant_id, email, name, password_hash, role, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(value.values()),
             )
-        return {key: item for key, item in value.items() if key != "password_hash"}
+        return {
+            **{key: item for key, item in value.items() if key != "password_hash"},
+            "auth_version": 0,
+        }
 
     def get_user_by_email(self, email: str) -> dict | None:
         with self._connect() as db:
@@ -811,17 +892,35 @@ class SQLiteRepository(
             row = db.execute("SELECT COUNT(*) AS count FROM users").fetchone()
         return int(row["count"])
 
-    def save_auth_session(self, token_hash: str, user_id: str, tenant_id: str, expires_at: str) -> None:
+    def save_auth_session(
+        self, token_hash: str, user_id: str, tenant_id: str, expires_at: str,
+        expected_auth_version: int,
+    ) -> bool:
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            user = db.execute(
+                "SELECT auth_version, is_active, tenant_id FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            if user is None or not user["is_active"] or user["tenant_id"] != tenant_id:
+                return False
+            version = int(user["auth_version"])
+            if version != expected_auth_version:
+                return False
             db.execute(
-                "INSERT INTO auth_sessions VALUES (?, ?, ?, ?, ?)",
-                (token_hash, user_id, tenant_id, expires_at, utc_now()),
+                "INSERT INTO auth_sessions(token_hash, user_id, tenant_id, expires_at, "
+                "created_at, auth_version) VALUES (?, ?, ?, ?, ?, ?)",
+                (token_hash, user_id, tenant_id, expires_at, utc_now(), version),
             )
+        return True
 
     def get_auth_session(self, token_hash: str) -> dict | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT * FROM auth_sessions WHERE token_hash = ? AND expires_at > ?",
+                "SELECT s.* FROM auth_sessions s JOIN users u ON u.id = s.user_id "
+                "AND u.tenant_id = s.tenant_id WHERE s.token_hash = ? "
+                "AND s.expires_at > ? AND u.is_active = 1 "
+                "AND s.auth_version = u.auth_version",
                 (token_hash, utc_now()),
             ).fetchone()
         return dict(row) if row else None
@@ -834,6 +933,74 @@ class SQLiteRepository(
                 (token_hash, user_id),
             )
         return result.rowcount == 1
+
+    def revoke_all_auth_sessions(self, token_hash: str, user_id: str) -> bool:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            session = db.execute(
+                "SELECT 1 FROM auth_sessions s JOIN users u ON u.id = s.user_id "
+                "AND u.tenant_id = s.tenant_id WHERE s.token_hash = ? "
+                "AND s.user_id = ? AND s.expires_at > ? AND u.is_active = 1 "
+                "AND s.auth_version = u.auth_version",
+                (token_hash, user_id, utc_now()),
+            ).fetchone()
+            if session is None:
+                return False
+            db.execute(
+                "UPDATE users SET auth_version = auth_version + 1 WHERE id = ?",
+                (user_id,),
+            )
+            db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+        return True
+
+    def change_password_and_revoke_sessions(
+        self, token_hash: str, user_id: str, expected_password_hash: str,
+        new_password_hash: str,
+    ) -> bool:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            user = db.execute(
+                "SELECT u.password_hash FROM auth_sessions s JOIN users u "
+                "ON u.id = s.user_id AND u.tenant_id = s.tenant_id "
+                "WHERE s.token_hash = ? AND s.user_id = ? AND s.expires_at > ? "
+                "AND u.is_active = 1 AND s.auth_version = u.auth_version",
+                (token_hash, user_id, utc_now()),
+            ).fetchone()
+            if user is None or user["password_hash"] != expected_password_hash:
+                return False
+            db.execute(
+                "UPDATE users SET password_hash = ?, auth_version = auth_version + 1 "
+                "WHERE id = ?",
+                (new_password_hash, user_id),
+            )
+            db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+        return True
+
+    def consume_pre_auth_limit(
+        self, kind: str, key_hash: str, window_seconds: int, limit: int,
+    ) -> bool:
+        window_start, expires_at = _pre_auth_window(
+            kind, key_hash, window_seconds, limit
+        )
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            result = db.execute(
+                "INSERT INTO pre_auth_rate_limits(kind, key_hash, window_start, "
+                "window_seconds, expires_at, attempts) VALUES (?, ?, ?, ?, ?, 1) "
+                "ON CONFLICT(kind, key_hash, window_start, window_seconds) "
+                "DO UPDATE SET attempts = attempts + 1 WHERE attempts < ?",
+                (kind, key_hash, window_start, window_seconds, expires_at, limit),
+            )
+        return result.rowcount == 1
+
+    def cleanup_expired_auth_state(self) -> None:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (utc_now(),))
+            db.execute(
+                "DELETE FROM pre_auth_rate_limits WHERE expires_at <= ?",
+                (int(datetime.now(UTC).timestamp()),),
+            )
 
     def save_model_config(self, tenant_id: str, values: dict[str, Any]) -> dict:
         credential_reference = values["credential_reference"]
@@ -1306,6 +1473,7 @@ class SQLiteRepository(
             "goal_protocol_sha256": None,
             "goal_sha256": None,
             "goal_json": None,
+            "stream_replay_available": 1 if stream_deadline is not None else 0,
         }
         with self._connect() as db:
             if goal_binding is not None:
@@ -1326,8 +1494,8 @@ class SQLiteRepository(
                 "stream_state, stream_start_deadline_at, stream_claimed_at, "
                 "stream_lease_until, stream_cancel_requested_at, goal_contract, "
                 "goal_protocol_id, goal_protocol_version, goal_protocol_sha256, "
-                "goal_sha256, goal_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "goal_sha256, goal_json, stream_replay_available) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(value.values()),
             )
         return value
@@ -1478,6 +1646,21 @@ class SQLiteRepository(
                 ":status, :input_content, :output_content, :metadata, :created_at)",
                 step,
             )
+        event_sequence = db.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM stream_events "
+            "WHERE tenant_id = ? AND run_id = ?", (tenant_id, run_id),
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO stream_events(tenant_id, run_id, sequence, event_type, "
+            "payload_json, created_at) VALUES (?, ?, ?, 'terminal', ?, ?)",
+            (
+                tenant_id, run_id, event_sequence,
+                _stream_event_payload({
+                    "event": "terminal", "status": status, "error_code": error_code,
+                }),
+                closed_at,
+            ),
+        )
         return True
 
     def close_stream_run(
@@ -1529,6 +1712,78 @@ class SQLiteRepository(
                 (tenant_id, run_id),
             ).fetchone()
         return dict(row) if row else None
+
+    def append_stream_event(
+        self, tenant_id: str, run_id: str, payload: dict[str, Any]
+    ) -> int:
+        rendered = _stream_event_payload(payload)
+        now = _stream_time(utc_now())
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            run = db.execute(
+                "SELECT status, stream_state, stream_lease_until, "
+                "stream_cancel_requested_at FROM agent_runs "
+                "WHERE tenant_id = ? AND id = ?", (tenant_id, run_id),
+            ).fetchone()
+            if (
+                run is None or run["status"] != "running"
+                or run["stream_state"] != "claimed"
+                or run["stream_cancel_requested_at"] is not None
+                or run["stream_lease_until"] is None
+                or run["stream_lease_until"] <= now
+            ):
+                raise ValueError("Stream Run is not active for event append")
+            sequence = db.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM stream_events "
+                "WHERE tenant_id = ? AND run_id = ?", (tenant_id, run_id),
+            ).fetchone()[0]
+            if sequence > _MAX_STREAM_EVENTS_PER_RUN:
+                raise StreamEventLimitError("Stream event count exceeds the limit")
+            db.execute(
+                "INSERT INTO stream_events(tenant_id, run_id, sequence, "
+                "event_type, payload_json, created_at) "
+                "VALUES (?, ?, ?, 'data', ?, ?)",
+                (tenant_id, run_id, sequence, rendered, now),
+            )
+        return sequence
+
+    def read_stream_events(
+        self, tenant_id: str, run_id: str, *, after: int = 0, limit: int = 200
+    ) -> dict | None:
+        _stream_replay_args(after, limit)
+        with self._connect() as db:
+            db.execute("BEGIN")
+            run = db.execute(
+                "SELECT id, session_id, status, error_code, stream_replay_available "
+                "FROM agent_runs "
+                "WHERE tenant_id = ? AND id = ? AND stream_state IS NOT NULL",
+                (tenant_id, run_id),
+            ).fetchone()
+            if run is None:
+                return None
+            rows = db.execute(
+                "SELECT sequence, event_type, payload_json FROM stream_events "
+                "WHERE tenant_id = ? AND run_id = ? AND sequence > ? "
+                "ORDER BY sequence LIMIT ?",
+                (tenant_id, run_id, after, limit + 1),
+            ).fetchall()
+        selected = rows[:limit]
+        available = bool(run["stream_replay_available"])
+        return {
+            "id": run["id"], "session_id": run["session_id"],
+            "status": run["status"], "error_code": run["error_code"],
+            "replay_available": available,
+            "replay_boundary": None if available else "pre_0031",
+            "events": [
+                {
+                    "cursor": row["sequence"], "event_type": row["event_type"],
+                    "data": json.loads(row["payload_json"]),
+                }
+                for row in selected
+            ],
+            "next_cursor": selected[-1]["sequence"] if selected else after,
+            "has_more": len(rows) > limit,
+        }
 
     def reconcile_expired_stream_run(
         self, tenant_id: str, run_id: str, *, now: str,
@@ -2363,18 +2618,31 @@ class PostgresRepository(
 
         if not _admin_authority_claims_match(context, authority, scope):
             raise AuthorityDeniedError(scope)
+        user = connection.execute(
+            text(
+                "SELECT auth_version FROM users WHERE id = :user_id "
+                "AND tenant_id = :tenant_id AND role = 'admin' AND is_active = 1 "
+                "FOR UPDATE"
+            ),
+            {
+                "user_id": context.principal_id,
+                "tenant_id": context.workspace_id,
+            },
+        ).mappings().first()
+        if user is None:
+            raise AuthorityDeniedError(scope)
         active = connection.execute(
             text(
-                "SELECT s.token_hash FROM auth_sessions s JOIN users u "
-                "ON u.id = s.user_id AND u.tenant_id = s.tenant_id "
-                "WHERE s.token_hash = :token_hash AND s.user_id = :user_id "
-                "AND s.tenant_id = :tenant_id AND s.expires_at > :now "
-                "AND u.role = 'admin' AND u.is_active = 1 FOR UPDATE OF s, u"
+                "SELECT 1 FROM auth_sessions WHERE token_hash = :token_hash "
+                "AND user_id = :user_id AND tenant_id = :tenant_id "
+                "AND expires_at > :now AND auth_version = :auth_version "
+                "FOR UPDATE"
             ),
             {
                 "token_hash": authority.session_hash,
                 "user_id": context.principal_id,
                 "tenant_id": context.workspace_id,
+                "auth_version": user["auth_version"],
                 "now": utc_now(),
             },
         ).first()
@@ -2505,7 +2773,10 @@ class PostgresRepository(
             "INSERT INTO users(id, tenant_id, email, name, password_hash, role, created_at) "
             "VALUES (:id, :tenant_id, :email, :name, :password_hash, :role, :created_at)", value,
         )
-        return {key: item for key, item in value.items() if key != "password_hash"}
+        return {
+            **{key: item for key, item in value.items() if key != "password_hash"},
+            "auth_version": 0,
+        }
 
     def get_user_by_email(self, email: str) -> dict | None:
         return self._one("SELECT * FROM users WHERE email = :email AND is_active = 1", {"email": email.lower()})
@@ -2523,21 +2794,49 @@ class PostgresRepository(
         row = self._one("SELECT COUNT(*) AS count FROM users")
         return int(row["count"]) if row else 0
 
-    def save_auth_session(self, token_hash: str, user_id: str, tenant_id: str, expires_at: str) -> None:
-        self._execute(
-            "INSERT INTO auth_sessions VALUES (:token_hash, :user_id, :tenant_id, :expires_at, :created_at)",
-            {
-                "token_hash": token_hash,
-                "user_id": user_id,
-                "tenant_id": tenant_id,
-                "expires_at": expires_at,
-                "created_at": utc_now(),
-            },
-        )
+    def save_auth_session(
+        self, token_hash: str, user_id: str, tenant_id: str, expires_at: str,
+        expected_auth_version: int,
+    ) -> bool:
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            user = connection.execute(
+                text(
+                    "SELECT auth_version, is_active, tenant_id FROM users "
+                    "WHERE id = :user_id FOR UPDATE"
+                ),
+                {"user_id": user_id},
+            ).mappings().first()
+            if user is None or not user["is_active"] or user["tenant_id"] != tenant_id:
+                return False
+            version = int(user["auth_version"])
+            if version != expected_auth_version:
+                return False
+            connection.execute(
+                text(
+                    "INSERT INTO auth_sessions(token_hash, user_id, tenant_id, "
+                    "expires_at, created_at, auth_version) "
+                    "VALUES (:token_hash, :user_id, :tenant_id, :expires_at, "
+                    ":created_at, :auth_version)"
+                ),
+                {
+                    "token_hash": token_hash,
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                    "expires_at": expires_at,
+                    "created_at": utc_now(),
+                    "auth_version": version,
+                },
+            )
+        return True
 
     def get_auth_session(self, token_hash: str) -> dict | None:
         return self._one(
-            "SELECT * FROM auth_sessions WHERE token_hash = :token_hash AND expires_at > :now",
+            "SELECT s.* FROM auth_sessions s JOIN users u ON u.id = s.user_id "
+            "AND u.tenant_id = s.tenant_id WHERE s.token_hash = :token_hash "
+            "AND s.expires_at > :now AND u.is_active = 1 "
+            "AND s.auth_version = u.auth_version",
             {"token_hash": token_hash, "now": utc_now()},
         )
 
@@ -2547,6 +2846,131 @@ class PostgresRepository(
             {"token_hash": token_hash, "user_id": user_id},
         )
         return result.rowcount == 1
+
+    def revoke_all_auth_sessions(self, token_hash: str, user_id: str) -> bool:
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            user = connection.execute(
+                text(
+                    "SELECT tenant_id, auth_version FROM users WHERE id = :user_id "
+                    "AND is_active = 1 FOR UPDATE"
+                ),
+                {"user_id": user_id},
+            ).mappings().first()
+            if user is None:
+                return False
+            session = connection.execute(
+                text(
+                    "SELECT 1 FROM auth_sessions WHERE token_hash = :token_hash "
+                    "AND user_id = :user_id AND tenant_id = :tenant_id "
+                    "AND expires_at > :now AND auth_version = :auth_version "
+                    "FOR UPDATE"
+                ),
+                {
+                    "token_hash": token_hash, "user_id": user_id,
+                    "tenant_id": user["tenant_id"],
+                    "auth_version": user["auth_version"], "now": utc_now(),
+                },
+            ).first()
+            if session is None:
+                return False
+            connection.execute(
+                text("UPDATE users SET auth_version = auth_version + 1 WHERE id = :user_id"),
+                {"user_id": user_id},
+            )
+            connection.execute(
+                text("DELETE FROM auth_sessions WHERE user_id = :user_id"),
+                {"user_id": user_id},
+            )
+        return True
+
+    def change_password_and_revoke_sessions(
+        self, token_hash: str, user_id: str, expected_password_hash: str,
+        new_password_hash: str,
+    ) -> bool:
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            user = connection.execute(
+                text(
+                    "SELECT tenant_id, auth_version, password_hash FROM users "
+                    "WHERE id = :user_id AND is_active = 1 FOR UPDATE"
+                ),
+                {"user_id": user_id},
+            ).mappings().first()
+            if user is None or user["password_hash"] != expected_password_hash:
+                return False
+            session = connection.execute(
+                text(
+                    "SELECT 1 FROM auth_sessions WHERE token_hash = :token_hash "
+                    "AND user_id = :user_id AND tenant_id = :tenant_id "
+                    "AND expires_at > :now AND auth_version = :auth_version "
+                    "FOR UPDATE"
+                ),
+                {
+                    "token_hash": token_hash, "user_id": user_id,
+                    "tenant_id": user["tenant_id"],
+                    "auth_version": user["auth_version"], "now": utc_now(),
+                },
+            ).first()
+            if session is None:
+                return False
+            connection.execute(
+                text(
+                    "UPDATE users SET password_hash = :password_hash, "
+                    "auth_version = auth_version + 1 WHERE id = :user_id"
+                ),
+                {"password_hash": new_password_hash, "user_id": user_id},
+            )
+            connection.execute(
+                text("DELETE FROM auth_sessions WHERE user_id = :user_id"),
+                {"user_id": user_id},
+            )
+        return True
+
+    def consume_pre_auth_limit(
+        self, kind: str, key_hash: str, window_seconds: int, limit: int,
+    ) -> bool:
+        from sqlalchemy import text
+
+        window_start, expires_at = _pre_auth_window(
+            kind, key_hash, window_seconds, limit
+        )
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                text(
+                    "INSERT INTO pre_auth_rate_limits(kind, key_hash, window_start, "
+                    "window_seconds, expires_at, attempts) "
+                    "VALUES (:kind, :key_hash, :window_start, :window_seconds, "
+                    ":expires_at, 1) "
+                    "ON CONFLICT(kind, key_hash, window_start, window_seconds) "
+                    "DO UPDATE SET attempts = pre_auth_rate_limits.attempts + 1 "
+                    "WHERE pre_auth_rate_limits.attempts < :limit RETURNING attempts"
+                ),
+                {
+                    "kind": kind,
+                    "key_hash": key_hash,
+                    "window_start": window_start,
+                    "window_seconds": window_seconds,
+                    "expires_at": expires_at,
+                    "limit": limit,
+                },
+            ).first()
+        return result is not None
+
+    def cleanup_expired_auth_state(self) -> None:
+        from sqlalchemy import text
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM auth_sessions WHERE expires_at <= :now"),
+                {"now": utc_now()},
+            )
+            connection.execute(
+                text("DELETE FROM pre_auth_rate_limits WHERE expires_at <= :now"),
+                {"now": int(datetime.now(UTC).timestamp())},
+            )
 
     def save_model_config(self, tenant_id: str, values: dict[str, Any]) -> dict:
         credential_reference = values["credential_reference"]
@@ -3011,6 +3435,7 @@ class PostgresRepository(
             "goal_protocol_sha256": None,
             "goal_sha256": None,
             "goal_json": None,
+            "stream_replay_available": 1 if stream_deadline is not None else 0,
         }
         from sqlalchemy import text
 
@@ -3033,13 +3458,15 @@ class PostgresRepository(
                     "error_code, created_at, completed_at, stream_state, stream_start_deadline_at, "
                     "stream_claimed_at, stream_lease_until, stream_cancel_requested_at, "
                     "goal_contract, goal_protocol_id, goal_protocol_version, "
-                    "goal_protocol_sha256, goal_sha256, goal_json) "
+                    "goal_protocol_sha256, goal_sha256, goal_json, "
+                    "stream_replay_available) "
                     "VALUES (:id, :tenant_id, :session_id, :request_id, :status, :requested_model, "
                     ":selected_model, :capability_set_id, :capability_policy_hash, :error_code, "
                     ":created_at, :completed_at, :stream_state, :stream_start_deadline_at, "
                     ":stream_claimed_at, :stream_lease_until, :stream_cancel_requested_at, "
                     ":goal_contract, :goal_protocol_id, :goal_protocol_version, "
-                    ":goal_protocol_sha256, :goal_sha256, :goal_json)"
+                    ":goal_protocol_sha256, :goal_sha256, :goal_json, "
+                    ":stream_replay_available)"
                 ),
                 value,
             )
@@ -3227,6 +3654,25 @@ class PostgresRepository(
                      ":metadata, :created_at)"),
                 step,
             )
+        event_sequence = connection.execute(
+            text("SELECT COALESCE(MAX(sequence), 0) + 1 FROM stream_events "
+                 "WHERE tenant_id = :tenant_id AND run_id = :run_id"),
+            {"tenant_id": tenant_id, "run_id": run_id},
+        ).scalar_one()
+        connection.execute(
+            text("INSERT INTO stream_events(tenant_id, run_id, sequence, "
+                 "event_type, payload_json, created_at) VALUES "
+                 "(:tenant_id, :run_id, :sequence, 'terminal', :payload_json, "
+                 ":created_at)"),
+            {
+                "tenant_id": tenant_id, "run_id": run_id,
+                "sequence": event_sequence,
+                "payload_json": _stream_event_payload({
+                    "event": "terminal", "status": status, "error_code": error_code,
+                }),
+                "created_at": closed_at,
+            },
+        )
         return True
 
     def close_stream_run(
@@ -3277,6 +3723,95 @@ class PostgresRepository(
             "AND stream_state IS NOT NULL",
             {"tenant_id": tenant_id, "run_id": run_id},
         )
+
+    def append_stream_event(
+        self, tenant_id: str, run_id: str, payload: dict[str, Any]
+    ) -> int:
+        from sqlalchemy import text
+
+        rendered = _stream_event_payload(payload)
+        now = _stream_time(utc_now())
+        with self.engine.begin() as connection:
+            run = connection.execute(
+                text("SELECT status, stream_state, stream_lease_until, "
+                     "stream_cancel_requested_at FROM agent_runs "
+                     "WHERE tenant_id = :tenant_id AND id = :run_id FOR UPDATE"),
+                {"tenant_id": tenant_id, "run_id": run_id},
+            ).mappings().first()
+            if (
+                run is None or run["status"] != "running"
+                or run["stream_state"] != "claimed"
+                or run["stream_cancel_requested_at"] is not None
+                or run["stream_lease_until"] is None
+                or run["stream_lease_until"] <= now
+            ):
+                raise ValueError("Stream Run is not active for event append")
+            sequence = connection.execute(
+                text("SELECT COALESCE(MAX(sequence), 0) + 1 FROM stream_events "
+                     "WHERE tenant_id = :tenant_id AND run_id = :run_id"),
+                {"tenant_id": tenant_id, "run_id": run_id},
+            ).scalar_one()
+            if sequence > _MAX_STREAM_EVENTS_PER_RUN:
+                raise StreamEventLimitError("Stream event count exceeds the limit")
+            connection.execute(
+                text("INSERT INTO stream_events(tenant_id, run_id, sequence, "
+                     "event_type, payload_json, created_at) VALUES "
+                     "(:tenant_id, :run_id, :sequence, 'data', :payload_json, "
+                     ":created_at)"),
+                {
+                    "tenant_id": tenant_id, "run_id": run_id,
+                    "sequence": sequence, "payload_json": rendered,
+                    "created_at": now,
+                },
+            )
+        return sequence
+
+    def read_stream_events(
+        self, tenant_id: str, run_id: str, *, after: int = 0, limit: int = 200
+    ) -> dict | None:
+        from sqlalchemy import text
+
+        _stream_replay_args(after, limit)
+        with self.engine.connect().execution_options(
+            isolation_level="REPEATABLE READ"
+        ) as connection:
+            with connection.begin():
+                run = connection.execute(
+                    text("SELECT id, session_id, status, error_code, "
+                         "stream_replay_available "
+                         "FROM agent_runs WHERE tenant_id = :tenant_id "
+                         "AND id = :run_id AND stream_state IS NOT NULL"),
+                    {"tenant_id": tenant_id, "run_id": run_id},
+                ).mappings().first()
+                if run is None:
+                    return None
+                rows = connection.execute(
+                    text("SELECT sequence, event_type, payload_json "
+                         "FROM stream_events WHERE tenant_id = :tenant_id "
+                         "AND run_id = :run_id AND sequence > :after "
+                         "ORDER BY sequence LIMIT :page_size"),
+                    {
+                        "tenant_id": tenant_id, "run_id": run_id,
+                        "after": after, "page_size": limit + 1,
+                    },
+                ).mappings().all()
+        selected = rows[:limit]
+        available = bool(run["stream_replay_available"])
+        return {
+            "id": run["id"], "session_id": run["session_id"],
+            "status": run["status"], "error_code": run["error_code"],
+            "replay_available": available,
+            "replay_boundary": None if available else "pre_0031",
+            "events": [
+                {
+                    "cursor": row["sequence"], "event_type": row["event_type"],
+                    "data": json.loads(row["payload_json"]),
+                }
+                for row in selected
+            ],
+            "next_cursor": selected[-1]["sequence"] if selected else after,
+            "has_more": len(rows) > limit,
+        }
 
     def reconcile_expired_stream_run(
         self, tenant_id: str, run_id: str, *, now: str,

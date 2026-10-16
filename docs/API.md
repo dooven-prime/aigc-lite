@@ -13,6 +13,8 @@ configuration, and deployment constraints are documented separately in
 - `POST /api/auth/login`：创建登录 session
 - `GET /api/auth/me`：读取当前登录身份和角色
 - `POST /api/auth/logout`：撤销当前 bearer 登录 session（其他 session 不受影响）
+- `POST /api/auth/logout-all`：原子撤销该用户全部登录 session；并发登录按认证版本拒绝陈旧会话
+- `POST /api/auth/password`：核对当前密码，修改密码并撤销全部 session；调用者需重新登录
 - `GET|POST /api/sessions`：创建和列出会话
 - `GET /api/sessions/{session_id}`：读取当前租户会话及消息
 - `POST /api/chat`：同步 Agent 对话
@@ -20,8 +22,9 @@ configuration, and deployment constraints are documented separately in
 - `GET /api/chat/capability-sets`：列出服务端注册的 Chat capability set、版本与内容哈希
 - `GET /api/runs`：列出当前租户的 Agent 运行记录
 - `GET /api/runs/{run_id}`：读取运行详情和步骤
+- `GET /api/runs/{run_id}/events`：按游标分页读取当前 workspace 的 SSE 事件和终态快照
 - `GET /api/runs/{run_id}/ledger-projection`：只读导出宿主账本快照、来源行摘要与执行不确定性；不判定研究证据或授权有效性
-- `POST /api/runs/{run_id}/cancel`：取消当前进程中正在执行的 Run
+- `POST /api/runs/{run_id}/cancel`：持久请求取消当前 workspace 的活动 Run
 - `GET /api/artifacts`：列出当前 workspace 的产物，可按 `run_id` 过滤
 - `GET /api/artifacts/{artifact_id}`：读取产物及其 Citation
 - `GET /api/evidence/protocols`：列出当前 workspace 的证据协议，可按 `profile` 过滤
@@ -130,10 +133,27 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 Artifact；不会调用 `/api/knowledge/upload`，不会自动进入知识索引或取得 qualification。
 `/api/chat/stream` 以 POST SSE 返回增量 `{"content":"...","turn":1}` 和脱敏的
 `{"event":"step","sequence":1,"kind":"tool","name":"...","status":"..."}`；头部提供
-`X-Run-Id` 和 `X-Session-Id`；取消使用 `POST /api/runs/{run_id}/cancel`。
+`X-Run-Id` 和 `X-Session-Id`；每个增量/步骤帧的 `id:` 是该 Run 内递增的持久游标。
+取消使用 `POST /api/runs/{run_id}/cancel`。
 同步与流式端点共用有界 Agent Tool Catalog 循环、预算、Run/Step 和能力决策。
 `turn` 标识模型轮次；工具步骤事件不包含参数、结果或凭据。最终 `[DONE]` 只在成功时发送，
 错误使用现有 `{"error":"...","code":"..."}` 事件。
+
+`GET /api/runs/{run_id}/events?after=0&limit=200` 返回有限 JSON 快照：
+`{id,session_id,status,error_code,replay_available,replay_boundary,events,next_cursor,has_more}`。
+`events` 中每项含
+`cursor`、`event_type` (`data`/`terminal`) 和 JSON `data`；`data` 类型保存原 SSE
+事件内容，`terminal` 类型保存 Run 的最终状态。使用上页
+`next_cursor` 作为下一页 `after`，只返回游标更大的事件。`limit` 为 1–200；
+终态记录与 Run 关闭在同一事务中提交，包含 `status` 和 `error_code`。
+接口对别的 workspace、非流式 Run 和不存在的 Run 返回同样的 404。
+读取活动 Run 只返回当前快照，不领取、继续或取消执行；原 POST 断连仍取消其 worker。
+单个 Run 最多保存 4096 个增量/步骤事件，之后流式执行以稳定错误终止，终态另存一项。
+升级前创建的流式 Run 标为 `replay_available:false`、`replay_boundary:"pre_0031"`：
+已有增量无法补录，即使该 Run 升级后才结束并出现终态事件，也不能视为完整回放。
+增量内容是额外持久化的敏感 workspace 数据，失败或取消前的部分输出也会保留；
+它不同于脱敏的 Step 元数据。当前没有事件专用 TTL 或清理接口，数据库和备份应按
+同等级敏感数据管理。
 
 `chat.delegated.v1` 必须由拥有 `tools:write` 的已认证调用方显式选择；它不会因为 prompt、RAG
 文档或模型输出而自动启用。该集合只是允许工具进入候选面：每个远程 MCP tool，以及任何写入、
